@@ -1,0 +1,16 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/RelayLink.Agent/RelayLink.Agent.csproj" />
+    <Project Path="src/RelayLink.Protocol/RelayLink.Protocol.csproj" />
+    <Project Path="src/RelayLink.Server/RelayLink.Server.csproj" />
+    <Project Path="src/RelayLink.Transport/RelayLink.Transport.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/RelayLink.IntegrationTests/RelayLink.IntegrationTests.csproj" />
+    <Project Path="tests/RelayLink.UnitTests/RelayLink.UnitTests.csproj" />
+  </Folder>
+  <Folder Name="/tools/">
+    <Project Path="tools/RelayLink.SimulatedTarget/RelayLink.SimulatedTarget.csproj" />
+    <Project Path="tools/RelayLink.SimulatedCaller/RelayLink.SimulatedCaller.csproj" />
+  </Folder>
+</Solution>

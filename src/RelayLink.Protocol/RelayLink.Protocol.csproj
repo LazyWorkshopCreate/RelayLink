@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>RelayLink.Protocol</AssemblyName>
+    <RootNamespace>RelayLink.Protocol</RootNamespace>
+  </PropertyGroup>
+</Project>

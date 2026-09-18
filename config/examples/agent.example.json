@@ -1,0 +1,16 @@
+{
+  "serverHost": "tunnel.example.com",
+  "serverPort": 7443,
+  "useTls": true,
+  "clientId": "shanghai-01",
+  "secret": "REPLACE_WITH_SAME_CLIENT_SECRET",
+  "trustedCaPemPath": "C:/ProgramData/RelayLink/tls/root-ca.pem",
+  "outboundPortRangeStart": 20000,
+  "outboundPortRangeEnd": 59999,
+  "dashboardPort": 18081,
+  "reconnect": {
+    "initialDelaySeconds": 1,
+    "maxDelaySeconds": 30,
+    "permanentErrorDelaySeconds": 60
+  }
+}

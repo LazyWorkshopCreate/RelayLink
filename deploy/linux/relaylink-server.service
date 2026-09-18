@@ -1,0 +1,20 @@
+[Unit]
+Description=RelayLink TCP Tunnel Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=relaylink
+Group=relaylink
+WorkingDirectory=/opt/relaylink/server
+ExecStart=/opt/relaylink/server/RelayLink.Server --config /etc/relaylink/server.json
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=40
+LimitNOFILE=16384
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

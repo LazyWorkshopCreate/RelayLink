@@ -1,0 +1,176 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Validate version tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Parse version
+        id: version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v([0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.-]+)?)$ ]]; then
+            echo "Expected a version tag such as v1.2.3 or v1.2.3-rc.1" >&2
+            exit 1
+          fi
+          echo "version=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
+
+  verify:
+    name: Verify release source
+    needs: prepare
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  package-linux:
+    name: Package Linux Server
+    needs: [prepare, verify]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v6
+        id: dotnet
+        with:
+          dotnet-version: 10.0.x
+          dotnet-quality: ga
+      - name: Select stable .NET SDK
+        run: dotnet new globaljson --sdk-version "${{ steps.dotnet.outputs.dotnet-version }}" --roll-forward disable
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          package-manager-cache: false
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11.19.0
+          run_install: false
+      - name: Install frontend dependencies
+        run: pnpm --dir src/RelayLink.AdminWeb install --frozen-lockfile
+      - name: Restore Server for linux-x64
+        run: dotnet restore src/RelayLink.Server/RelayLink.Server.csproj --runtime linux-x64 --configfile NuGet.Config
+      - name: Publish self-contained Server
+        run: dotnet publish src/RelayLink.Server/RelayLink.Server.csproj --configuration Release --runtime linux-x64 --self-contained true --no-restore --output artifacts/publish/linux-x64/RelayLink.Server
+      - name: Archive Server
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          test -f artifacts/publish/linux-x64/RelayLink.Server/wwwroot/index.html
+          mkdir -p artifacts/release
+          tar -C artifacts/publish/linux-x64/RelayLink.Server -czf "artifacts/release/RelayLink-Server-linux-x64-${RELEASE_VERSION}.tar.gz" .
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-server-linux-x64
+          path: artifacts/release/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  package-windows:
+    name: Package Windows Server and Agent
+    needs: [prepare, verify]
+    runs-on: windows-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v6
+        id: dotnet
+        with:
+          dotnet-version: 10.0.x
+          dotnet-quality: ga
+      - name: Select stable .NET SDK
+        run: dotnet new globaljson --sdk-version "${{ steps.dotnet.outputs.dotnet-version }}" --roll-forward disable
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          package-manager-cache: false
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11.19.0
+          run_install: false
+      - name: Install frontend dependencies
+        run: pnpm --dir src/RelayLink.AdminWeb install --frozen-lockfile
+      - name: Publish self-contained Server
+        run: ./scripts/publish.ps1 -RuntimeIdentifier win-x64 -Component Server
+      - name: Archive Server
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          if (-not (Test-Path 'artifacts/publish/win-x64/RelayLink.Server/wwwroot/index.html')) { throw 'Management UI is missing from Server publish output.' }
+          New-Item -ItemType Directory -Path 'artifacts/release' -Force | Out-Null
+          Compress-Archive -Path 'artifacts/publish/win-x64/RelayLink.Server/*' -DestinationPath "artifacts/release/RelayLink-Server-win-x64-$env:RELEASE_VERSION.zip"
+      - name: Install verified Inno Setup compiler for this job
+        run: |
+          $installer = Join-Path $env:RUNNER_TEMP 'innosetup-6.7.3.exe'
+          $compilerDirectory = Join-Path $env:RUNNER_TEMP 'InnoSetup'
+          Invoke-WebRequest -Uri 'https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-6.7.3.exe' -OutFile $installer
+          $signature = Get-AuthenticodeSignature -LiteralPath $installer
+          if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'CN=Pyrsys B\.V\.') { throw 'Inno Setup publisher signature verification failed.' }
+          $process = Start-Process -FilePath $installer -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/PORTABLE=1', "/DIR=$compilerDirectory") -Wait -PassThru -WindowStyle Hidden
+          if ($process.ExitCode -ne 0) { throw "Inno Setup installation failed: $($process.ExitCode)" }
+          if (-not (Test-Path -LiteralPath (Join-Path $compilerDirectory 'ISCC.exe'))) { throw 'ISCC.exe was not installed.' }
+          "INNO_COMPILER=$(Join-Path $compilerDirectory 'ISCC.exe')" >> $env:GITHUB_ENV
+      - name: Build Agent installer
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: ./scripts/build-agent-installer.ps1 -Version $env:RELEASE_VERSION -InnoCompiler $env:INNO_COMPILER
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-server-win-x64
+          path: artifacts/release/*.zip
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-agent-installer-win-x64
+          path: artifacts/installer/RelayLink-Agent-win-x64-*.exe
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish GitHub Release
+    needs: [prepare, package-linux, package-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          path: release-assets
+          merge-multiple: true
+      - name: Check assets and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          shopt -s nullglob
+          assets=(release-assets/*)
+          if (( ${#assets[@]} != 3 )); then
+            echo "Expected Linux Server, Windows Server and Agent installer assets; found ${#assets[@]}" >&2
+            exit 1
+          fi
+          sha256sum "${assets[@]}" | sed 's#release-assets/##' > release-assets/SHA256SUMS
+          release_flags=()
+          if [[ "$RELEASE_TAG" == *-* ]]; then release_flags+=(--prerelease); fi
+          gh release create "$RELEASE_TAG" release-assets/* --verify-tag --generate-notes "${release_flags[@]}"

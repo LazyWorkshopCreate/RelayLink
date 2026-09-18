@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "tunnel": {
+    "listenAddress": "0.0.0.0",
+    "port": 7443,
+    "tlsEnabled": true,
+    "certificatePemPath": "/etc/relaylink/tls/fullchain.pem",
+    "privateKeyPemPath": "/etc/relaylink/tls/privkey.pem",
+    "handshakeTimeoutSeconds": 10,
+    "heartbeatIntervalSeconds": 15,
+    "heartbeatTimeoutSeconds": 45
+  },
+  "dashboard": {
+    "listenAddress": "10.20.0.10",
+    "port": 18080,
+    "refreshSeconds": 5,
+    "admin": {
+      "username": "admin",
+      "passwordHash": "PBKDF2-SHA256$210000$REPLACE_WITH_BASE64_SALT$REPLACE_WITH_BASE64_HASH",
+      "sessionLifetimeMinutes": 60
+    }
+  },
+  "clientsDirectory": "/etc/relaylink/clients",
+  "history": {
+    "enabled": true,
+    "filePath": "/var/lib/relaylink/traffic-history.jsonl",
+    "sampleIntervalSeconds": 60,
+    "retentionDays": 30
+  },
+  "limits": {
+    "maxConnections": 2000,
+    "maxPendingConnections": 200,
+    "maxUnauthenticatedConnections": 100,
+    "maxChannelsPerClient": 100,
+    "openTimeoutSeconds": 20,
+    "blockedWriteTimeoutSeconds": 120,
+    "halfCloseDrainTimeoutSeconds": 300
+  }
+}

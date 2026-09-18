@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <AssemblyName>RelayLink.Server</AssemblyName>
+    <RootNamespace>RelayLink.Server</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../RelayLink.Protocol/RelayLink.Protocol.csproj" />
+    <ProjectReference Include="../RelayLink.Transport/RelayLink.Transport.csproj" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.2" />
+  </ItemGroup>
+  <Target Name="BuildAdminWeb" BeforeTargets="Build;Publish">
+    <Exec Condition="'$(SkipAdminWebBuild)' != 'true'" Command="pnpm --dir &quot;$(MSBuildProjectDirectory)/../RelayLink.AdminWeb&quot; build" />
+  </Target>
+  <Target Name="CopyAdminWebToBuild" AfterTargets="Build" DependsOnTargets="BuildAdminWeb">
+    <ItemGroup>
+      <AdminWebFile Include="$(MSBuildProjectDirectory)/../RelayLink.AdminWeb/dist/**/*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(AdminWebFile)" DestinationFiles="@(AdminWebFile->'$(TargetDir)wwwroot/%(RecursiveDir)%(Filename)%(Extension)')" />
+  </Target>
+  <Target Name="CopyAdminWebToPublish" AfterTargets="Publish" DependsOnTargets="BuildAdminWeb">
+    <ItemGroup>
+      <AdminWebPublishFile Include="$(MSBuildProjectDirectory)/../RelayLink.AdminWeb/dist/**/*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(AdminWebPublishFile)" DestinationFiles="@(AdminWebPublishFile->'$(PublishDir)wwwroot/%(RecursiveDir)%(Filename)%(Extension)')" />
+  </Target>
+</Project>

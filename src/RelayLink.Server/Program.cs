@@ -1,0 +1,288 @@
+using System.Net;
+using RelayLink.Server.Configuration;
+using RelayLink.Server.Runtime;
+
+var parsed = ParseArguments(args);
+var loader = new ConfigurationLoader();
+LoadedConfiguration loaded;
+try
+{
+    loaded = loader.Load(parsed.ConfigurationPath);
+}
+catch (ConfigurationException exception)
+{
+    Console.Error.WriteLine($"Configuration validation failed: {exception.Message}");
+    return 2;
+}
+
+if (parsed.CheckOnly)
+{
+    Console.WriteLine("Configuration validation succeeded.");
+    return 0;
+}
+
+var options = new WebApplicationOptions { Args = args, ContentRootPath = AppContext.BaseDirectory };
+var builder = WebApplication.CreateBuilder(options);
+builder.Host.UseWindowsService();
+builder.Logging.ClearProviders();
+builder.Logging.AddJsonConsole(console => console.IncludeScopes = true);
+builder.Services.Configure<HostOptions>(options => options.ShutdownTimeout = TimeSpan.FromSeconds(40));
+builder.WebHost.ConfigureKestrel(kestrel => kestrel.Listen(IPAddress.Parse(loaded.Server.Dashboard.ListenAddress), loaded.Server.Dashboard.Port));
+builder.Services.AddSingleton(loaded);
+builder.Services.AddSingleton(loader);
+builder.Services.AddSingleton<SessionRegistry>();
+builder.Services.AddSingleton<AuthenticationService>();
+builder.Services.AddSingleton<ServerRuntime>();
+builder.Services.AddSingleton<PendingConnectionRegistry>();
+builder.Services.AddSingleton<PeerRelayRegistry>();
+builder.Services.AddSingleton<MetricsRegistry>();
+builder.Services.AddSingleton<TrafficHistoryService>();
+builder.Services.AddSingleton<AdminSessionService>();
+builder.Services.AddSingleton<ProxyListenerService>();
+builder.Services.AddSingleton(sp => new ChannelConfigurationEditor(parsed.ConfigurationPath, loader, sp.GetRequiredService<ServerRuntime>(), sp.GetRequiredService<ProxyListenerService>(), sp.GetRequiredService<SessionRegistry>()));
+builder.Services.AddSingleton(sp => new ClientConfigurationEditor(parsed.ConfigurationPath, loader, sp.GetRequiredService<ServerRuntime>(), sp.GetRequiredService<ProxyListenerService>(), sp.GetRequiredService<SessionRegistry>()));
+builder.Services.AddHostedService<TunnelAcceptorService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<ProxyListenerService>());
+builder.Services.AddHostedService(sp => sp.GetRequiredService<TrafficHistoryService>());
+
+var app = builder.Build();
+app.UseDefaultFiles();
+app.UseStaticFiles();
+app.Use(async (context, next) =>
+{
+    if (context.Request.Path.StartsWithSegments("/api"))
+    {
+        context.Response.Headers.CacheControl = "no-store";
+    }
+
+    await next(context);
+});
+
+app.MapGet("/health/live", () => Results.Ok(new { status = "live" }));
+app.MapGet("/health/ready", (ServerRuntime runtime) => runtime.IsReady
+    ? Results.Ok(new { status = "ready" })
+    : Results.StatusCode(StatusCodes.Status503ServiceUnavailable));
+app.MapGet("/api/v1/admin/session", (HttpRequest request, AdminSessionService sessions) =>
+{
+    return sessions.TryAuthorize(request, requireCsrf: false, out var session)
+        ? Results.Ok(new { authenticated = true, csrfToken = session!.CsrfToken, expiresAtUtc = session.ExpiresAtUtc })
+        : Results.Ok(new { authenticated = false });
+});
+app.MapPost("/api/v1/admin/session", (HttpRequest request, HttpResponse response, AdminLoginRequest login, AdminSessionService sessions) =>
+{
+    if (!sessions.TryLogin(login.Username, login.Password, out var session)) return Results.Unauthorized();
+    response.Cookies.Append(AdminSessionService.CookieName, session!.Id, new CookieOptions
+    {
+        HttpOnly = true,
+        SameSite = SameSiteMode.Strict,
+        Secure = request.IsHttps,
+        MaxAge = session.ExpiresAtUtc - DateTimeOffset.UtcNow,
+        Path = "/"
+    });
+    return Results.Ok(new { authenticated = true, csrfToken = session.CsrfToken, expiresAtUtc = session.ExpiresAtUtc });
+});
+app.MapDelete("/api/v1/admin/session", (HttpRequest request, HttpResponse response, AdminSessionService sessions) =>
+{
+    sessions.Logout(request);
+    response.Cookies.Delete(AdminSessionService.CookieName, new CookieOptions { HttpOnly = true, SameSite = SameSiteMode.Strict, Secure = request.IsHttps, Path = "/" });
+    return Results.NoContent();
+});
+app.MapGet("/api/v1/overview", (ServerRuntime runtime, MetricsRegistry metrics) =>
+{
+    var snapshots = runtime.Configuration.Clients.Values.SelectMany(client => client.Channels.Select(channel => metrics.For(client.ClientId, channel.ChannelId).Snapshot())).ToArray();
+    return Results.Ok(new
+    {
+    serverInstanceId = runtime.InstanceId,
+    statsSinceUtc = runtime.StartedAtUtc,
+    snapshotTimeUtc = DateTimeOffset.UtcNow,
+    clientsOnline = runtime.Sessions.Count,
+    clientsTotal = runtime.Configuration.Clients.Count,
+    channelsTotal = runtime.Configuration.Clients.Values.Sum(client => client.Channels.Count),
+    channelsAvailable = runtime.Configuration.Clients.Values.Sum(client => client.Channels.Count(channel => channel.Enabled && !channel.AuthorizedClientsOnly && runtime.Sessions.TryGet(client.ClientId, out _))),
+    activeConnections = snapshots.Sum(snapshot => snapshot.ActiveConnections + snapshot.PeerActiveConnections),
+    bytesToTarget = snapshots.Sum(snapshot => snapshot.BytesToTarget),
+    bytesToCaller = snapshots.Sum(snapshot => snapshot.BytesToCaller),
+    peerCiphertextToTarget = snapshots.Sum(snapshot => snapshot.PeerCiphertextToTarget),
+    peerCiphertextToCaller = snapshots.Sum(snapshot => snapshot.PeerCiphertextToCaller)
+    });
+});
+app.MapGet("/api/v1/clients", (HttpRequest request, ServerRuntime runtime) =>
+{
+    var query = request.Query["query"].ToString();
+    var status = request.Query["status"].ToString();
+    if (!string.IsNullOrEmpty(status) && status is not ("online" or "offline" or "disabled")) return Results.BadRequest(new { error = "Invalid status." });
+    if (!TryPositiveQuery(request, "page", 1, int.MaxValue, out var page) || !TryPositiveQuery(request, "pageSize", 100, 100, out var pageSize)) return Results.BadRequest(new { error = "Invalid page or pageSize." });
+    var matches = runtime.Configuration.Clients.Values
+        .Where(client => string.IsNullOrWhiteSpace(query) || client.ClientId.Contains(query, StringComparison.OrdinalIgnoreCase) || client.DisplayName.Contains(query, StringComparison.OrdinalIgnoreCase))
+        .Where(client => string.IsNullOrEmpty(status) || (status == "disabled" ? !client.Enabled : runtime.Sessions.TryGet(client.ClientId, out _) == (status == "online")))
+        .OrderBy(client => client.ClientId, StringComparer.Ordinal)
+        .ToArray();
+    var offset = (long)(page - 1) * pageSize;
+    var clients = (offset >= matches.Length ? Enumerable.Empty<ClientConfiguration>() : matches.Skip((int)offset))
+        .Take(pageSize)
+        .Select(client => new { clientId = client.ClientId, displayName = client.DisplayName, enabled = client.Enabled, client.MaxConnections, client.MaxPendingConnections, online = runtime.Sessions.TryGet(client.ClientId, out var session), connectedAtUtc = session?.ConnectedAtUtc, lastHeartbeatUtc = session?.LastHeartbeatUtc, heartbeatRttMs = session?.LastHeartbeatRtt?.TotalMilliseconds, agentVersion = session?.AgentVersion })
+        .ToArray();
+    return Results.Ok(new { snapshotTimeUtc = DateTimeOffset.UtcNow, page, pageSize, total = matches.Length, clients });
+});
+app.MapGet("/api/v1/clients/{id}/channels", (string id, ServerRuntime runtime, MetricsRegistry metrics) =>
+{
+    if (!runtime.Configuration.Clients.TryGetValue(id, out var client)) return Results.NotFound();
+    var online = runtime.Sessions.TryGet(id, out _);
+    return Results.Ok(new
+    {
+        snapshotTimeUtc = DateTimeOffset.UtcNow,
+        channels = client.Channels.Select(channel =>
+        {
+            var metric = metrics.For(client.ClientId, channel.ChannelId).Snapshot();
+            return new { channelId = channel.ChannelId, displayName = channel.DisplayName, listenAddress = channel.ListenAddress, listenPort = channel.ListenPort, targetHost = channel.TargetHost, targetPort = channel.TargetPort, enabled = channel.Enabled, authorizedClientsOnly = channel.AuthorizedClientsOnly, e2eCertificateSha256 = channel.E2eCertificateSha256, maxConnections = channel.MaxConnections, targetConnectTimeoutSeconds = channel.TargetConnectTimeoutSeconds, listenerState = channel.AuthorizedClientsOnly ? "peer-only" : channel.Enabled ? "listening" : "stopped", available = channel.Enabled && !channel.AuthorizedClientsOnly && online, pendingConnections = channel.AuthorizedClientsOnly ? metric.PeerPendingConnections : metric.PendingConnections, activeConnections = channel.AuthorizedClientsOnly ? metric.PeerActiveConnections : metric.ActiveConnections, acceptedTotal = channel.AuthorizedClientsOnly ? metric.PeerAcceptedTotal : metric.AcceptedTotal, openedTotal = channel.AuthorizedClientsOnly ? metric.PeerOpenedTotal : metric.OpenedTotal, openFailedTotal = channel.AuthorizedClientsOnly ? metric.PeerOpenFailedTotal : metric.OpenFailedTotal, metric.NormalClosedTotal, metric.AbortedTotal, metric.BytesToTarget, metric.BytesToCaller, metric.PeerCiphertextToTarget, metric.PeerCiphertextToCaller, targetLastResult = metric.TargetLastResult?.Result, targetLastResultTimeUtc = metric.TargetLastResult?.TimeUtc };
+        }).ToArray()
+    });
+});
+app.MapGet("/api/v1/history", async (HttpRequest request, TrafficHistoryService history, CancellationToken cancellationToken) =>
+{
+    var clientId = request.Query["clientId"].ToString();
+    var channelId = request.Query["channelId"].ToString();
+    if (!TryPositiveQuery(request, "hours", 24, 24 * 365, out var hours)) return Results.BadRequest(new { error = "Invalid hours." });
+    var samples = await history.ReadAsync(string.IsNullOrEmpty(clientId) ? null : clientId, string.IsNullOrEmpty(channelId) ? null : channelId, hours, cancellationToken);
+    return Results.Ok(new { samples });
+});
+app.MapPost("/api/v1/admin/clients", async (ClientCreateRequest create, HttpRequest request, AdminSessionService sessions, ClientConfigurationEditor editor, CancellationToken cancellationToken) =>
+{
+    if (!sessions.TryAuthorize(request, requireCsrf: true, out _)) return Results.Unauthorized();
+    if (string.IsNullOrWhiteSpace(create.AgentServerHost) || (loaded.Server.Tunnel.TlsEnabled && string.IsNullOrWhiteSpace(create.TrustedCaPemPath))) return Results.BadRequest(new { error = "Agent server host and trusted CA path are required." });
+    try
+    {
+        var client = await editor.CreateAsync(create, cancellationToken);
+        return Results.Created($"/api/v1/clients/{client.ClientId}", new { clientId = client.ClientId, client.DisplayName, client.Enabled, client.MaxConnections, client.MaxPendingConnections, message = "客户端已创建；请下载并安全部署 Agent 配置文件。" });
+    }
+    catch (ClientUpdateException exception) { return Results.BadRequest(new { error = exception.Message }); }
+});
+app.MapPut("/api/v1/admin/clients/{id}", async (string id, ClientUpdateRequest update, HttpRequest request, AdminSessionService sessions, ClientConfigurationEditor editor, CancellationToken cancellationToken) =>
+{
+    if (!sessions.TryAuthorize(request, requireCsrf: true, out _)) return Results.Unauthorized();
+    try { var client = await editor.UpdateAsync(id, update, cancellationToken); return Results.Ok(new { clientId = client.ClientId, client.DisplayName, client.Enabled, client.MaxConnections, client.MaxPendingConnections }); }
+    catch (ClientUpdateException exception) { return Results.BadRequest(new { error = exception.Message }); }
+});
+app.MapGet("/api/v1/admin/clients/{id}/agent-config", (string id, HttpRequest request, AdminSessionService sessions, ServerRuntime runtime) =>
+{
+    if (!sessions.TryAuthorize(request, requireCsrf: false, out _)) return Results.Unauthorized();
+    if (!runtime.Configuration.Clients.TryGetValue(id, out var client)) return Results.NotFound();
+    var agent = new { serverHost = client.AgentServerHost ?? runtime.Configuration.Server.Tunnel.ListenAddress, serverPort = runtime.Configuration.Server.Tunnel.Port, useTls = runtime.Configuration.Server.Tunnel.TlsEnabled, clientId = client.ClientId, trustedCaPemPath = runtime.Configuration.Server.Tunnel.TlsEnabled ? client.TrustedCaPemPath ?? "./root-ca.pem" : null, secret = client.Secret, reconnect = new { initialDelaySeconds = 1, maxDelaySeconds = 30, permanentErrorDelaySeconds = 60 } };
+    return Results.File(System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(agent, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }), "application/json", $"relaylink-agent-{client.ClientId}.json");
+});
+app.MapGet("/api/v1/admin/clients/{id}/identity", (string id, HttpRequest request, AdminSessionService sessions, ServerRuntime runtime) =>
+{
+    if (!sessions.TryAuthorize(request, requireCsrf: false, out _)) return Results.Unauthorized();
+    if (!runtime.Configuration.Clients.ContainsKey(id)) return Results.NotFound();
+    runtime.Sessions.TryGet(id, out var agentSession);
+    return Results.Ok(new { clientId = id, online = agentSession is not null, e2eCertificateSha256 = agentSession?.E2eCertificateSha256 });
+});
+app.MapGet("/api/v1/admin/clients/{id}/mappings", (string id, HttpRequest request, AdminSessionService sessions, ServerRuntime runtime) =>
+{
+    if (!sessions.TryAuthorize(request, requireCsrf: false, out _)) return Results.Unauthorized();
+    if (!runtime.Configuration.Clients.TryGetValue(id, out var client)) return Results.NotFound();
+    runtime.Sessions.TryGet(id, out var agentSession);
+    return Results.Ok(new { mappings = client.OutboundMappings.Select(mapping =>
+    {
+        var address = agentSession?.PeerAddresses.FirstOrDefault(item => item.MappingId == mapping.MappingId);
+        return new { mapping.MappingId, mapping.Enabled, localAddress = address?.LocalAddress, localPort = address?.LocalPort, available = mapping.Enabled && address is not null, mapping.TargetClientId, mapping.TargetChannelId };
+    }).ToArray() });
+});
+app.MapPost("/api/v1/admin/clients/{id}/mappings", async (string id, MappingCreateRequest create, HttpRequest request, AdminSessionService sessions, ChannelConfigurationEditor editor, CancellationToken cancellationToken) =>
+{
+    if (!sessions.TryAuthorize(request, requireCsrf: true, out _)) return Results.Unauthorized();
+    try { var mapping = await editor.CreateMappingAsync(id, create, cancellationToken); return Results.Created($"/api/v1/admin/clients/{id}/mappings", new { mapping.MappingId, mapping.Enabled, localAddress = (string?)null, localPort = (int?)null, available = false, mapping.TargetClientId, mapping.TargetChannelId }); }
+    catch (ChannelUpdateException exception) { return Results.BadRequest(new { error = exception.Message }); }
+});
+app.MapPut("/api/v1/admin/clients/{id}/mappings/{mappingId}", async (string id, string mappingId, MappingUpdateRequest update, HttpRequest request, AdminSessionService sessions, ChannelConfigurationEditor editor, CancellationToken cancellationToken) =>
+{
+    if (!sessions.TryAuthorize(request, requireCsrf: true, out _)) return Results.Unauthorized();
+    try { var mapping = await editor.UpdateMappingAsync(id, mappingId, update, cancellationToken); return Results.Ok(new { mapping.MappingId, mapping.Enabled, localAddress = (string?)null, localPort = (int?)null, available = false, mapping.TargetClientId, mapping.TargetChannelId }); }
+    catch (ChannelUpdateException exception) { return Results.BadRequest(new { error = exception.Message }); }
+});
+app.MapDelete("/api/v1/admin/clients/{id}/mappings/{mappingId}", async (string id, string mappingId, HttpRequest request, AdminSessionService sessions, ChannelConfigurationEditor editor, CancellationToken cancellationToken) =>
+{
+    if (!sessions.TryAuthorize(request, requireCsrf: true, out _)) return Results.Unauthorized();
+    try { await editor.DeleteMappingAsync(id, mappingId, cancellationToken); return Results.NoContent(); }
+    catch (ChannelUpdateException exception) { return Results.BadRequest(new { error = exception.Message }); }
+});
+app.MapPut("/api/v1/admin/clients/{id}/channels/{channelId}", async (string id, string channelId, ChannelUpdateRequest update, HttpRequest request, AdminSessionService sessions, ChannelConfigurationEditor editor, ServerRuntime runtime, CancellationToken cancellationToken) =>
+{
+    if (!sessions.TryAuthorize(request, requireCsrf: true, out _)) return Results.Unauthorized();
+    try
+    {
+        var saved = await editor.UpdateAsync(id, channelId, update, cancellationToken);
+        var pushed = runtime.Sessions.TryGet(id, out _);
+        return Results.Ok(new { channel = new { saved.ChannelId, saved.DisplayName, saved.Enabled, saved.ListenAddress, saved.ListenPort, saved.TargetHost, saved.TargetPort, saved.MaxConnections, saved.TargetConnectTimeoutSeconds, saved.AuthorizedClientsOnly, saved.E2eCertificateSha256 }, pushedToAgent = pushed, message = pushed ? "已保存并下发给在线客户端；服务端监听已更新。" : "已保存并更新服务端监听；客户端离线，将在下次连接时下发。" });
+    }
+    catch (ChannelUpdateException exception) { return Results.BadRequest(new { error = exception.Message }); }
+});
+app.MapPost("/api/v1/admin/clients/{id}/channels", async (string id, ChannelCreateRequest create, HttpRequest request, AdminSessionService sessions, ChannelConfigurationEditor editor, ServerRuntime runtime, CancellationToken cancellationToken) =>
+{
+    if (!sessions.TryAuthorize(request, requireCsrf: true, out _)) return Results.Unauthorized();
+    try
+    {
+        var saved = await editor.CreateAsync(id, create, cancellationToken);
+        var pushed = runtime.Sessions.TryGet(id, out _);
+        return Results.Created($"/api/v1/clients/{id}/channels", new { channel = new { saved.ChannelId, saved.DisplayName, saved.Enabled, saved.ListenAddress, saved.ListenPort, saved.TargetHost, saved.TargetPort, saved.MaxConnections, saved.TargetConnectTimeoutSeconds, saved.AuthorizedClientsOnly, saved.E2eCertificateSha256 }, pushedToAgent = pushed, message = pushed ? "已新增并下发给在线客户端；服务端监听已更新。" : "已新增并更新服务端监听；客户端离线，将在下次连接时下发。" });
+    }
+    catch (ChannelUpdateException exception) { return Results.BadRequest(new { error = exception.Message }); }
+});
+app.MapDelete("/api/v1/admin/clients/{id}/channels/{channelId}", async (string id, string channelId, HttpRequest request, AdminSessionService sessions, ChannelConfigurationEditor editor, ServerRuntime runtime, CancellationToken cancellationToken) =>
+{
+    if (!sessions.TryAuthorize(request, requireCsrf: true, out _)) return Results.Unauthorized();
+    try
+    {
+        await editor.DeleteAsync(id, channelId, cancellationToken);
+        var pushed = runtime.Sessions.TryGet(id, out _);
+        return Results.Ok(new { pushedToAgent = pushed, message = pushed ? "已删除并下发给在线客户端；服务端监听已停止。" : "已删除并停止服务端监听；客户端离线，将在下次连接时下发。" });
+    }
+    catch (ChannelUpdateException exception) { return Results.BadRequest(new { error = exception.Message }); }
+});
+
+await app.RunAsync();
+return 0;
+
+static (string ConfigurationPath, bool CheckOnly) ParseArguments(string[] arguments)
+{
+    string? path = null;
+    var checkOnly = false;
+    for (var index = 0; index < arguments.Length; index++)
+    {
+        switch (arguments[index])
+        {
+            case "--config" when index + 1 < arguments.Length:
+                path = arguments[++index];
+                break;
+            case "--check-config":
+                checkOnly = true;
+                break;
+            default:
+                Console.Error.WriteLine("Usage: RelayLink.Server --config <server.json> [--check-config]");
+                Environment.Exit(2);
+                break;
+        }
+    }
+
+    if (string.IsNullOrWhiteSpace(path))
+    {
+        Console.Error.WriteLine("--config is required.");
+        Environment.Exit(2);
+    }
+
+    return (path!, checkOnly);
+}
+
+static bool TryPositiveQuery(HttpRequest request, string name, int defaultValue, int maximum, out int value)
+{
+    var raw = request.Query[name].ToString();
+    if (string.IsNullOrEmpty(raw))
+    {
+        value = defaultValue;
+        return true;
+    }
+
+    return int.TryParse(raw, out value) && value > 0 && value <= maximum;
+}
+
+sealed record AdminLoginRequest(string Username, string Password);

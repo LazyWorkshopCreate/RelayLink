@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "clientId": "shanghai-01",
+  "displayName": "上海节点 01",
+  "enabled": true,
+  "secret": "REPLACE_WITH_UNIQUE_32_RANDOM_BYTES_BASE64",
+  "maxConnections": 100,
+  "maxPendingConnections": 20,
+  "agentServerHost": "tunnel.example.com",
+  "trustedCaPemPath": "C:/ProgramData/RelayLink/tls/root-ca.pem",
+  "channels": [
+    {
+      "channelId": "erp-sql",
+      "displayName": "ERP SQL Server",
+      "enabled": true,
+      "authorizedClientsOnly": false,
+      "listenAddress": "10.20.0.10",
+      "listenPort": 21433,
+      "targetHost": "192.168.10.20",
+      "targetPort": 1433,
+      "maxConnections": 50,
+      "targetConnectTimeoutSeconds": 5
+    }
+  ],
+  "outboundMappings": []
+}

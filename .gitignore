@@ -1,0 +1,30 @@
+# .NET / IDE
+**/bin/
+**/obj/
+.vs/
+.idea/
+*.user
+*.suo
+TestResults/
+*.trx
+coverage/
+
+# Local work and deployment secrets
+.local/
+work/
+artifacts/
+*.log
+.env
+.env.*
+!.env.example
+*.pfx
+*.ports.json
+*.p12
+*.key
+*.pem
+**/appsettings.Local.json
+config/local/
+src/RelayLink.AdminWeb/node_modules/
+/.pnpm-store/
+src/RelayLink.AdminWeb/dist/
+src/RelayLink.Server/wwwroot/

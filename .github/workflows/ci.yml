@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Verify (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v6
+        id: dotnet
+        with:
+          dotnet-version: 10.0.x
+          dotnet-quality: ga
+      - name: Select stable .NET SDK
+        run: dotnet new globaljson --sdk-version "${{ steps.dotnet.outputs.dotnet-version }}" --roll-forward disable
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          package-manager-cache: false
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11.19.0
+          run_install: false
+      - name: Install frontend dependencies
+        run: pnpm --dir src/RelayLink.AdminWeb install --frozen-lockfile
+      - name: Check frontend types
+        run: pnpm --dir src/RelayLink.AdminWeb typecheck
+      - name: Test frontend
+        run: pnpm --dir src/RelayLink.AdminWeb test
+      - name: Check frontend formatting
+        run: pnpm --dir src/RelayLink.AdminWeb format:check
+      - name: Restore .NET projects
+        run: dotnet restore RelayLink.slnx --configfile NuGet.Config
+      - name: Run .NET unit tests
+        run: dotnet test tests/RelayLink.UnitTests/RelayLink.UnitTests.csproj --configuration Release --no-restore -p:SkipAdminWebBuild=true
+      - name: Run .NET integration tests (including peer TLS tests)
+        run: dotnet test tests/RelayLink.IntegrationTests/RelayLink.IntegrationTests.csproj --configuration Release --no-restore -p:EnablePeerTlsTests=true -p:SkipAdminWebBuild=true
