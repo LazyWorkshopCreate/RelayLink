@@ -3,6 +3,7 @@
   "tunnel": {
     "listenAddress": "0.0.0.0",
     "port": 7443,
+    "dataPort": 7444,
     "tlsEnabled": true,
     "certificatePemPath": "C:\\ProgramData\\RelayLink\\tls\\server-cert.pem",
     "privateKeyPemPath": "C:\\ProgramData\\RelayLink\\tls\\server-key.pem",

@@ -12,7 +12,7 @@ public sealed class PendingConnectionRegistry
 
     public PendingConnection Create(Session session, ChannelConfiguration channel, Socket caller, TimeSpan timeout)
     {
-        var connection = new PendingConnection(session.SessionId, channel, caller, DateTimeOffset.UtcNow.Add(timeout));
+        var connection = new PendingConnection(session.SessionId, channel, caller, DateTimeOffset.UtcNow.Add(timeout), session.LifetimeToken);
         if (!pending.TryAdd(connection.ConnectionId, connection)) throw new InvalidOperationException("Connection ID collision.");
         return connection;
     }
@@ -46,12 +46,13 @@ public sealed class PendingConnectionRegistry
     public bool TryGet(Guid connectionId, out PendingConnection? connection) => pending.TryGetValue(connectionId, out connection);
 }
 
-public sealed class PendingConnection(Guid sessionId, ChannelConfiguration channel, Socket caller, DateTimeOffset deadlineUtc) : IDisposable
+public sealed class PendingConnection(Guid sessionId, ChannelConfiguration channel, Socket caller, DateTimeOffset deadlineUtc, CancellationToken sessionToken = default) : IDisposable
 {
     private readonly byte[] tokenBytes = RandomNumberGenerator.GetBytes(32);
     private int tokenConsumed;
     private int disposed;
     private readonly TaskCompletionSource<DataTunnel> bound = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly TaskCompletionSource<int> targetReady = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TaskCompletionSource completed = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     public Guid SessionId { get; } = sessionId;
@@ -63,6 +64,7 @@ public sealed class PendingConnection(Guid sessionId, ChannelConfiguration chann
 
     public bool TryConsumeToken(string candidate)
     {
+        if (sessionToken.IsCancellationRequested || Volatile.Read(ref disposed) != 0 || DateTimeOffset.UtcNow > DeadlineUtc) return false;
         byte[] provided;
         try { provided = Convert.FromBase64String(candidate); }
         catch (FormatException) { return false; }
@@ -70,7 +72,9 @@ public sealed class PendingConnection(Guid sessionId, ChannelConfiguration chann
     }
 
     public bool TrySetTunnel(DataTunnel tunnel) => bound.TrySetResult(tunnel);
+    public bool TrySetTargetReady(int durationMilliseconds) => bound.Task.IsCompletedSuccessfully && targetReady.TrySetResult(durationMilliseconds);
     public Task<DataTunnel> WaitForTunnelAsync(CancellationToken cancellationToken) => bound.Task.WaitAsync(cancellationToken);
+    public Task<int> WaitForTargetReadyAsync(CancellationToken cancellationToken) => targetReady.Task.WaitAsync(cancellationToken);
     public Task WaitForCompletionAsync() => completed.Task;
     public void Complete() => completed.TrySetResult();
 
@@ -85,4 +89,4 @@ public sealed class PendingConnection(Guid sessionId, ChannelConfiguration chann
     }
 }
 
-public sealed record DataTunnel(Stream Stream, FrameReader Reader, FrameWriter Writer);
+public sealed record DataTunnel(Stream Stream, FrameReader Reader, FrameWriter Writer, Socket Socket);

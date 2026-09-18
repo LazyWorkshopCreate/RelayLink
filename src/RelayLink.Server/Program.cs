@@ -42,6 +42,7 @@ builder.Services.AddSingleton<ProxyListenerService>();
 builder.Services.AddSingleton(sp => new ChannelConfigurationEditor(parsed.ConfigurationPath, loader, sp.GetRequiredService<ServerRuntime>(), sp.GetRequiredService<ProxyListenerService>(), sp.GetRequiredService<SessionRegistry>()));
 builder.Services.AddSingleton(sp => new ClientConfigurationEditor(parsed.ConfigurationPath, loader, sp.GetRequiredService<ServerRuntime>(), sp.GetRequiredService<ProxyListenerService>(), sp.GetRequiredService<SessionRegistry>()));
 builder.Services.AddHostedService<TunnelAcceptorService>();
+builder.Services.AddHostedService<DataAcceptorService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<ProxyListenerService>());
 builder.Services.AddHostedService(sp => sp.GetRequiredService<TrafficHistoryService>());
 
@@ -67,6 +68,12 @@ app.MapGet("/api/v1/admin/session", (HttpRequest request, AdminSessionService se
     return sessions.TryAuthorize(request, requireCsrf: false, out var session)
         ? Results.Ok(new { authenticated = true, csrfToken = session!.CsrfToken, expiresAtUtc = session.ExpiresAtUtc })
         : Results.Ok(new { authenticated = false });
+});
+app.MapGet("/api/v1/admin/agent-defaults", (HttpRequest request, AdminSessionService sessions, ServerRuntime runtime) =>
+{
+    if (!sessions.TryAuthorize(request, requireCsrf: false, out _)) return Results.Unauthorized();
+    var tunnel = runtime.Configuration.Server.Tunnel;
+    return Results.Ok(new { serverHost = tunnel.DefaultAgentServerHost, serverPort = tunnel.Port, dataPort = tunnel.EffectiveDataPort, useTls = tunnel.TlsEnabled });
 });
 app.MapPost("/api/v1/admin/session", (HttpRequest request, HttpResponse response, AdminLoginRequest login, AdminSessionService sessions) =>
 {
@@ -146,13 +153,16 @@ app.MapGet("/api/v1/history", async (HttpRequest request, TrafficHistoryService 
     var samples = await history.ReadAsync(string.IsNullOrEmpty(clientId) ? null : clientId, string.IsNullOrEmpty(channelId) ? null : channelId, hours, cancellationToken);
     return Results.Ok(new { samples });
 });
-app.MapPost("/api/v1/admin/clients", async (ClientCreateRequest create, HttpRequest request, AdminSessionService sessions, ClientConfigurationEditor editor, CancellationToken cancellationToken) =>
+app.MapPost("/api/v1/admin/clients", async (ClientCreateRequest create, HttpRequest request, AdminSessionService sessions, ClientConfigurationEditor editor, ServerRuntime runtime, CancellationToken cancellationToken) =>
 {
     if (!sessions.TryAuthorize(request, requireCsrf: true, out _)) return Results.Unauthorized();
-    if (string.IsNullOrWhiteSpace(create.AgentServerHost) || (loaded.Server.Tunnel.TlsEnabled && string.IsNullOrWhiteSpace(create.TrustedCaPemPath))) return Results.BadRequest(new { error = "Agent server host and trusted CA path are required." });
+    var tunnel = runtime.Configuration.Server.Tunnel;
+    var agentServerHost = string.IsNullOrWhiteSpace(create.AgentServerHost) ? tunnel.DefaultAgentServerHost : create.AgentServerHost.Trim();
+    if (string.IsNullOrWhiteSpace(agentServerHost) || Uri.CheckHostName(agentServerHost) == UriHostNameType.Unknown) return Results.BadRequest(new { error = "A valid Agent server host (without a port) is required." });
+    if (tunnel.TlsEnabled && string.IsNullOrWhiteSpace(tunnel.TrustedCaPemPath)) return Results.Problem("Configure tunnel.trustedCaPemPath on the server before creating clients.", statusCode: 409);
     try
     {
-        var client = await editor.CreateAsync(create, cancellationToken);
+        var client = await editor.CreateAsync(create with { AgentServerHost = agentServerHost }, cancellationToken);
         return Results.Created($"/api/v1/clients/{client.ClientId}", new { clientId = client.ClientId, client.DisplayName, client.Enabled, client.MaxConnections, client.MaxPendingConnections, message = "客户端已创建；请下载并安全部署 Agent 配置文件。" });
     }
     catch (ClientUpdateException exception) { return Results.BadRequest(new { error = exception.Message }); }
@@ -167,8 +177,11 @@ app.MapGet("/api/v1/admin/clients/{id}/agent-config", (string id, HttpRequest re
 {
     if (!sessions.TryAuthorize(request, requireCsrf: false, out _)) return Results.Unauthorized();
     if (!runtime.Configuration.Clients.TryGetValue(id, out var client)) return Results.NotFound();
-    var agent = new { serverHost = client.AgentServerHost ?? runtime.Configuration.Server.Tunnel.ListenAddress, serverPort = runtime.Configuration.Server.Tunnel.Port, useTls = runtime.Configuration.Server.Tunnel.TlsEnabled, clientId = client.ClientId, trustedCaPemPath = runtime.Configuration.Server.Tunnel.TlsEnabled ? client.TrustedCaPemPath ?? "./root-ca.pem" : null, secret = client.Secret, reconnect = new { initialDelaySeconds = 1, maxDelaySeconds = 30, permanentErrorDelaySeconds = 60 } };
-    return Results.File(System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(agent, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }), "application/json", $"relaylink-agent-{client.ClientId}.json");
+    var tunnel = runtime.Configuration.Server.Tunnel;
+    var serverHost = client.AgentServerHost ?? tunnel.DefaultAgentServerHost;
+    if (string.IsNullOrWhiteSpace(serverHost)) return Results.Problem("Configure tunnel.agentServerHost before downloading an Agent configuration.", statusCode: 409);
+    if (tunnel.TlsEnabled && string.IsNullOrWhiteSpace(tunnel.TrustedCaPemPath)) return Results.Problem("Configure tunnel.trustedCaPemPath on the server before downloading an Agent configuration.", statusCode: 409);
+    return Results.File(AgentConfigurationFactory.Create(runtime.Configuration.Server, client), "application/json", $"relaylink-agent-{client.ClientId}.json");
 });
 app.MapGet("/api/v1/admin/clients/{id}/identity", (string id, HttpRequest request, AdminSessionService sessions, ServerRuntime runtime) =>
 {

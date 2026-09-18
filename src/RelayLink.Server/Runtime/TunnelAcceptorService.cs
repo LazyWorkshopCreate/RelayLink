@@ -36,6 +36,7 @@ public sealed class TunnelAcceptorService(
             while (!stoppingToken.IsCancellationRequested)
             {
                 var tcpClient = await listener.AcceptTcpClientAsync(stoppingToken);
+                tcpClient.NoDelay = true;
                 _ = HandleAcceptedAsync(tcpClient, stoppingToken);
             }
         }
@@ -70,39 +71,6 @@ public sealed class TunnelAcceptorService(
                 var reader = new FrameReader(stream);
                 var writer = new FrameWriter(stream);
                 var first = await reader.ReadAsync(ProtocolConstants.MaxInitialPayloadLength, handshakeTimeout.Token);
-                if (first?.Type == FrameType.BindData)
-                {
-                    var bind = JsonProtocolSerializer.Deserialize<BindDataMessage>(first.Payload.Span);
-                    if (!pendingConnections.TryBind(bind.SessionId, bind.ConnectionId, bind.ChannelId, bind.Token, out var pending) || pending is null || !pending.TrySetTunnel(new DataTunnel(stream, reader, writer)))
-                    {
-                        await TryWriteErrorAsync(writer, ErrorCode.TokenInvalid, handshakeTimeout.Token);
-                        return;
-                    }
-
-                    await writer.WriteAsync(new Frame(FrameType.BindAccepted, JsonProtocolSerializer.Serialize(new BindAcceptedMessage(bind.ConnectionId))), handshakeTimeout.Token);
-                    // A bound data tunnel is authenticated by its single-use token. It must
-                    // no longer consume the short-lived unauthenticated handshake budget
-                    // for the duration of a potentially long relay.
-                    unauthenticatedLimit.Release();
-                    slotReleased = true;
-                    await pending.WaitForCompletionAsync();
-                    return;
-                }
-
-                if (first?.Type == FrameType.PeerBindData)
-                {
-                    var bind = JsonProtocolSerializer.Deserialize<PeerBindDataMessage>(first.Payload.Span);
-                    if (!peerRelays.TryBind(bind, new DataTunnel(stream, reader, writer), out var relay) || relay is null)
-                    {
-                        await TryWriteErrorAsync(writer, ErrorCode.TokenInvalid, handshakeTimeout.Token);
-                        return;
-                    }
-                    unauthenticatedLimit.Release();
-                    slotReleased = true;
-                    await relay.WaitForCompletionAsync();
-                    return;
-                }
-
                 if (first?.Type != FrameType.Register)
                 {
                     await TryWriteErrorAsync(writer, ErrorCode.ProtocolError, handshakeTimeout.Token);
@@ -162,6 +130,7 @@ public sealed class TunnelAcceptorService(
                     session.SetConfigVersion(configVersion);
 
                     await writer.WriteAsync(new Frame(FrameType.Ready, JsonProtocolSerializer.Serialize(new ReadyMessage(session.SessionId))), serverStoppingToken);
+                    session.MarkReady();
                     logger.LogInformation("Client {ClientId} session {SessionId} is online.", session.ClientId, session.SessionId);
                     await RunControlSessionAsync(reader, writer, session, serverStoppingToken);
                 }
@@ -253,6 +222,16 @@ public sealed class TunnelAcceptorService(
                     metrics.For(session.ClientId, pending.Channel.ChannelId).MarkTargetFailure(failed.ErrorCode.ToString());
                 }
                 pendingConnections.Cancel(session.SessionId, failed.ConnectionId);
+                continue;
+            }
+
+            if (frame.Type == FrameType.TargetReady)
+            {
+                var ready = JsonProtocolSerializer.Deserialize<TargetReadyMessage>(frame.Payload.Span);
+                if (!pendingConnections.TryGet(ready.ConnectionId, out var pending) || pending is null ||
+                    pending.SessionId != session.SessionId || !pending.TrySetTargetReady(ready.TargetConnectDurationMs))
+                    throw new ProtocolException("TargetReady did not match a bound connection in this control session.");
+                metrics.For(session.ClientId, pending.Channel.ChannelId).MarkTargetSuccess();
                 continue;
             }
 

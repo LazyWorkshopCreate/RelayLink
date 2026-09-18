@@ -1,5 +1,10 @@
 using System.Net;
 using System.Net.Sockets;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using RelayLink.Protocol;
 using RelayLink.Agent;
 using RelayLink.Server.Configuration;
@@ -10,6 +15,90 @@ namespace RelayLink.UnitTests;
 
 public sealed class ConfigurationTests
 {
+    [Fact]
+    public void Dashboard_client_creation_reports_invalid_uppercase_id_clearly()
+    {
+        var client = new ClientConfiguration(1, "795S7", "Test", true, Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)), 10, 5, []);
+
+        var exception = Assert.Throws<ConfigurationException>(() => new ConfigurationLoader().ValidateClientUpdate(TestConfiguration(client)));
+
+        Assert.Contains("Client ID must be", exception.Message);
+        new ConfigurationLoader().ValidateClientUpdate(TestConfiguration(client with { ClientId = "795s7" }));
+    }
+
+    [Fact]
+    public void Server_download_embeds_ca_and_agent_accepts_it()
+    {
+        using var directory = new TemporaryDirectory();
+        Directory.CreateDirectory(directory.Path);
+        using var key = RSA.Create(2048);
+        var request = new CertificateRequest("CN=RelayLink Test CA", key, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        request.CertificateExtensions.Add(new X509BasicConstraintsExtension(true, false, 0, true));
+        request.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.KeyCertSign, true));
+        using var root = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow.AddDays(1));
+        var caPath = Path.Combine(directory.Path, "root-ca.pem");
+        File.WriteAllText(caPath, root.ExportCertificatePem());
+        var server = TestConfiguration().Server;
+        server = server with { Tunnel = server.Tunnel with { AgentServerHost = "tunnel.example.com", TrustedCaPemPath = caPath } };
+        var client = new ClientConfiguration(1, "test-agent", "Test", true, Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)), 10, 5, []);
+        var agentPath = Path.Combine(directory.Path, "agent.json");
+        File.WriteAllBytes(agentPath, AgentConfigurationFactory.Create(server, client));
+
+        using var document = JsonDocument.Parse(File.ReadAllBytes(agentPath));
+        Assert.True(document.RootElement.TryGetProperty("trustedCaPemBase64", out _));
+        Assert.False(document.RootElement.TryGetProperty("trustedCaPemPath", out _));
+        Assert.Equal("tunnel.example.com", AgentConfigurationLoader.Load(agentPath).ServerHost);
+    }
+
+    [Fact]
+    public void Agent_accepts_embedded_ca_without_a_sidecar_file()
+    {
+        using var directory = new TemporaryDirectory();
+        Directory.CreateDirectory(directory.Path);
+        using var key = RSA.Create(2048);
+        var request = new CertificateRequest("CN=RelayLink Test CA", key, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        request.CertificateExtensions.Add(new X509BasicConstraintsExtension(true, false, 0, true));
+        request.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.KeyCertSign, true));
+        using var root = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow.AddDays(1));
+        var caBase64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(root.ExportCertificatePem()));
+        var path = Path.Combine(directory.Path, "agent.json");
+        File.WriteAllText(path, JsonSerializer.Serialize(new
+        {
+            serverHost = "tunnel.example.com", serverPort = 7443, clientId = "test-agent", useTls = true,
+            secret = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)), trustedCaPemBase64 = caBase64,
+            reconnect = new { initialDelaySeconds = 1, maxDelaySeconds = 30, permanentErrorDelaySeconds = 60 }
+        }));
+
+        var agent = AgentConfigurationLoader.Load(path);
+        Assert.Null(agent.TrustedCaPemPath);
+        Assert.Equal(caBase64, agent.TrustedCaPemBase64);
+
+        var json = JsonNode.Parse(File.ReadAllText(path))!.AsObject();
+        json["trustedCaPemBase64"] = "bad-base64";
+        File.WriteAllText(path, json.ToJsonString());
+        Assert.Contains("trustedCaPemBase64", Assert.Throws<AgentConfigurationException>(() => AgentConfigurationLoader.Load(path)).Message);
+
+        File.WriteAllText(Path.Combine(directory.Path, "root-ca.pem"), root.ExportCertificatePem());
+        json.Remove("trustedCaPemBase64");
+        json["trustedCaPemPath"] = "root-ca.pem";
+        File.WriteAllText(path, json.ToJsonString());
+        Assert.EndsWith("root-ca.pem", AgentConfigurationLoader.Load(path).TrustedCaPemPath);
+
+        json["trustedCaPemBase64"] = caBase64;
+        File.WriteAllText(path, json.ToJsonString());
+        Assert.Contains("Exactly one", Assert.Throws<AgentConfigurationException>(() => AgentConfigurationLoader.Load(path)).Message);
+    }
+
+    [Fact]
+    public void Agent_default_host_uses_advertised_address_instead_of_wildcard_listener()
+    {
+        var tunnel = new TunnelConfiguration("0.0.0.0", 7443, true, "", "", 10, 15, 45)
+        { AgentServerHost = "tunnel.example.com" };
+        Assert.Equal("tunnel.example.com", tunnel.DefaultAgentServerHost);
+        Assert.Null((tunnel with { AgentServerHost = null }).DefaultAgentServerHost);
+        Assert.Equal("127.0.0.1", (tunnel with { AgentServerHost = null, ListenAddress = "127.0.0.1" }).DefaultAgentServerHost);
+    }
+
     [Fact]
     public void Agent_port_allocator_reuses_port_and_rotates_on_conflict()
     {
@@ -99,7 +188,8 @@ public sealed class ConfigurationTests
         var target = new Session(Guid.NewGuid(), "target", DateTimeOffset.UtcNow);
         var relay = new PeerRelay(caller, target, "channel", TimeSpan.FromSeconds(5));
         using var wire = new MemoryStream();
-        var tunnel = new DataTunnel(wire, new FrameReader(wire), new FrameWriter(wire));
+        using var socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+        var tunnel = new DataTunnel(wire, new FrameReader(wire), new FrameWriter(wire), socket);
         Assert.False(relay.TryBind(new PeerBindDataMessage(relay.ConnectionId, caller.SessionId, relay.TargetToken, "caller"), tunnel));
         Assert.False(relay.TryBind(new PeerBindDataMessage(relay.ConnectionId, target.SessionId, relay.CallerToken, "caller"), tunnel));
         Assert.True(relay.TryBind(new PeerBindDataMessage(relay.ConnectionId, caller.SessionId, relay.CallerToken, "caller"), tunnel));
@@ -164,6 +254,14 @@ public sealed class ConfigurationTests
         var config = TestConfiguration(client);
         config = config with { Server = config.Server with { Tunnel = config.Server.Tunnel with { TlsEnabled = false } } };
         Assert.Contains("requires tunnel TLS", Assert.Throws<ConfigurationException>(() => new ConfigurationLoader().ValidateClientUpdate(config)).Message);
+    }
+
+    [Fact]
+    public void Channel_listener_cannot_overlap_the_separate_data_port()
+    {
+        var channel = new ChannelConfiguration("echo", "Echo", true, "127.0.0.1", 7444, "127.0.0.1", 19002, 5, 5);
+        var client = new ClientConfiguration(1, "agent", "Agent", true, Convert.ToBase64String(new byte[32]), 10, 5, [channel]);
+        Assert.Contains("conflicts with a server endpoint", Assert.Throws<ConfigurationException>(() => new ConfigurationLoader().ValidateClientUpdate(TestConfiguration(client))).Message);
     }
 
     private static LoadedConfiguration TestConfiguration(params ClientConfiguration[] clients) => new(

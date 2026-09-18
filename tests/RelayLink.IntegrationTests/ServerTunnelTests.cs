@@ -15,7 +15,41 @@ namespace RelayLink.IntegrationTests;
 
 public sealed class ServerTunnelTests
 {
-    [Fact(Skip = "Requires a target host with a usable Schannel or OpenSSL TLS client credential provider; the current Windows sandbox cannot create one.")]
+    [Fact]
+    public async Task Separate_data_port_rejects_bind_without_authenticated_control_session()
+    {
+        using var fixture = new TunnelFixture();
+        await fixture.StartAsync();
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var token = cancellation.Token;
+        var bogus = new BindDataMessage(Guid.NewGuid(), Guid.NewGuid(), "echo", Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)));
+
+        using (var data = new TcpClient())
+        {
+            await data.ConnectAsync(IPAddress.Loopback, fixture.DataPort, token);
+            var stream = data.GetStream();
+            await new FrameWriter(stream).WriteAsync(new Frame(FrameType.BindData, JsonProtocolSerializer.Serialize(bogus)), token);
+            Assert.Equal(FrameType.Error, (await new FrameReader(stream).ReadAsync(ProtocolConstants.MaxInitialPayloadLength, token))?.Type);
+        }
+
+        using (var control = new TcpClient())
+        {
+            await control.ConnectAsync(IPAddress.Loopback, fixture.TunnelPort, token);
+            var stream = control.GetStream();
+            await new FrameWriter(stream).WriteAsync(new Frame(FrameType.BindData, JsonProtocolSerializer.Serialize(bogus)), token);
+            Assert.Equal(FrameType.Error, (await new FrameReader(stream).ReadAsync(ProtocolConstants.MaxInitialPayloadLength, token))?.Type);
+        }
+
+        using (var data = new TcpClient())
+        {
+            await data.ConnectAsync(IPAddress.Loopback, fixture.DataPort, token);
+            var stream = data.GetStream();
+            await new FrameWriter(stream).WriteAsync(new Frame(FrameType.Register, JsonProtocolSerializer.Serialize(new RegisterMessage("test-agent", fixture.Secret, "negative-test"))), token);
+            Assert.Equal(FrameType.Error, (await new FrameReader(stream).ReadAsync(ProtocolConstants.MaxInitialPayloadLength, token))?.Type);
+        }
+    }
+
+    [Fact]
     public async Task Server_forwards_bytes_after_authenticated_data_tunnel_binds()
     {
         using var fixture = new TunnelFixture();
@@ -25,10 +59,9 @@ public sealed class ServerTunnelTests
 
         using var controlClient = new TcpClient();
         await controlClient.ConnectAsync(IPAddress.Loopback, fixture.TunnelPort, token);
-        await using var controlTls = CreateTrustedTestTls(controlClient);
-        await controlTls.AuthenticateAsClientAsync(TestClientOptions, token);
-        var controlReader = new FrameReader(controlTls);
-        var controlWriter = new FrameWriter(controlTls);
+        var controlStream = controlClient.GetStream();
+        var controlReader = new FrameReader(controlStream);
+        var controlWriter = new FrameWriter(controlStream);
         await controlWriter.WriteAsync(new Frame(FrameType.Register, JsonProtocolSerializer.Serialize(new RegisterMessage("test-agent", fixture.Secret, "integration-test"))), token);
         var accepted = await controlReader.ReadAsync(ProtocolConstants.MaxControlPayloadLength, token);
         Assert.Equal(FrameType.RegisterAccepted, accepted?.Type);
@@ -39,45 +72,41 @@ public sealed class ServerTunnelTests
 
         using var caller = new TcpClient();
         await caller.ConnectAsync(IPAddress.Loopback, fixture.ProxyPort, token);
+        var callerStream = caller.GetStream();
         var openFrame = await controlReader.ReadAsync(ProtocolConstants.MaxControlPayloadLength, token);
         Assert.Equal(FrameType.Open, openFrame?.Type);
         var open = JsonProtocolSerializer.Deserialize<OpenMessage>(openFrame!.Payload.Span);
 
         using var dataClient = new TcpClient();
-        await dataClient.ConnectAsync(IPAddress.Loopback, fixture.TunnelPort, token);
-        await using var dataTls = CreateTrustedTestTls(dataClient);
-        await dataTls.AuthenticateAsClientAsync(TestClientOptions, token);
-        var dataReader = new FrameReader(dataTls);
-        var dataWriter = new FrameWriter(dataTls);
+        await dataClient.ConnectAsync(IPAddress.Loopback, fixture.DataPort, token);
+        var dataStream = dataClient.GetStream();
+        var dataReader = new FrameReader(dataStream);
+        var dataWriter = new FrameWriter(dataStream);
         await dataWriter.WriteAsync(new Frame(FrameType.BindData, JsonProtocolSerializer.Serialize(new BindDataMessage(open.SessionId, open.ConnectionId, open.ChannelId, open.Token))), token);
         Assert.Equal(FrameType.BindAccepted, (await dataReader.ReadAsync(ProtocolConstants.MaxInitialPayloadLength, token))?.Type);
 
         using var target = new TcpClient();
         await target.ConnectAsync(IPAddress.Loopback, fixture.TargetPort, token);
-        await dataWriter.WriteAsync(new Frame(FrameType.TargetReady, JsonProtocolSerializer.Serialize(new TargetReadyMessage(open.ConnectionId, 1))), token);
-        Assert.Equal(FrameType.Start, (await dataReader.ReadAsync(ProtocolConstants.MaxControlPayloadLength, token))?.Type);
+        await controlWriter.WriteAsync(new Frame(FrameType.TargetReady, JsonProtocolSerializer.Serialize(new TargetReadyMessage(open.ConnectionId, 1))), token);
+        Assert.Equal(FrameType.Start, (await controlReader.ReadAsync(ProtocolConstants.MaxControlPayloadLength, token))?.Type);
 
         var input = RandomNumberGenerator.GetBytes(4096);
-        await caller.GetStream().WriteAsync(input, token);
-        var toTarget = await dataReader.ReadAsync(ProtocolConstants.MaxDataPayloadLength, token);
-        Assert.Equal(FrameType.Data, toTarget?.Type);
-        Assert.Equal(input, toTarget!.Payload.ToArray());
-        await target.GetStream().WriteAsync(toTarget.Payload, token);
+        await callerStream.WriteAsync(input, token);
+        var toTarget = new byte[input.Length];
+        await ReadExactlyAsync(dataStream, toTarget, token);
+        Assert.Equal(input, toTarget);
+        await target.GetStream().WriteAsync(toTarget, token);
         var echoed = new byte[input.Length];
         await ReadExactlyAsync(target.GetStream(), echoed, token);
-        await dataWriter.WriteAsync(new Frame(FrameType.Data, echoed), token);
+        await dataStream.WriteAsync(echoed, token);
         var received = new byte[input.Length];
-        await ReadExactlyAsync(caller.GetStream(), received, token);
+        await ReadExactlyAsync(callerStream, received, token);
         Assert.Equal(input, received);
+        caller.Client.Shutdown(SocketShutdown.Send);
+        Assert.Equal(0, await dataStream.ReadAsync(new byte[1], token));
+        dataClient.Client.Shutdown(SocketShutdown.Send);
+        Assert.Equal(0, await callerStream.ReadAsync(new byte[1], token));
     }
-
-    private static SslStream CreateTrustedTestTls(TcpClient client) => new(client.GetStream(), false, static (_, _, _, _) => true);
-    private static readonly SslClientAuthenticationOptions TestClientOptions = new()
-    {
-        TargetHost = "localhost",
-        EnabledSslProtocols = SslProtocols.Tls12,
-        CertificateRevocationCheckMode = X509RevocationMode.NoCheck
-    };
 
     private static async Task ReadExactlyAsync(Stream stream, Memory<byte> buffer, CancellationToken token)
     {
@@ -99,6 +128,7 @@ public sealed class ServerTunnelTests
         private readonly StringBuilder serverError = new();
         private Task? echoTask;
         public int TunnelPort { get; } = GetFreePort();
+        public int DataPort { get; } = GetFreePort();
         public int ProxyPort { get; } = GetFreePort();
         public int DashboardPort { get; } = GetFreePort();
         public int TargetPort => ((IPEndPoint)targetListener.LocalEndpoint).Port;
@@ -109,13 +139,6 @@ public sealed class ServerTunnelTests
             Directory.CreateDirectory(Path.Combine(directory, "clients"));
             targetListener.Start();
             echoTask = EchoOnceAsync();
-            using var key = RSA.Create(2048);
-            var request = new CertificateRequest("CN=localhost", key, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
-            request.CertificateExtensions.Add(new X509BasicConstraintsExtension(false, false, 0, false));
-            request.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(request.PublicKey, false));
-            using var certificate = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow.AddHours(1));
-            await File.WriteAllTextAsync(Path.Combine(directory, "certificate.pem"), certificate.ExportCertificatePem());
-            await File.WriteAllTextAsync(Path.Combine(directory, "key.pem"), key.ExportPkcs8PrivateKeyPem());
             await File.WriteAllTextAsync(Path.Combine(directory, "clients", "test-agent.json"), JsonSerializer.Serialize(new
             {
                 schemaVersion = 1, clientId = "test-agent", displayName = "Test Agent", enabled = true, secret = Secret, maxConnections = 10, maxPendingConnections = 5,
@@ -125,8 +148,8 @@ public sealed class ServerTunnelTests
             await File.WriteAllTextAsync(configPath, JsonSerializer.Serialize(new
             {
                 schemaVersion = 1,
-                tunnel = new { listenAddress = "127.0.0.1", port = TunnelPort, certificatePemPath = Path.Combine(directory, "certificate.pem"), privateKeyPemPath = Path.Combine(directory, "key.pem"), handshakeTimeoutSeconds = 10, heartbeatIntervalSeconds = 15, heartbeatTimeoutSeconds = 45 },
-                dashboard = new { listenAddress = "127.0.0.1", port = DashboardPort, refreshSeconds = 5 },
+                tunnel = new { listenAddress = "127.0.0.1", port = TunnelPort, dataPort = DataPort, tlsEnabled = false, certificatePemPath = "", privateKeyPemPath = "", handshakeTimeoutSeconds = 10, heartbeatIntervalSeconds = 15, heartbeatTimeoutSeconds = 45 },
+                dashboard = new { listenAddress = "127.0.0.1", port = DashboardPort, refreshSeconds = 5, admin = new { username = "admin", passwordHash = "PBKDF2-SHA256$210000$AA==$AA==", sessionLifetimeMinutes = 60 } },
                 clientsDirectory = Path.Combine(directory, "clients"),
                 limits = new { maxConnections = 20, maxPendingConnections = 10, maxUnauthenticatedConnections = 10, maxChannelsPerClient = 10, openTimeoutSeconds = 10, blockedWriteTimeoutSeconds = 120, halfCloseDrainTimeoutSeconds = 300 }
             }));

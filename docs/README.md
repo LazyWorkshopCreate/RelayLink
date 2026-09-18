@@ -11,6 +11,8 @@
 | [安全互访设计](design/agent-to-agent.md) | DES-002 | Draft | Agent↔Agent 授权、内层 TLS 与协议增量 |
 | [互访架构决策](adr/0005-agent-to-agent-tls.md) | ADR-0005 | Accepted | 服务端协调、密文中继与身份固定 |
 | [Agent 自主管理入口端口](adr/0006-agent-owned-access-ports.md) | ADR-0006 | Accepted | 本机端口选择、持久化、状态上报及只读页面 |
+| [Agent 配置内嵌受信 CA](adr/0007-embedded-agent-trust-ca.md) | ADR-0007 | Accepted | 下载配置中的 CA 信任材料与旧配置兼容 |
+| [控制和原始数据分离](adr/0008-separated-control-and-raw-data.md) | ADR-0008 | Accepted | 独立数据端口、单次绑定、普通 TCP 流复制及安全取舍 |
 | [目录规划](development/repository-layout.md) | DEV-001 | Active | 文件归属及项目职责 |
 | [文档管理规则](development/documentation-policy.md) | DEV-002 | Active | 命名、状态、更新和引用规则 |
 | [GitHub Actions 流水线](development/ci.md) | DEV-003 | Active | CI 检查、构建产物和安全边界 |

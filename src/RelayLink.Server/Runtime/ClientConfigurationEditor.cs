@@ -15,7 +15,7 @@ public sealed class ClientConfigurationEditor(string serverConfigurationPath, Co
     {
         if (current.Clients.ContainsKey(request.ClientId)) throw new ClientUpdateException("Client ID already exists.");
         var secret = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
-        var client = new ClientConfiguration(1, request.ClientId, request.DisplayName, request.Enabled, secret, request.MaxConnections, request.MaxPendingConnections, []) { AgentServerHost = request.AgentServerHost, TrustedCaPemPath = request.TrustedCaPemPath };
+        var client = new ClientConfiguration(1, request.ClientId, request.DisplayName, request.Enabled, secret, request.MaxConnections, request.MaxPendingConnections, []) { AgentServerHost = request.AgentServerHost };
         return (new LoadedConfiguration(current.Server, current.Clients.Append(new KeyValuePair<string, ClientConfiguration>(client.ClientId, client)).ToDictionary()), client, true);
     }, cancellationToken);
 
@@ -49,6 +49,6 @@ public sealed class ClientConfigurationEditor(string serverConfigurationPath, Co
     }
 }
 
-public sealed record ClientCreateRequest(string ClientId, string DisplayName, bool Enabled, int MaxConnections, int MaxPendingConnections, string AgentServerHost, string? TrustedCaPemPath);
+public sealed record ClientCreateRequest(string ClientId, string DisplayName, bool Enabled, int MaxConnections, int MaxPendingConnections, string AgentServerHost);
 public sealed record ClientUpdateRequest(string DisplayName, bool Enabled, int MaxConnections, int MaxPendingConnections);
 public sealed class ClientUpdateException(string message) : Exception(message);

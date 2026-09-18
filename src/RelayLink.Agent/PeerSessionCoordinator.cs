@@ -16,7 +16,6 @@ internal sealed class PeerSessionCoordinator(
     AgentIdentity identity,
     Guid sessionId,
     FrameWriter controlWriter,
-    Func<TcpClient, CancellationToken, Task<Stream>> createOuterTransport,
     ILogger logger,
     CancellationToken sessionToken) : IAsyncDisposable
 {
@@ -202,8 +201,9 @@ internal sealed class PeerSessionCoordinator(
         var client = new TcpClient();
         try
         {
-            await client.ConnectAsync(agent.ServerHost, agent.ServerPort, cancellationToken);
-            var transport = await createOuterTransport(client, cancellationToken);
+            await client.ConnectAsync(agent.ServerHost, agent.EffectiveDataPort, cancellationToken);
+            client.NoDelay = true;
+            var transport = client.GetStream();
             var reader = new FrameReader(transport);
             var writer = new FrameWriter(transport);
             await writer.WriteAsync(new Frame(FrameType.PeerBindData, JsonProtocolSerializer.Serialize(new PeerBindDataMessage(connectionId, ownSessionId, token, role))), cancellationToken);

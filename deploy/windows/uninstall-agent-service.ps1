@@ -5,8 +5,12 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'agent-monitor-shortcut.ps1')
 $service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-if (-not $service) { return }
+if (-not $service) {
+    Remove-AgentMonitorShortcut
+    return
+}
 $registered = Get-CimInstance Win32_Service -Filter "Name='$ServiceName'"
 $expectedPrefix = '"{0}" --config ' -f ([IO.Path]::GetFullPath($ExecutablePath))
 if (-not $registered -or -not $registered.PathName.StartsWith($expectedPrefix, [StringComparison]::OrdinalIgnoreCase)) {
@@ -18,4 +22,5 @@ if ($service.Status -ne 'Stopped') {
 }
 & sc.exe delete $ServiceName | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Could not remove service '$ServiceName'." }
+Remove-AgentMonitorShortcut
 # ProgramData configuration, CA and generated identity are intentionally retained.

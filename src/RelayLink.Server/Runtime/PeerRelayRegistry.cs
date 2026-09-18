@@ -17,7 +17,7 @@ public sealed class PeerRelayRegistry(ServerRuntime runtime, MetricsRegistry met
 
     public async Task RequestAsync(Session caller, PeerOpenRequestMessage request, CancellationToken cancellationToken)
     {
-        if (request.RequestId == Guid.Empty || string.IsNullOrWhiteSpace(request.MappingId) ||
+        if (!caller.IsReady || request.RequestId == Guid.Empty || string.IsNullOrWhiteSpace(request.MappingId) ||
             !runtime.Configuration.Clients.TryGetValue(caller.ClientId, out var callerConfig) || !callerConfig.Enabled ||
             !callerConfig.OutboundMappings.Any(mapping => mapping.Enabled && mapping.MappingId == request.MappingId))
         {
@@ -26,7 +26,7 @@ public sealed class PeerRelayRegistry(ServerRuntime runtime, MetricsRegistry met
         }
         var mapping = callerConfig.OutboundMappings.Single(mapping => mapping.MappingId == request.MappingId);
         if (!runtime.Configuration.Clients.TryGetValue(mapping.TargetClientId, out var targetConfig) || !targetConfig.Enabled ||
-            !runtime.Sessions.TryGet(mapping.TargetClientId, out var targetSession) || targetSession is null ||
+            !runtime.Sessions.TryGet(mapping.TargetClientId, out var targetSession) || targetSession is not { IsReady: true } ||
             targetConfig.Channels.SingleOrDefault(channel => channel.ChannelId == mapping.TargetChannelId) is not { Enabled: true, AuthorizedClientsOnly: true } targetChannel ||
             !string.Equals(mapping.TargetCertificateSha256, targetChannel.E2eCertificateSha256, StringComparison.OrdinalIgnoreCase))
         {

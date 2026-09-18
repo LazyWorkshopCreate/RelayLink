@@ -2,19 +2,19 @@
 
 文档 ID：DES-001\
 状态：Draft（待评审）\
-版本：v1.2 设计评审稿\
-更新日期：2026-09-16\
+版本：v1.8 设计评审稿\
+更新日期：2026-09-18\
 调研日期：2026-09-15\
 配套文档：[需求文档](../requirements/requirements.md)
 
 ## 1. 技术结论
 
-采用 **.NET 10 / C# + Socket + 可选 SslStream + ASP.NET Core** 实现专用反向 TCP 代理。TLS 默认启用；仅当服务端 `tunnel.tlsEnabled` 和 Agent `useTls` 都为 `false` 时使用纯 TCP，适用于本机或受信任隔离网络。
+采用 **.NET 10 / C# + Socket + 可选 SslStream + ASP.NET Core** 实现专用反向 TCP 代理。控制连接默认启用 TLS；普通数据连接为独立端口上的原始 TCP，安全取舍见 [ADR-0008](../adr/0008-separated-control-and-raw-data.md)。
 
-- Linux 或 Windows 服务端提供一个公网 TLS 接入端口，接收控制连接与数据隧道。
-- 每个 Windows Agent 保持一条控制连接；每条业务 TCP 连接按需建立一条独立 TLS 数据隧道。
+- Linux 或 Windows 服务端分别提供控制端口与数据端口；只有已认证控制会话能授权建立数据连接。
+- 每个 Windows Agent 保持一条控制连接；每条业务 TCP 连接按需建立一条独立数据 TCP 连接。
 - 通道及每客户端密钥保存在服务端每客户端一个 JSON 文件中；启动加载、认证后及管理保存后下发快照。
-- 使用轻量帧协议表达数据与半关闭，不实现多业务连接在同一 TCP 上的复用。
+- 普通代理在数据连接绑定、目标就绪后直接双向复制 TCP 字节；互访仍使用端到端 TLS 与必要的半关闭封装。不实现多业务连接在同一 TCP 上的复用。
 - ASP.NET Core 提供内网只读页面和 JSON API；运行状态和计数保存在内存。
 
 这是本项目设计决策，不是声称存在一个原样满足所有要求的现成 .NET 产品。
@@ -42,25 +42,27 @@
 flowchart LR
     App[云端内网业务服务] -->|TCP 21433| Proxy[服务端代理监听]
     Browser[内网浏览器] -->|HTTP 18080| Web[匿名只读 / 登录管理仪表盘]
-    Agent[各地 Windows Agent] -->|主动建立控制 TLS 7443| Tunnel[统一隧道接入]
-    Agent -->|主动建立数据 TLS 7443| Tunnel
-    Proxy <-->|关联业务连接| Tunnel
+    Agent[各地 Windows Agent] -->|控制 TLS 7443| Control[控制入口]
+    Agent -->|独立数据 TCP 7444| Data[数据入口]
+    Control --> State
+    Proxy <-->|关联业务连接| Data
     Agent -->|TCP 1433| SQL[当地 SQL Server]
     Web --> State[内存状态快照]
-    Tunnel --> State
+    Data --> State
 ```
 
 图中连接箭头表示拨号方向，数据传输均可双向。
 
 | 端点示例 | 绑定地址 | 用途 | 可达范围 |
 |---|---|---|---|
-| TCP 7443 | `0.0.0.0` | TLS 控制及数据连接 | 公网，安全组允许 |
+| TCP 7443 | `0.0.0.0` | 控制连接，默认 TLS | 仅 Agent 可达 |
+| TCP 7444 | `0.0.0.0` | 独立数据连接，普通代理明文 TCP | 仅 Agent 可达，并须用受信隔离链路或网络层加密保护 |
 | TCP 21433、21434… | `10.20.0.10` | 业务 TCP 监听 | 仅 VPC/局域网，安全组控制 |
 | TCP 18080 | `10.20.0.10` | 仪表盘和只读 API | 仅 VPC/局域网，安全组控制 |
 
-公网 IP 若为云平台 NAT 映射地址，不要求它出现在服务器网卡上。接入端口绑定本机地址，由云平台映射。显式内网绑定属于部署配置，代码不实现 IP ACL。首期业务监听使用具体 IPv4 地址，避免通配和 IPv6 双栈端点重叠；目标主机名可由 Agent 解析，但必须在连接总超时内完成。
+公网 IP 若为云平台 NAT 映射地址，不要求它出现在服务器网卡上。接入端口绑定本机地址，由云平台映射。管理端新增普通通道默认以 `0.0.0.0` 监听全部 IPv4 网卡，避免误用 `127.0.0.1` 导致其他主机无法连接；需要仅监听 VPC 网卡时可显式填具体内网 IPv4 地址。`0.0.0.0` 只是绑定地址，不是调用方连接地址；业务端口仍须由安全组或防火墙限制在受信任网络，代码不实现 IP ACL。目标主机名可由 Agent 解析，但必须在连接总超时内完成。
 
-只开放一个公网端口不等于只允许一条公网 TCP 连接。控制和所有数据连接通过不同五元组访问同一服务端端口。该端口运行原生 TLS 自定义协议，不能放在仅支持 HTTP 的七层代理后面；如需负载入口须使用四层 TCP 透传，首期直接访问 VM。
+控制和数据连接访问不同服务端端口。控制入口运行可选 TLS 上的自定义协议；数据入口先完成短时绑定帧握手，再转为普通代理原始字节流或互访密文中继。普通代理的目标就绪和开始转发信号始终在控制连接上交换。两者均不能放在仅支持 HTTP 的七层代理后面；如需负载入口须使用四层 TCP 透传，首期直接访问 VM。
 
 ## 4. 工程结构与职责
 
@@ -77,7 +79,8 @@ RelayLink.sln
 | 服务端组件 | 职责 |
 |---|---|
 | ConfigurationLoader | 读取全部配置，验证、建立不可变快照和索引 |
-| TunnelAcceptor | 接收 TCP、TLS 握手、首帧识别和预认证连接限制 |
+| TunnelAcceptor | 仅接收控制 TCP、可选 TLS 握手、注册认证和预认证连接限制 |
+| DataAcceptor | 独立数据监听、一次性令牌绑定与预绑定连接限制 |
 | AuthenticationService | 校验客户端 ID、启用状态及密钥 |
 | SessionRegistry | 每 ID 单会话、心跳、会话代次及清理 |
 | ProxyListenerManager | 每个启用通道的监听器和业务接入门控 |
@@ -99,7 +102,11 @@ Windows Service 使用 `Microsoft.Extensions.Hosting.WindowsServices`，支持�
   "schemaVersion": 1,
   "tunnel": {
     "listenAddress": "0.0.0.0",
+    "agentServerHost": "tunnel.example.com",
+    "trustedCaPemPath": "/etc/relaylink/tls/root-ca.pem",
     "port": 7443,
+    "dataPort": 7444,
+    "tlsEnabled": true,
     "certificatePemPath": "/etc/relaylink/tls/fullchain.pem",
     "privateKeyPemPath": "/etc/relaylink/tls/privkey.pem",
     "handshakeTimeoutSeconds": 10,
@@ -145,7 +152,7 @@ Windows Service 使用 `Microsoft.Extensions.Hosting.WindowsServices`，支持�
       "channelId": "erp-sql",
       "displayName": "ERP SQL Server",
       "enabled": true,
-      "listenAddress": "10.20.0.10",
+      "listenAddress": "0.0.0.0",
       "listenPort": 21433,
       "targetHost": "192.168.10.20",
       "targetPort": 1433,
@@ -158,7 +165,7 @@ Windows Service 使用 `Microsoft.Extensions.Hosting.WindowsServices`，支持�
 
 密钥字段满足“每客户端一个密钥、服务端配置维护”。示例占位值不可用于运行：检查命令拒绝占位值及解码后不足 32 字节的密钥，并拒绝不同客户端复用同一密钥。使用密码学随机数生成至少 32 字节后 Base64 编码；不是人工口令。客户端与服务端仅比较解码后的固定长度字节，使用 `CryptographicOperations.FixedTimeEquals`。文件权限限制为服务账户及管理员可读；不把实际配置提交到代码仓库。
 
-管理端创建客户端时还记录 `agentServerHost` 和可选的 `trustedCaPemPath`，用于随后下载 Agent 配置；TLS 启用时要求填写 Agent 侧受信 CA 文件路径。该路径仅供 Agent 部署使用，不是服务端证书私钥路径。完整脱敏示例以 [客户端配置示例](../../config/examples/client.example.json) 为准。
+服务端 `tunnel.agentServerHost` 是 Agent 实际连接的 DNS 名称或 IP，不是隧道监听地址或管理页地址。管理端创建客户端时从此字段预填 `agentServerHost`，允许按客户端覆盖；若未配置且 `listenAddress` 为具体地址，则以监听地址预填。监听 `0.0.0.0` 或 `::` 时无法自动推断公网地址，必须显式配置或在创建时填写，不能从浏览器地址推断（管理页可能经 SSH 转发）。服务端创建接口在客户端未提交该值时同样使用上述默认值。TLS 启用时，所用地址必须匹配服务端证书 SAN。服务端 `tunnel.trustedCaPemPath` 指向仅含 CA 公钥证书的 PEM 文件，管理端不要求填写 Agent 本机 CA 路径；下载 Agent 配置时读取该文件并以 `trustedCaPemBase64` 内嵌。服务端不允许将私钥放入此字段。完整脱敏示例以 [客户端配置示例](../../config/examples/client.example.json) 为准。
 
 ### 5.3 Agent 本地配置：agent.json
 
@@ -166,9 +173,11 @@ Windows Service 使用 `Microsoft.Extensions.Hosting.WindowsServices`，支持�
 {
   "serverHost": "tunnel.example.com",
   "serverPort": 7443,
+  "dataPort": 7444,
+  "useTls": true,
   "clientId": "shanghai-01",
   "secret": "REPLACE_WITH_SAME_CLIENT_SECRET",
-  "trustedCaPemPath": "C:/ProgramData/RelayLink/tls/root-ca.pem",
+  "trustedCaPemBase64": "REPLACE_WITH_BASE64_OF_CA_CERTIFICATE_PEM",
   "reconnect": {
     "initialDelaySeconds": 1,
     "maxDelaySeconds": 30,
@@ -177,7 +186,7 @@ Windows Service 使用 `Microsoft.Extensions.Hosting.WindowsServices`，支持�
 }
 ```
 
-`serverHost` 同时用于 DNS 和 TLS 服务端名称校验。若直接使用 IP，证书必须含匹配 IP SAN。`trustedCaPemPath` 为必填项：Agent 只使用该 PEM 中的 CA 构建私有信任链，不读取操作系统根证书库；仍校验证书链、CA 属性和名称。该 PEM 不包含私钥，私钥只能保留在服务端。私有 CA 未提供 CRL/OCSP 时无法进行在线吊销检查；如需吊销，须先为签发链提供可访问的吊销服务并扩展相应策略。本地配置没有 `channels`、目标或代理端口字段，出现这些字段应报配置错误，避免误以为本地配置会生效。
+`serverHost` 同时用于控制与数据连接的 DNS，控制 TLS 还用它校验服务端名称。`serverPort` 指控制入口，`dataPort` 指独立数据入口；旧配置缺少 `dataPort` 时默认为 `serverPort + 1`。若直接使用 IP，控制证书必须含匹配 IP SAN。TLS 配置使用 `trustedCaPemBase64`：它是 CA 证书 PEM 文本的 UTF-8 字节经 Base64 编码，不含私钥。Agent 从配置解码后构建私有信任链，不读取操作系统根证书库，仍校验证书链、CA 属性和名称。旧 Agent 配置的 `trustedCaPemPath` 可继续读取以便迁移，但新下载配置不再生成路径，也不允许同时给出两种信任来源。私有 CA 未提供 CRL/OCSP 时无法进行在线吊销检查；如需吊销，须先为签发链提供可访问的吊销服务并扩展相应策略。本地配置没有 `channels`、目标或代理端口字段，出现这些字段应报配置错误，避免误以为本地配置会生效。
 
 ### 5.4 下发快照
 
@@ -195,11 +204,11 @@ Windows Service 使用 `Microsoft.Extensions.Hosting.WindowsServices`，支持�
 6. 所有必要监听成功后，服务进入 ready；客户端是否在线不影响进程 ready。
 7. 通道监听器在 Agent 离线时继续占用端口，但 accept 后立即关闭业务连接，并记录离线拒绝。
 
-`--check-config` 只做解析与静态校验，不监听网络；正常启动才检查实际端口占用。仪表盘保存会先校验完整配置、启动新增监听、原子写入客户端 JSON，再切换运行时快照并下发给在线 Agent；已有业务连接不被主动中断。直接改文件、密钥或基础服务端配置仍须在维护窗口重启。
+`--check-config` 只做解析与静态校验，不监听网络；正常启动才检查实际端口占用。仪表盘保存会先校验完整配置、启动新增监听、原子写入客户端 JSON，再切换运行时快照并下发给在线 Agent；已有业务连接不被主动中断。若旧、新监听地址在同一端口重叠（例如 `127.0.0.1` 改为 `0.0.0.0`），须先短暂停止旧监听再绑定新监听；绑定失败时恢复旧监听并返回明确错误，不写入新配置。该切换可能短暂影响新连接的接入，不主动断开已建立的业务连接。直接改文件、密钥或基础服务端配置仍须在维护窗口重启。
 
 ## 6. TLS 与认证
 
-公网端口接受 TCP 后先完成 TLS，再解析任何业务协议。服务端加载带私钥的证书和完整链，Agent 验证信任链、有效期、服务端名称，禁止无条件通过证书校验。
+控制端口接受 TCP 后在启用 TLS 时先完成 TLS，再解析注册协议。服务端加载带私钥的证书和完整链，Agent 验证信任链、有效期、服务端名称，禁止无条件通过证书校验。数据端口当前不使用外层 TLS；普通代理内容及绑定元数据在该链路上不保密。互访业务另由两端 Agent 的内层 TLS 保护。
 
 采用 OS 的 TLS 协议/密码套件策略，部署基线要求至少 TLS 1.2，支持时使用 TLS 1.3；不为旧设备开启过期协议。服务端复用 `SslStreamCertificateContext`，避免每连接重复构建证书上下文。[SslStream 最佳实践](https://learn.microsoft.com/en-us/dotnet/core/extensions/sslstream-best-practices)
 
@@ -207,18 +216,18 @@ Windows Service 使用 `Microsoft.Extensions.Hosting.WindowsServices`，支持�
 
 预认证 TLS 并发上限和握手期限属于资源保护，不是网络 ACL。身份错误对外统一返回 `AUTH_FAILED`，服务端日志按内部原因区分，且不记录提交的密钥。
 
-## 7. 协议 v1
+## 7. 协议 v2
 
 ### 7.1 通用帧格式
 
-TLS 内所有消息采用相同帧头，初次消息也一样；不依赖 TCP 分包边界。
+控制连接中的所有消息及数据连接的短时绑定握手采用相同帧头，不依赖 TCP 分包边界。普通代理在控制连接收到 `Start` 后转为原始 TCP 字节流，不再解析数据连接上的帧。
 
 | 偏移 | 长度 | 字段 |
 |---|---|---|
 | 0 | 4 字节 | ASCII magic：`NTP1` |
-| 4 | 1 字节 | version，固定 1 |
+| 4 | 1 字节 | version，固定 2；旧版共享入口协议被拒绝 |
 | 5 | 1 字节 | type |
-| 6 | 2 字节 | flags，v1 必须为 0，大端 |
+| 6 | 2 字节 | flags，v2 必须为 0，大端 |
 | 8 | 4 字节 | payloadLength，无符号大端，不含头 |
 | 12 | N 字节 | payload |
 
@@ -240,14 +249,14 @@ TLS 内所有消息采用相同帧头，初次消息也一样；不依赖 TCP �
 | 9 | CancelOpen | Server→Agent；sessionId、connectionId、reason |
 | 10 | BindData | Agent→Server，数据连接首帧；sessionId、connectionId、channelId、token |
 | 11 | BindAccepted | Server→Agent；connectionId |
-| 12 | TargetReady | Agent→Server，数据连接；connectionId、targetConnectDurationMs |
-| 13 | Start | Server→Agent，数据连接；connectionId |
+| 12 | TargetReady | Agent→Server，控制连接；connectionId、targetConnectDurationMs |
+| 13 | Start | Server→Agent，控制连接；connectionId |
 | 14 | Error | 任一端→对端；code，不含异常堆栈或秘密 |
-| 32 | Data | 双向；不透明原始字节 |
-| 33 | Fin | 双向；该发送方向结束 |
-| 34 | Reset | 双向；code，整个连接异常结束 |
+| 32 | Data | 仅互访数据中继；内层 TLS 密文块 |
+| 33 | Fin | 仅互访数据中继；该发送方向结束 |
+| 34 | Reset | 仅互访数据中继；异常终止 |
 
-除 Data/Fin 外使用 UTF-8 JSON。sessionId、connectionId 使用随机 UUID，clientId 和 channelId 使用配置中的稳定标识；令牌使用 32 字节随机数的 Base64。所有注册、确认、绑定和启动消息单次出现，重复消息不得重复建立连接或重复计数。控制连接只允许 Register 至 CancelOpen 及 Error；数据连接只允许 BindData 至 Start、Error、Data、Fin、Reset，并按所在阶段进一步限制。
+除 Data/Fin 外使用 UTF-8 JSON。sessionId、connectionId 使用随机 UUID，clientId 和 channelId 使用配置中的稳定标识；令牌使用 32 字节随机数的 Base64。所有注册、确认、绑定和启动消息单次出现，重复消息不得重复建立连接或重复计数。控制入口仅允许 Register 及后续控制消息；数据入口仅允许 BindData 或 PeerBindData 首帧。普通数据连接只在绑定时使用帧；`BindAccepted` 后静待控制连接上的 `Start`，其后任何字节都视为原始业务数据。
 
 ### 7.3 控制会话流程
 
@@ -283,22 +292,22 @@ sequenceDiagram
     B->>S: TCP connect 到代理端口
     S->>S: 预留容量，创建 Pending 与令牌
     S->>A: Open（控制连接）
-    A->>S: 新 TCP/TLS 到同一 7443
+    A->>S: 新 TCP 到独立数据端口 7444
     A->>S: BindData（数据连接）
     S->>S: 原子消费一次性令牌
     S->>A: BindAccepted
     A->>D: TCP connect 到快照内目标
-    A->>S: TargetReady
+    A->>S: TargetReady（控制连接）
     S->>S: 确认未超时、会话仍有效
-    S->>A: Start
-    B<<->>D: 通过两端 Data 帧搬运 TCP 字节
+    S->>A: Start（控制连接）
+    B<<->>D: 通过两端原始 TCP 复制搬运业务字节
 ```
 
 访问方的 TCP 握手可能在隧道就绪前已经成功；不等于 SQL 连接成功。服务端就绪前不循环读取业务数据，只使用 OS 有界接收缓冲；客户端可能已写入的 SQL prelogin 字节会在 Start 后转发。
 
 Open 仅含 channelId，不接受动态目标地址。Agent 从已确认快照解析目标，检查 sessionId、configVersion 和通道启用状态，禁止将接入端变成任意目标代理。
 
-期限从服务端 accept 开始使用单调时钟计 20 秒，是 TLS、绑定、目标拨号、Start 的总预算，不是各步累加。Agent 按收到的剩余预算计算自己的截止时间；服务端期限始终权威。目标拨号还受 5 秒子期限约束，DNS 与所有 IP 尝试共享该期限。
+期限从服务端 accept 开始计 20 秒，是绑定、目标拨号、Start 的总预算，不是各步累加。Agent 按收到的剩余预算计算自己的截止时间；服务端期限始终权威。目标拨号还受 5 秒子期限约束，DNS 与所有 IP 尝试共享该期限。
 
 ### 7.5 数据令牌与竞争处理
 
@@ -317,28 +326,28 @@ Pending 项绑定 `{sessionId, connectionId, channelId, tokenHash, deadline, sta
 
 对每条连接，两端均运行两个异步循环：
 
-1. 本地 TCP 读 → 编码 Data/Fin → TLS 写。
-2. TLS 帧读 → 本地 TCP 写；收到 Fin 时执行本地 `Socket.Shutdown(SocketShutdown.Send)`。
+1. 本地 TCP `ReceiveAsync` → 数据 TCP `SendAsync`。
+2. 数据 TCP `ReceiveAsync` → 本地 TCP `SendAsync`。
 
-单个 SslStream 始终保持一个 reader 和一个序列化 writer；不能让心跳、异常、DATA 等并发写同一个流。控制连接使用容量 256 的单 writer 队列，满或写超时即判定会话异常；数据 writer 用互斥串行写且不积压无界数据队列。异常终结时取消所有任务并关闭传输，RESET 只作有界的最佳努力发送，不能为发 RESET 无限等待锁。
+普通代理在 `Start` 后只复制字节，不对业务数据加帧或叠加 TLS。每个方向只保留一个有界缓冲，写完已读内容才继续读；发送异常时取消另一个方向并关闭两端 socket。互访使用内层 TLS 与已有帧化适配器，其半关闭规则见[安全互访设计](agent-to-agent.md)。
 
-使用 `ReadExactlyAsync` 读取头及指定长度载荷，使用 Memory 和池化缓冲。业务 socket 如直接使用 `SendAsync`，循环处理部分发送；不能假定一次调用写完。参见 [.NET SslStream API](https://learn.microsoft.com/en-us/dotnet/api/system.net.security.sslstream?view=net-10.0) 和 [Socket.Shutdown API](https://learn.microsoft.com/en-us/dotnet/api/system.net.sockets.socket.shutdown?view=net-10.0)。
+数据绑定握手使用 `ReadExactlyAsync` 读取帧；目标就绪与 Start 在控制连接上传递，进入业务阶段后数据连接不再调用帧读取器。`SendAsync` 循环处理部分发送；不能假定一次调用写完。参见 [Socket.Shutdown API](https://learn.microsoft.com/en-us/dotnet/api/system.net.sockets.socket.shutdown?view=net-10.0)。
 
 ### 8.2 半关闭语义
 
-本地 TCP 读到 EOF 后：先发送完该方向此前数据，再发送 Fin，停止该方向 reader；仍继续接收反向数据。对端收到 Fin 后关闭其本地 socket 的发送方向，而不是关闭整个 socket。
+普通代理某方向读到 EOF 后，已读字节先全部发送完成，再对相对端 socket 执行 `Shutdown(Send)`，另一方向继续接收反向尾包。
 
-只有双方 Fin 已处理且所有已接收数据写完，才正常 Dispose。FIN 后同方向再发 DATA 视为协议错误。没有完整 FIN 的 TLS EOF 视为异常中断；不能保证原生 TCP RST 的具体错误码完全一致，但必须保证连接失败且不重放。
-
-不能在一个转发任务结束后无条件取消另一个任务，也不能对 SslStream 底层 socket 直接执行写方向 Shutdown 来代表业务半关闭；那会破坏隧道 TLS 生命周期。
+双方都 EOF 且已读字节全部发送完成后才正常释放连接。异常、RST 或会话取消会终止两个方向；不会恢复原连接或重放业务数据。互访仍以内层应用 EOF 标记实现半关闭，不能把普通代理的 socket 半关闭规则直接套用于内层 `SslStream`。
 
 半关闭后剩余方向允许继续传输，默认最多等待 300 秒结束。此期限是有意的资源保护限制，可按实际协议提高；正常 SQL 空闲或长查询没有发送 Fin，不受此期限影响。
 
 ### 8.3 背压与超时
 
-每个方向最多持有一个约 32 KiB 有效载荷缓冲，写入完成后才读取下一块。慢目标使读取自然暂停，通过 TCP 窗口反馈背压。每条活动连接的应用缓冲估算约 64 KiB；1,000 条约 62.5 MiB，仅指应用载荷缓冲，不含 TLS、内核 socket 缓冲、对象和运行时内存。
+每个方向最多持有一个约 32 KiB 缓冲，写入完成后才读取下一块。慢目标使读取自然暂停，通过 TCP 窗口反馈背压。每条普通连接在 Server 和 Agent 各使用约 64 KiB 应用缓冲；不含内核 socket 缓冲、对象和运行时内存。
 
-业务正常 Read 默认无限等待，用会话取消和 TCP keepalive 发现断开，不设置短 SQL 空闲超时。单次阻塞写默认 120 秒超时；超时代表连接已经不可按预期推进，直接终止，不能重试可能部分发送的帧。读到部分帧后要求 120 秒内完成该帧，防止对方慢速挂起；尚未收到数据帧首字节时允许正常空闲。
+代理入口、Agent 数据隧道和目标 TCP 连接启用 `TCP_NODELAY`，避免小帧交互在多段 TCP 链路上叠加 Nagle 等待；这会增加小包数量，需以交互延迟和吞吐实测评估取舍。控制连接也启用该选项，以降低通道建立消息的往返延迟。
+
+业务正常 Read 默认无限等待，用会话取消和 TCP keepalive 发现断开，不设置短 SQL 空闲超时。单次阻塞写默认 120 秒超时；超时代表连接已经不可按预期推进，直接终止，不能重试可能已部分发送的字节。绑定握手受短期限约束，进入原始流后不存在逐块帧读取期限。
 
 开启 socket TCP keepalive，建议闲置 60 秒后探测、间隔 15 秒、失败次数 3，具体跨平台选项和实测识别时间在集成测试中验证。控制连接活着不证明每条闲置数据 TCP 仍畅通；最坏情况下依赖数据 keepalive 或下一次业务读写发现故障。
 
@@ -446,14 +455,14 @@ Agent：Disconnected → Connecting → Authenticating → Configuring → Onlin
 | 每客户端总额度 | 100 | 配置可调 |
 | 每客户端 Pending 上限 | 20 | 与其总额度同时满足 |
 | 每通道总额度 | 50 | 配置可调 |
-| 预认证连接上限 | 100 | 包括 TLS 握手与等待合法首帧 |
+| 每入口预认证连接上限 | 100 | 控制 TLS/首帧与数据绑定首帧分别限制 |
 | TLS/首帧阶段总期限 | 10 秒 | 每条接入连接从 accept 开始 |
 | 控制配置确认期限 | 10 秒 | 认证成功后计时 |
 | 业务总建立期限 | 20 秒 | 从业务 accept 起，覆盖所有步骤 |
 | 控制心跳 | 15 / 45 秒 | 发送间隔 / 无响应期限 |
-| DATA 最大载荷 | 32 KiB | 池化缓冲 |
+| 普通代理复制缓冲 | 每方向 32 KiB | 不对业务数据分帧；互访 DATA 帧仍有 32 KiB 上限 |
 | 控制发送队列 | 256 帧 | 有界，溢出使会话失败并清理 |
-| 阻塞写/部分帧期限 | 120 秒 | 失败直接关闭，不重放 |
+| 阻塞写期限 | 120 秒 | 失败直接关闭，不重放；数据绑定首帧另受握手期限约束 |
 | 半关闭尾部等待 | 300 秒 | 可调整；不等于普通业务空闲超时 |
 
 全局、客户端、通道配额以固定顺序获取，不满足立即回滚已经获得的额度，不等待锁链。关闭用一次性 lease Dispose，避免取消竞争造成额度泄露。Agent 按下发上限独立限制目标拨号任务。
@@ -524,7 +533,7 @@ Linux 对应 systemd 模板见 [deploy/linux/relaylink-server.service](../../dep
 
 ### 13.2 Windows Agent
 
-发布 win-x64 自包含包，使用 [Windows Agent 安装包](../../deploy/windows/README.md) 选择并校验配置；无配置不得安装。程序位于 Program Files，配置和 TLS 信任 CA 复制到受限的 ProgramData 目录，Agent 生成的身份及端口状态也存于该目录。服务以 LocalService 运行，开机自动启动并配置失败恢复；安装和卸载需要本机管理员权限。已存在同名服务时拒绝隐式覆盖，卸载保留敏感配置与身份文件供管理员处理。实际架构不同则另行构建；生产连接和 Windows Service 生命周期仍需目标机验收。
+发布 win-x64 自包含包，使用 [Windows Agent 安装包](../../deploy/windows/README.md) 选择并校验配置；无配置不得安装。程序位于 Program Files，配置和 TLS 信任 CA 复制到受限的 ProgramData 目录，Agent 生成的身份及端口状态也存于该目录。服务以 LocalService 运行，开机自动启动并配置失败恢复；安装成功后按 `dashboardPort` 在公共桌面创建指向本机状态页的 Internet Shortcut，由系统默认浏览器打开，状态页关闭时不创建。安装和卸载需要本机管理员权限。已存在同名服务时拒绝隐式覆盖，卸载移除安装程序生成的快捷方式，但保留敏感配置与身份文件供管理员处理。实际架构不同则另行构建；生产连接和 Windows Service 生命周期仍需目标机验收。
 
 ### 13.3 运维步骤
 

@@ -2,7 +2,10 @@
   "schemaVersion": 1,
   "tunnel": {
     "listenAddress": "0.0.0.0",
+    "agentServerHost": "tunnel.example.com",
+    "trustedCaPemPath": "/etc/relaylink/tls/root-ca.pem",
     "port": 7443,
+    "dataPort": 7444,
     "tlsEnabled": true,
     "certificatePemPath": "/etc/relaylink/tls/fullchain.pem",
     "privateKeyPemPath": "/etc/relaylink/tls/privkey.pem",

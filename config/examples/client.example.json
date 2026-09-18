@@ -7,14 +7,13 @@
   "maxConnections": 100,
   "maxPendingConnections": 20,
   "agentServerHost": "tunnel.example.com",
-  "trustedCaPemPath": "C:/ProgramData/RelayLink/tls/root-ca.pem",
   "channels": [
     {
       "channelId": "erp-sql",
       "displayName": "ERP SQL Server",
       "enabled": true,
       "authorizedClientsOnly": false,
-      "listenAddress": "10.20.0.10",
+      "listenAddress": "0.0.0.0",
       "listenPort": 21433,
       "targetHost": "192.168.10.20",
       "targetPort": 1433,

@@ -21,8 +21,10 @@ if ([IO.Path]::GetExtension($resolvedConfiguration) -ne '.json') { throw 'Select
 if ($LASTEXITCODE -ne 0) { throw 'Agent configuration validation failed.' }
 
 $configuration = Get-Content -LiteralPath $resolvedConfiguration -Raw | ConvertFrom-Json
+$dashboardPort = if ($null -eq $configuration.dashboardPort) { 18081 } else { [int]$configuration.dashboardPort }
+. (Join-Path $PSScriptRoot 'agent-monitor-shortcut.ps1')
 $caPath = $null
-if ($configuration.useTls) {
+if ($configuration.useTls -and -not [string]::IsNullOrWhiteSpace([string]$configuration.trustedCaPemPath)) {
     $sourceDirectory = Split-Path -Parent $resolvedConfiguration
     $caPath = [string]$configuration.trustedCaPemPath
     if (-not [IO.Path]::IsPathRooted($caPath)) { $caPath = Join-Path $sourceDirectory $caPath }
@@ -37,7 +39,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Could not reset the Agent data directory permi
 & icacls.exe $resolvedDataDirectory /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-19:(OI)(CI)M' | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'Could not secure the Agent data directory.' }
 
-if ($configuration.useTls) {
+if ($caPath) {
     $caDestination = Join-Path $resolvedDataDirectory 'trusted-ca.pem'
     if (-not [string]::Equals($caPath, $caDestination, [StringComparison]::OrdinalIgnoreCase)) {
         Copy-Item -LiteralPath $caPath -Destination $caDestination -Force
@@ -51,7 +53,7 @@ $configuration | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $installedC
 if ($LASTEXITCODE -ne 0) { throw 'Could not reset the Agent configuration permissions.' }
 & icacls.exe $installedConfiguration /inheritance:r /grant:r '*S-1-5-18:F' '*S-1-5-32-544:F' '*S-1-5-19:R' | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'Could not secure the Agent configuration.' }
-if ($configuration.useTls) {
+if ($caPath) {
     & icacls.exe $caDestination /reset | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'Could not reset the trusted CA file permissions.' }
     & icacls.exe $caDestination /inheritance:r /grant:r '*S-1-5-18:F' '*S-1-5-32-544:F' '*S-1-5-19:R' | Out-Null
@@ -70,7 +72,11 @@ try {
     & sc.exe failure $ServiceName reset= 86400 actions= restart/5000/restart/15000/restart/30000 | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'Could not configure Agent service recovery.' }
     Start-Service -Name $ServiceName
+    New-AgentMonitorShortcut -DashboardPort $dashboardPort
 } catch {
-    if ($created) { & sc.exe delete $ServiceName | Out-Null }
+    if ($created) {
+        Stop-Service -Name $ServiceName -ErrorAction SilentlyContinue
+        & sc.exe delete $ServiceName | Out-Null
+    }
     throw
 }

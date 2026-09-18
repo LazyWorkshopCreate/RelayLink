@@ -16,13 +16,25 @@ public sealed class SessionRegistry
         return sessions.TryAdd(client.ClientId, session);
     }
 
-    public bool Remove(string clientId, Guid sessionId) => sessions.TryGetValue(clientId, out var current) && current.SessionId == sessionId && sessions.TryRemove(new KeyValuePair<string, Session>(clientId, current));
+    public bool Remove(string clientId, Guid sessionId)
+    {
+        if (!sessions.TryGetValue(clientId, out var current) || current.SessionId != sessionId ||
+            !sessions.TryRemove(new KeyValuePair<string, Session>(clientId, current))) return false;
+        current.Close();
+        return true;
+    }
     public bool TryGet(string clientId, out Session? session) => sessions.TryGetValue(clientId, out session);
     public int Count => sessions.Count;
 }
 
 public sealed class Session(Guid sessionId, string clientId, DateTimeOffset connectedAtUtc)
 {
+    private readonly CancellationTokenSource lifetime = new();
+    private int ready;
+    public CancellationToken LifetimeToken => lifetime.Token;
+    public bool IsReady => Volatile.Read(ref ready) == 1 && !lifetime.IsCancellationRequested;
+    public void MarkReady() => Volatile.Write(ref ready, 1);
+    public void Close() { Volatile.Write(ref ready, 0); lifetime.Cancel(); }
     public Guid SessionId { get; } = sessionId;
     public string ClientId { get; } = clientId;
     public DateTimeOffset ConnectedAtUtc { get; } = connectedAtUtc;

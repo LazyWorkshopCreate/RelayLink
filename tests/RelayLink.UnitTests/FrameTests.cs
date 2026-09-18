@@ -10,7 +10,7 @@ public sealed class FrameTests
     {
         await using var stream = new FragmentedReadStream(new byte[]
         {
-            (byte)'N', (byte)'T', (byte)'P', (byte)'1', 1, (byte)FrameType.Data, 0, 0, 0, 0, 0, 3, 1, 2, 3
+            (byte)'N', (byte)'T', (byte)'P', (byte)'1', ProtocolConstants.Version, (byte)FrameType.Data, 0, 0, 0, 0, 0, 3, 1, 2, 3
         }, 1);
 
         var frame = await new FrameReader(stream).ReadAsync(ProtocolConstants.MaxDataPayloadLength, CancellationToken.None);
@@ -23,8 +23,15 @@ public sealed class FrameTests
     [Fact]
     public async Task Reader_rejects_empty_data_frame()
     {
-        await using var stream = new MemoryStream(new byte[] { (byte)'N', (byte)'T', (byte)'P', (byte)'1', 1, (byte)FrameType.Data, 0, 0, 0, 0, 0, 0 });
+        await using var stream = new MemoryStream(new byte[] { (byte)'N', (byte)'T', (byte)'P', (byte)'1', ProtocolConstants.Version, (byte)FrameType.Data, 0, 0, 0, 0, 0, 0 });
         await Assert.ThrowsAsync<ProtocolException>(async () => await new FrameReader(stream).ReadAsync(ProtocolConstants.MaxDataPayloadLength, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Reader_rejects_pre_split_protocol_version()
+    {
+        await using var stream = new MemoryStream(new byte[] { (byte)'N', (byte)'T', (byte)'P', (byte)'1', 1, (byte)FrameType.Register, 0, 0, 0, 0, 0, 0 });
+        await Assert.ThrowsAsync<ProtocolException>(async () => await new FrameReader(stream).ReadAsync(ProtocolConstants.MaxInitialPayloadLength, CancellationToken.None));
     }
 
     [Fact]

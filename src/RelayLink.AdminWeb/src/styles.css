@@ -589,20 +589,45 @@ footer {
     font-size: 12px;
     font-weight: 600;
 }
-.field input {
+.field-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+.field-help {
+    display: inline-flex;
+    align-items: center;
+    color: #8291aa;
+    cursor: help;
+}
+.field-help:hover,
+.field-help:focus-visible {
+    color: #315fe4;
+    outline: none;
+}
+.field input,
+.field select {
     border: 1px solid #dce4ee;
     border-radius: 8px;
     padding: 10px 11px;
     min-width: 0;
+    width: 100%;
+    box-sizing: border-box;
     outline: 0;
     color: #26334b;
     background: #fff;
 }
-.field input:focus {
+.field select {
+    min-height: 39px;
+    cursor: pointer;
+}
+.field input:focus,
+.field select:focus {
     border-color: #5678db;
     box-shadow: 0 0 0 3px #5678db1a;
 }
-.field input:disabled {
+.field input:disabled,
+.field select:disabled {
     background: #f5f7fa;
     color: #8895a8;
 }

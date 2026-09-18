@@ -1,10 +1,11 @@
 {
   "serverHost": "tunnel.example.com",
   "serverPort": 7443,
+  "dataPort": 7444,
   "useTls": true,
   "clientId": "shanghai-01",
   "secret": "REPLACE_WITH_SAME_CLIENT_SECRET",
-  "trustedCaPemPath": "C:/ProgramData/RelayLink/tls/root-ca.pem",
+  "trustedCaPemBase64": "REPLACE_WITH_BASE64_OF_CA_CERTIFICATE_PEM",
   "outboundPortRangeStart": 20000,
   "outboundPortRangeEnd": 59999,
   "dashboardPort": 18081,

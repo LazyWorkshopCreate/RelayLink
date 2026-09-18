@@ -53,6 +53,8 @@ function fakeApi() {
         }
         if (path === '/api/v1/admin/session')
             return ok({ authenticated, csrfToken: authenticated ? 'test-csrf' : undefined });
+        if (path === '/api/v1/admin/agent-defaults')
+            return ok({ serverHost: 'tunnel.example.com', serverPort: 7443, useTls: true });
         if (path === '/api/v1/overview')
             return ok({
                 statsSinceUtc: '2026-09-16T10:00:00Z',
@@ -158,22 +160,44 @@ describe('管理控制台', () => {
         await user.type(screen.getByLabelText('密码'), 'test-password');
         await user.click(screen.getByRole('button', { name: '登录' }));
         await user.click(await screen.findByRole('button', { name: '添加客户端' }));
-        await user.type(screen.getByRole('textbox', { name: '客户端 ID' }), 'node-b');
+        expect(screen.getByTitle('输入大写字母会自动转为小写。').className).toBe('field-help');
+        expect(screen.queryByText('输入大写字母会自动转为小写。')).toBeNull();
+        expect(screen.getByRole('textbox', { name: /Agent 连接的服务端主机/ })).toHaveProperty(
+            'value',
+            'tunnel.example.com',
+        );
+        expect(screen.queryByRole('textbox', { name: /受信 CA 路径/ })).toBeNull();
+        await user.type(screen.getByRole('textbox', { name: '客户端 ID' }), 'Node-B');
+        expect(screen.getByRole('textbox', { name: '客户端 ID' })).toHaveProperty('value', 'node-b');
         await user.type(screen.getByRole('textbox', { name: '显示名称' }), '新节点');
-        await user.type(screen.getByRole('textbox', { name: /Agent 连接的服务端主机/ }), '127.0.0.1');
         await user.click(screen.getByRole('button', { name: '保存客户端' }));
         await screen.findByText('新节点');
         expect(calls.find((c) => c.path === '/api/v1/admin/clients' && c.method === 'POST')?.csrf).toBe(
             'test-csrf',
         );
+        expect(
+            (
+                calls.find((c) => c.path === '/api/v1/admin/clients' && c.method === 'POST')?.body as {
+                    agentServerHost: string;
+                }
+            ).agentServerHost,
+        ).toBe('tunnel.example.com');
+        expect(
+            calls.find((c) => c.path === '/api/v1/admin/clients' && c.method === 'POST')?.body,
+        ).not.toHaveProperty('trustedCaPemPath');
 
         await user.click(screen.getAllByRole('button', { name: '添加通道' })[0]);
+        expect(screen.getByRole('textbox', { name: '云端监听地址' })).toHaveProperty('value', '0.0.0.0');
         await user.type(screen.getByRole('textbox', { name: '通道 ID' }), 'new-channel');
         await user.type(screen.getByRole('textbox', { name: '显示名称' }), '新通道');
         await user.click(screen.getByRole('button', { name: '保存并下发' }));
         await screen.findByText('新通道');
         expect(calls.find((c) => c.path.endsWith('/channels') && c.method === 'POST')?.csrf).toBe(
             'test-csrf',
+        );
+        expect(calls.find((c) => c.path.endsWith('/channels') && c.method === 'POST')?.body).toHaveProperty(
+            'listenAddress',
+            '0.0.0.0',
         );
         await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
 
@@ -209,14 +233,24 @@ describe('管理控制台', () => {
         await user.click(await screen.findByRole('button', { name: '添加客户端' }));
         await user.type(screen.getByRole('textbox', { name: '客户端 ID' }), 'node-b');
         await user.type(screen.getByRole('textbox', { name: '显示名称' }), '新节点');
-        await user.type(screen.getByRole('textbox', { name: /Agent 连接的服务端主机/ }), '127.0.0.1');
         await user.click(screen.getByRole('button', { name: '保存客户端' }));
         await screen.findByText('新节点');
 
         const targetCard = screen.getByText('测试节点').closest('article')!;
+        expect(within(targetCard).getByRole('button', { name: '添加通道' }).className).toBe(
+            within(targetCard).getByRole('button', { name: '添加互访入口' }).className,
+        );
         await user.click(within(targetCard).getByRole('button', { name: '添加通道' }));
         await user.type(screen.getByRole('textbox', { name: '通道 ID' }), 'private');
         await user.type(screen.getByRole('textbox', { name: '显示名称' }), '私有通道');
+        expect(screen.getByRole('textbox', { name: '云端监听地址' })).toHaveProperty('value', '0.0.0.0');
+        expect(screen.getByRole('spinbutton', { name: '云端监听端口' })).toHaveProperty('value', '19000');
+        await user.click(screen.getByRole('checkbox', { name: /仅允许授权客户端互访/ }));
+        expect(screen.queryByRole('textbox', { name: '云端监听地址' })).toBeNull();
+        expect(screen.queryByRole('spinbutton', { name: '云端监听端口' })).toBeNull();
+        await user.click(screen.getByRole('checkbox', { name: /仅允许授权客户端互访/ }));
+        expect(screen.getByRole('textbox', { name: '云端监听地址' })).toHaveProperty('value', '0.0.0.0');
+        expect(screen.getByRole('spinbutton', { name: '云端监听端口' })).toHaveProperty('value', '19000');
         await user.click(screen.getByRole('checkbox', { name: /仅允许授权客户端互访/ }));
         await user.click(screen.getByRole('button', { name: '读取当前在线 Agent 指纹' }));
         await waitFor(() =>
@@ -233,6 +267,11 @@ describe('管理控制台', () => {
 
         const callerCard = screen.getByText('新节点').closest('article')!;
         await user.click(within(callerCard).getByRole('button', { name: '添加互访入口' }));
+        expect(
+            screen.getByTitle('本机端口由 Agent 自动选择并保存，冲突时自动轮换；上线后显示实际地址。')
+                .className,
+        ).toBe('field-help');
+        expect(screen.queryByText(/本机端口由 Agent 自动选择并保存/)).toBeNull();
         await user.type(screen.getByRole('textbox', { name: '映射 ID' }), 'to-private');
         await user.selectOptions(screen.getByRole('combobox', { name: '目标客户端' }), 'node-a');
         await user.selectOptions(screen.getByRole('combobox', { name: '目标授权通道' }), 'private');

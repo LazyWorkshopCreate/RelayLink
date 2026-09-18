@@ -11,4 +11,4 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now relaylink-server
 ```
 
-服务重启会断开所有控制会话和现有代理连接。安全组仅应向公网开放隧道端口；代理端口和仪表盘端口只应在内网可达。
+服务重启会断开所有控制会话和现有代理连接。Agent 必须能访问控制端口 `tunnel.port` 和独立数据端口 `tunnel.dataPort`（缺省为控制端口加一）；代理端口和仪表盘端口只应在内网可达。普通数据端口目前不加密，开放范围应限于 Agent 来源，并由受信隔离链路或网络层加密保护；安全组不提供保密性。升级时 Server 与 Agent 必须一起更新，旧版本不能混用。

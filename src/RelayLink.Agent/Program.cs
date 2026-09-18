@@ -30,6 +30,7 @@ builder.Logging.AddJsonConsole(console => console.IncludeScopes = true);
 builder.Services.AddWindowsService(options => options.ServiceName = "RelayLink Agent");
 builder.Services.AddSingleton(configuration);
 builder.Services.AddSingleton<AgentStatus>();
+builder.Services.AddSingleton<AgentDiagnosticLog>();
 builder.Services.AddHostedService<ControlSessionWorker>();
 builder.Services.AddHostedService<AgentLocalDashboard>();
 await builder.Build().RunAsync();

@@ -7,6 +7,7 @@ import {
     ArrowLeftRight,
     Check,
     ChevronDown,
+    CircleAlert,
     CircleHelp,
     Cloud,
     LockKeyhole,
@@ -21,6 +22,7 @@ import {
 import './styles.css';
 
 type Session = { authenticated: boolean; csrfToken?: string };
+type AgentDefaults = { serverHost: string | null; serverPort: number; useTls: boolean };
 type Overview = {
     statsSinceUtc: string;
     snapshotTimeUtc: string;
@@ -82,7 +84,6 @@ type ClientForm = {
     maxConnections: number;
     maxPendingConnections: number;
     agentServerHost: string;
-    trustedCaPemPath: string;
 };
 type ChannelForm = {
     channelId: string;
@@ -111,13 +112,12 @@ const emptyClient: ClientForm = {
     maxConnections: 100,
     maxPendingConnections: 100,
     agentServerHost: '',
-    trustedCaPemPath: '',
 };
 const emptyChannel: ChannelForm = {
     channelId: '',
     displayName: '',
     enabled: true,
-    listenAddress: '127.0.0.1',
+    listenAddress: '0.0.0.0',
     listenPort: 19000,
     targetHost: '127.0.0.1',
     targetPort: 19001,
@@ -383,6 +383,15 @@ export function App() {
             await api('/api/v1/admin/session', { method: 'DELETE' });
             setSession({ authenticated: false });
             setNotice('已退出登录。');
+        } catch (e) {
+            setError((e as Error).message);
+        }
+    }
+    async function openCreateClient() {
+        try {
+            const defaults = await api<AgentDefaults>('/api/v1/admin/agent-defaults');
+            setClientDialog({ form: { ...emptyClient, agentServerHost: defaults.serverHost || '' } });
+            setError('');
         } catch (e) {
             setError((e as Error).message);
         }
@@ -669,10 +678,7 @@ export function App() {
                         </h2>
                     </div>
                     {session.authenticated && (
-                        <button
-                            className="primary"
-                            onClick={() => setClientDialog({ form: { ...emptyClient } })}
-                        >
+                        <button className="primary" onClick={() => void openCreateClient()}>
                             <Plus size={17} /> 添加客户端
                         </button>
                     )}
@@ -753,7 +759,6 @@ export function App() {
                                                             maxPendingConnections:
                                                                 client.maxPendingConnections,
                                                             agentServerHost: '',
-                                                            trustedCaPemPath: '',
                                                         },
                                                     })
                                                 }
@@ -761,7 +766,7 @@ export function App() {
                                                 <Settings2 size={15} /> 编辑客户端
                                             </button>
                                             <button
-                                                className="primary subtle"
+                                                className="ghost"
                                                 onClick={() =>
                                                     setChannelDialog({
                                                         clientId: client.clientId,
@@ -1031,15 +1036,34 @@ export function App() {
                     <form className="form" onSubmit={saveClient}>
                         <div className="form-grid">
                             <label className="field">
-                                客户端 ID
+                                <span className="field-label">
+                                    客户端 ID
+                                    {!clientDialog.original && (
+                                        <span
+                                            className="field-help"
+                                            title="输入大写字母会自动转为小写。"
+                                            aria-label="输入大写字母会自动转为小写。"
+                                            tabIndex={0}
+                                        >
+                                            <CircleAlert size={15} />
+                                        </span>
+                                    )}
+                                </span>
                                 <input
                                     required
                                     disabled={!!clientDialog.original}
+                                    aria-label="客户端 ID"
+                                    maxLength={64}
+                                    pattern="[a-z0-9][a-z0-9_-]{0,63}"
+                                    title="使用 1–64 位小写字母、数字、下划线或连字符，首位为字母或数字"
                                     value={clientDialog.form.clientId}
                                     onChange={(e) =>
                                         setClientDialog({
                                             ...clientDialog,
-                                            form: { ...clientDialog.form, clientId: e.target.value },
+                                            form: {
+                                                ...clientDialog.form,
+                                                clientId: e.target.value.toLowerCase(),
+                                            },
                                         })
                                     }
                                 />
@@ -1096,21 +1120,10 @@ export function App() {
                                                 })
                                             }
                                         />
-                                    </label>
-                                    <label className="field">
-                                        受信 CA 路径（启用 TLS 时必填）
-                                        <input
-                                            value={clientDialog.form.trustedCaPemPath}
-                                            onChange={(e) =>
-                                                setClientDialog({
-                                                    ...clientDialog,
-                                                    form: {
-                                                        ...clientDialog.form,
-                                                        trustedCaPemPath: e.target.value,
-                                                    },
-                                                })
-                                            }
-                                        />
+                                        <small>
+                                            只填主机名或 IP，不含端口；端口由服务端配置。CA
+                                            证书会自动写入下载的 Agent 配置。
+                                        </small>
                                     </label>
                                 </>
                             )}
@@ -1177,29 +1190,36 @@ export function App() {
                                     }
                                 />
                             </label>
-                            <label className="field">
-                                云端监听地址
-                                <input
-                                    required
-                                    value={channelDialog.form.listenAddress}
-                                    onChange={(e) =>
-                                        setChannelDialog({
-                                            ...channelDialog,
-                                            form: { ...channelDialog.form, listenAddress: e.target.value },
-                                        })
-                                    }
-                                />
-                            </label>
-                            <NumberField
-                                label="云端监听端口"
-                                value={channelDialog.form.listenPort}
-                                onChange={(n) =>
-                                    setChannelDialog({
-                                        ...channelDialog,
-                                        form: { ...channelDialog.form, listenPort: n },
-                                    })
-                                }
-                            />
+                            {!channelDialog.form.authorizedClientsOnly && (
+                                <>
+                                    <label className="field">
+                                        云端监听地址
+                                        <input
+                                            required
+                                            value={channelDialog.form.listenAddress}
+                                            onChange={(e) =>
+                                                setChannelDialog({
+                                                    ...channelDialog,
+                                                    form: {
+                                                        ...channelDialog.form,
+                                                        listenAddress: e.target.value,
+                                                    },
+                                                })
+                                            }
+                                        />
+                                    </label>
+                                    <NumberField
+                                        label="云端监听端口"
+                                        value={channelDialog.form.listenPort}
+                                        onChange={(n) =>
+                                            setChannelDialog({
+                                                ...channelDialog,
+                                                form: { ...channelDialog.form, listenPort: n },
+                                            })
+                                        }
+                                    />
+                                </>
+                            )}
                             <label className="field">
                                 目标主机
                                 <input
@@ -1324,9 +1344,20 @@ export function App() {
                     <form className="form" onSubmit={saveMapping}>
                         <div className="form-grid">
                             <label className="field">
-                                映射 ID
+                                <span className="field-label">
+                                    映射 ID
+                                    <span
+                                        className="field-help"
+                                        title="本机端口由 Agent 自动选择并保存，冲突时自动轮换；上线后显示实际地址。"
+                                        aria-label="本机端口由 Agent 自动选择并保存，冲突时自动轮换；上线后显示实际地址。"
+                                        tabIndex={0}
+                                    >
+                                        <CircleAlert size={15} />
+                                    </span>
+                                </span>
                                 <input
                                     required
+                                    aria-label="映射 ID"
                                     disabled={!!mappingDialog.original}
                                     value={mappingDialog.form.mappingId}
                                     onChange={(e) =>
@@ -1337,9 +1368,6 @@ export function App() {
                                     }
                                 />
                             </label>
-                            <p className="field-hint">
-                                本机端口由 Agent 自动选择并保存，冲突时自动轮换；上线后显示实际地址。
-                            </p>
                             <label className="field">
                                 目标客户端
                                 <select

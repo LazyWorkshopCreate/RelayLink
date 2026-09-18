@@ -2,15 +2,15 @@
 
 文档 ID：DES-002\
 状态：Draft\
-版本：v0.3.0\
-更新日期：2026-09-17\
+版本：v0.4.0\
+更新日期：2026-09-18\
 调研日期：2026-09-17
 
 ## 1. 范围与调研结论
 
-现有 `Register`/`ConfigUpdate` 仅将被访问通道下发至对应 Agent，`Open`/`BindData` 连接服务端云端代理端口与目标 Agent，服务端 `RelayPump` 可以看到 DATA 明文。这一路径可保留给原有非授权通道，但不满足新增互访的访问方身份与内层加密。
+`Register`/`ConfigUpdate` 通过独立控制入口下发配置；普通 `Open`/`BindData` 路径在数据入口完成绑定后直接复制明文 TCP 字节，服务端可见业务数据。这一路径不满足互访的访问方身份与端到端加密要求。
 
-[TLS 1.3 RFC 8446](https://www.rfc-editor.org/rfc/rfc8446.html) 定义认证密钥交换和应用数据保密/完整性；[.NET SslStream 文档](https://learn.microsoft.com/en-us/dotnet/api/system.net.security.sslstream?view=net-10.0) 确认它可包裹任意可读写 Stream。因此在两端 Agent 间的服务端帧中继之上运行内层 `SslStream`，避免自行设计密码协议。证书验证不能返回恒真；访问方对目标证书做固定 SHA-256 指纹校验。访问密钥经控制快照下发，所以任何互访配置均强制开启 Agent↔Server 外层 TLS；否则即使业务流使用内层 TLS，链路窃听者仍可读到授权密钥。
+[TLS 1.3 RFC 8446](https://www.rfc-editor.org/rfc/rfc8446.html) 定义认证密钥交换和应用数据保密/完整性；[.NET SslStream 文档](https://learn.microsoft.com/en-us/dotnet/api/system.net.security.sslstream?view=net-10.0) 确认它可包裹任意可读写 Stream。因此在两端 Agent 间的服务端帧中继之上运行内层 `SslStream`，避免自行设计密码协议。证书验证不能返回恒真；访问方对目标证书做固定 SHA-256 指纹校验。访问密钥经控制快照下发，互访配置仍强制开启 Agent↔Server **控制连接** TLS；数据端口不叠加外层 TLS，绑定令牌和元数据需要受信网络保护，业务载荷由内层 TLS 保护。详见 [ADR-0008](../adr/0008-separated-control-and-raw-data.md)。
 
 ## 2. 配置模型
 
@@ -32,7 +32,7 @@ outboundMappings[]:
   targetCertificateSha256        : 固定的对方端到端证书指纹
 ```
 
-所有字段由 Server 校验、持久化和下发。Agent 本地配置文件仍仅存自身注册所需的 Server 端点、客户端 ID、客户端密钥、外层 TLS CA 路径和重连参数；不存映射或目标访问密钥。目标 Agent 本地端到端证书私钥是自动生成的身份状态，不是业务配置；当前实现将 PFX 写入 Agent 本地配置文件所在目录，用 Windows 当前用户 ACL 或 Unix `0600` 权限保护。部署时须将 Agent 配置放在受保护的数据目录，不提交仓库或由 Server 下载私钥。首次启动后可执行 `RelayLink.Agent --config <配置路径> --show-e2e-fingerprint` 获取本机证书 SHA-256 指纹；管理员应带外核对后写入被访问通道。新证书不得自动覆盖已有固定指纹。
+所有字段由 Server 校验、持久化和下发。Agent 本地配置文件仍仅存自身注册所需的 Server 地址、控制/数据端口、客户端 ID、客户端密钥、控制 TLS CA 和重连参数；不存映射或目标访问密钥。目标 Agent 本地端到端证书私钥是自动生成的身份状态，不是业务配置；当前实现将 PFX 写入 Agent 本地配置文件所在目录，用 Windows 当前用户 ACL 或 Unix `0600` 权限保护。部署时须将 Agent 配置放在受保护的数据目录，不提交仓库或由 Server 下载私钥。首次启动后可执行 `RelayLink.Agent --config <配置路径> --show-e2e-fingerprint` 获取本机证书 SHA-256 指纹；管理员应带外核对后写入被访问通道。新证书不得自动覆盖已有固定指纹。
 
 端口所有权现由 Agent 持有：基础配置的 `outboundPortRangeStart`/`outboundPortRangeEnd` 默认 20000–59999；首次在范围内选空闲端口，按映射 ID 写入 Agent 配置目录的 `<clientId>.ports.json`。再次启动优先绑定原端口；若占用，扫描范围内其他端口并原子更新状态文件。服务端旧 `localPort` 字段只为读取历史配置保留，不再参与快照或写入新的映射。服务端验证目标引用、密钥相等、指纹相等，并阻止将授权模式通道同时开放原云端代理监听。密钥不进入匿名 API、历史记录或日志；证书指纹作为非秘密元数据可出现在匿名通道 API。受保护管理 API 可生成/保存密钥，但不回显密钥。
 
@@ -40,7 +40,7 @@ Windows Schannel 在运行时需把文件私钥加载到当前用户密钥提供
 
 ## 3. 协议与状态
 
-沿用 `NTP1/1` 帧格式，新增类型及可选快照字段；互访必须两端运行支持这些类型的 Agent，旧 Agent 只适用于普通通道。已实现帧：
+沿用 `NTP1` magic，线协议版本升级为 `2`；互访必须两端运行支持这些类型的 Agent，旧 Agent 与新 Server 不兼容。已实现帧：
 
 | 帧 | 发送方向 | 作用 |
 |---|---|---|
@@ -55,7 +55,7 @@ Windows Schannel 在运行时需把文件私钥加载到当前用户密钥提供
 
 访问方 Agent 已通过现有独立客户端密钥注册；Server 从会话中取得调用方 ID，只按 Server 自己的已确认映射解析目标，不能相信请求自带目标 ID、目标端口或访问密钥。Server 不把访问密钥塞进 `PeerOpen`；被访问 Agent 使用自己的已确认通道快照取密钥。访问方在内层 TLS 握手时验证目标证书指纹；随后被访问方发出每连接 32 字节随机挑战，访问方在 TLS 内返回带域分隔的 HMAC-SHA256 证明，输入包含调用方 ID、目标通道 ID、连接 ID 和挑战。证书固定将挑战交换绑定到目标 Agent 的 TLS 会话；被访问方使用固定时间比较验证证明，验证之前不连接业务目标；双方不得在错误时降级为明文。
 
-内层 TLS Stream 写入到有界帧化适配器，Server 只验证帧类型、长度、配对关系与资源限额，将 DATA/FIN/RESET 原样送给另一个 Agent，不解码内层记录。每个方向只允许一个 reader 和一个 writer；32 KiB DATA 上限、写超时和取消机制沿用现有传输限制。应用 TCP 半关闭不能提前丢弃另一方向回包；Linux 与 Windows 双 Agent 集成测试均覆盖该行为。
+内层 TLS Stream 写入到有界帧化适配器，Server 只验证帧类型、长度、配对关系与资源限额，将 DATA/FIN/RESET 原样送给另一个 Agent，不解码内层记录。每个方向只允许一个 reader 和一个 writer；32 KiB DATA 上限、写超时和取消机制沿用现有传输限制。应用 TCP 半关闭不能提前丢弃另一方向回包；本机 Windows 双 Agent 随机字节、半关闭和并发实验已通过，但不能据此声称 RDP 等所有应用均兼容。
 
 业务 TCP 半关闭在内层 TLS 应用数据中表示：每段采用 4 字节大端长度加最多 32 KiB 载荷，长度 0 为单向 EOF；另一方向仍能返回数据。不能通过提前发送 TLS `close_notify` 来表示业务 EOF，因为 Windows Schannel 会过早终止回包。两方向都结束后才关闭帧化隧道。
 

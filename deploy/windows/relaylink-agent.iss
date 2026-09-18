@@ -26,6 +26,7 @@ UninstallDisplayName=RelayLink Agent
 Source: "{#PublishDir}\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
 Source: "install-agent-service.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "uninstall-agent-service.ps1"; DestDir: "{app}"; Flags: ignoreversion
+Source: "agent-monitor-shortcut.ps1"; DestDir: "{app}"; Flags: ignoreversion
 
 [Code]
 var

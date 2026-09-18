@@ -21,7 +21,19 @@ public sealed record TunnelConfiguration(
     string PrivateKeyPemPath,
     int HandshakeTimeoutSeconds,
     int HeartbeatIntervalSeconds,
-    int HeartbeatTimeoutSeconds);
+    int HeartbeatTimeoutSeconds)
+{
+    public int DataPort { get; init; }
+    [JsonIgnore]
+    public int EffectiveDataPort => DataPort == 0 ? Port + 1 : DataPort;
+    public string? AgentServerHost { get; init; }
+    public string? TrustedCaPemPath { get; init; }
+
+    [JsonIgnore]
+    public string? DefaultAgentServerHost => !string.IsNullOrWhiteSpace(AgentServerHost)
+        ? AgentServerHost
+        : ListenAddress is "0.0.0.0" or "::" ? null : ListenAddress;
+}
 
 public sealed record DashboardConfiguration(string ListenAddress, int Port, int RefreshSeconds, DashboardAdminConfiguration Admin);
 

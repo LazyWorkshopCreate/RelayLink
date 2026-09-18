@@ -6,6 +6,7 @@ var host = options.GetValueOrDefault("--host", "127.0.0.1");
 var port = int.Parse(options.GetValueOrDefault("--port") ?? throw new ArgumentException("Use --port."));
 var connections = int.Parse(options.GetValueOrDefault("--connections", "1"));
 var bytes = int.Parse(options.GetValueOrDefault("--bytes", "4096"));
+var halfClose = bool.Parse(options.GetValueOrDefault("--half-close", "false"));
 var expectedTag = System.Text.Encoding.UTF8.GetBytes(options.GetValueOrDefault("--expected-tag", ""));
 using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
 var token = timeout.Token;
@@ -19,6 +20,7 @@ await Task.WhenAll(Enumerable.Range(0, connections).Select(async index =>
         var payload = RandomNumberGenerator.GetBytes(bytes);
         var stream = client.GetStream();
         await stream.WriteAsync(payload, token);
+        if (halfClose) client.Client.Shutdown(SocketShutdown.Send);
         var received = new byte[bytes + expectedTag.Length];
         var offset = 0;
         while (offset < bytes)
@@ -29,6 +31,7 @@ await Task.WhenAll(Enumerable.Range(0, connections).Select(async index =>
         }
         if (!received.AsSpan(0, expectedTag.Length).SequenceEqual(expectedTag)) throw new InvalidOperationException("Response channel tag did not match.");
         if (!CryptographicOperations.FixedTimeEquals(payload, received.AsSpan(expectedTag.Length))) throw new InvalidOperationException("Payload mismatch.");
+        if (halfClose && await stream.ReadAsync(new byte[1], token) != 0) throw new InvalidOperationException("Expected EOF after the half-closed response.");
     }
     catch (Exception exception)
     {

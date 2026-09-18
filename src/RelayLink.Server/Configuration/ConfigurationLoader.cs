@@ -34,7 +34,8 @@ public sealed class ConfigurationLoader
             Tunnel = server.Tunnel with
             {
                 CertificatePemPath = string.IsNullOrWhiteSpace(server.Tunnel.CertificatePemPath) ? string.Empty : Path.GetFullPath(server.Tunnel.CertificatePemPath, configurationDirectory),
-                PrivateKeyPemPath = string.IsNullOrWhiteSpace(server.Tunnel.PrivateKeyPemPath) ? string.Empty : Path.GetFullPath(server.Tunnel.PrivateKeyPemPath, configurationDirectory)
+                PrivateKeyPemPath = string.IsNullOrWhiteSpace(server.Tunnel.PrivateKeyPemPath) ? string.Empty : Path.GetFullPath(server.Tunnel.PrivateKeyPemPath, configurationDirectory),
+                TrustedCaPemPath = string.IsNullOrWhiteSpace(server.Tunnel.TrustedCaPemPath) ? null : Path.GetFullPath(server.Tunnel.TrustedCaPemPath, configurationDirectory)
             }
         };
         if (server.History is not null)
@@ -126,10 +127,21 @@ public sealed class ConfigurationLoader
         }
 
         ValidateAddressAndPort(server.Tunnel.ListenAddress, server.Tunnel.Port, "tunnel endpoint");
-        ValidateAddressAndPort(server.Dashboard.ListenAddress, server.Dashboard.Port, "dashboard endpoint");
-        if (server.Tunnel.Port == server.Dashboard.Port && server.Tunnel.ListenAddress == server.Dashboard.ListenAddress)
+        ValidateAddressAndPort(server.Tunnel.ListenAddress, server.Tunnel.EffectiveDataPort, "data endpoint");
+        if (server.Tunnel.Port == server.Tunnel.EffectiveDataPort)
+            throw new ConfigurationException("Control and data endpoints must use different ports.");
+        if (server.Tunnel.AgentServerHost is { } agentServerHost &&
+            (string.IsNullOrWhiteSpace(agentServerHost) ||
+             Uri.CheckHostName(agentServerHost) == UriHostNameType.Unknown ||
+             agentServerHost is "0.0.0.0" or "::"))
         {
-            throw new ConfigurationException("Tunnel and dashboard endpoints conflict.");
+            throw new ConfigurationException("Tunnel agentServerHost must be a DNS name or a concrete IP address.");
+        }
+        ValidateAddressAndPort(server.Dashboard.ListenAddress, server.Dashboard.Port, "dashboard endpoint");
+        if ((server.Tunnel.Port == server.Dashboard.Port || server.Tunnel.EffectiveDataPort == server.Dashboard.Port) &&
+            EndpointsOverlap(server.Tunnel.ListenAddress, server.Dashboard.ListenAddress))
+        {
+            throw new ConfigurationException("Control/data and dashboard endpoints conflict.");
         }
 
         if (!IsIdentifier(server.Dashboard.Admin.Username) || string.IsNullOrWhiteSpace(server.Dashboard.Admin.PasswordHash) || server.Dashboard.Admin.SessionLifetimeMinutes is < 5 or > 720)
@@ -152,6 +164,25 @@ public sealed class ConfigurationLoader
             throw new ConfigurationException($"Unable to load tunnel certificate and private key: {exception.Message}");
         }
 
+        if (server.Tunnel.TlsEnabled && server.Tunnel.TrustedCaPemPath is { } caPath)
+        {
+            try
+            {
+                if (new FileInfo(caPath).Length > 262144) throw new ConfigurationException("Trusted CA PEM is too large.");
+                var pem = File.ReadAllText(caPath);
+                if (pem.Contains("PRIVATE KEY", StringComparison.OrdinalIgnoreCase)) throw new ConfigurationException("Trusted CA PEM must not contain a private key.");
+                var certificates = new X509Certificate2Collection();
+                certificates.ImportFromPem(pem);
+                if (certificates.Count == 0 || certificates.Cast<X509Certificate2>().Any(certificate => certificate.Extensions.OfType<X509BasicConstraintsExtension>().FirstOrDefault() is not { CertificateAuthority: true }))
+                    throw new ConfigurationException("Trusted CA PEM must contain only CA certificates.");
+                foreach (var certificate in certificates) certificate.Dispose();
+            }
+            catch (Exception exception) when (exception is CryptographicException or IOException or ArgumentException)
+            {
+                throw new ConfigurationException($"Unable to load tunnel trusted CA PEM: {exception.Message}");
+            }
+        }
+
         if (server.Limits.MaxConnections < 1 || server.Limits.MaxPendingConnections < 1 || server.Limits.MaxPendingConnections > server.Limits.MaxConnections || server.Limits.MaxUnauthenticatedConnections < 1 || server.Limits.MaxChannelsPerClient < 1 || server.Limits.OpenTimeoutSeconds < 1 || server.Limits.BlockedWriteTimeoutSeconds < 1 || server.Limits.HalfCloseDrainTimeoutSeconds < 1)
         {
             throw new ConfigurationException("Server limits are invalid.");
@@ -165,7 +196,12 @@ public sealed class ConfigurationLoader
 
     private static void ValidateClient(ClientConfiguration client, string path, ServerConfiguration server)
     {
-        if (client.SchemaVersion != 1 || !IsIdentifier(client.ClientId) || string.IsNullOrWhiteSpace(client.DisplayName) || client.Channels is null || client.OutboundMappings is null)
+        if (!IsIdentifier(client.ClientId))
+        {
+            throw new ConfigurationException("Client ID must be 1–64 characters: lowercase a–z, digits, '_' or '-', starting with a letter or digit.");
+        }
+
+        if (client.SchemaVersion != 1 || string.IsNullOrWhiteSpace(client.DisplayName) || client.Channels is null || client.OutboundMappings is null)
         {
             throw new ConfigurationException($"Invalid client configuration: {path}");
         }
@@ -233,7 +269,9 @@ public sealed class ConfigurationLoader
                     throw new ConfigurationException($"Duplicate enabled channel endpoint: {endpoint}");
                 }
 
-                if ((channel.ListenAddress == server.Tunnel.ListenAddress && channel.ListenPort == server.Tunnel.Port) || (channel.ListenAddress == server.Dashboard.ListenAddress && channel.ListenPort == server.Dashboard.Port))
+                if ((channel.ListenPort == server.Tunnel.Port && EndpointsOverlap(channel.ListenAddress, server.Tunnel.ListenAddress)) ||
+                    (channel.ListenPort == server.Tunnel.EffectiveDataPort && EndpointsOverlap(channel.ListenAddress, server.Tunnel.ListenAddress)) ||
+                    (channel.ListenPort == server.Dashboard.Port && EndpointsOverlap(channel.ListenAddress, server.Dashboard.ListenAddress)))
                 {
                     throw new ConfigurationException($"Channel endpoint conflicts with a server endpoint: {endpoint}");
                 }
@@ -291,6 +329,7 @@ public sealed class ConfigurationLoader
     }
 
     private static bool IsIdentifier(string? value) => value is { Length: > 0 and <= 64 } && System.Text.RegularExpressions.Regex.IsMatch(value, "^[a-z0-9][a-z0-9_-]{0,63}$", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+    private static bool EndpointsOverlap(string first, string second) => first == second || first is "0.0.0.0" or "::" || second is "0.0.0.0" or "::";
     private static void ValidateAddressAndPort(string? address, int port, string label)
     {
         if (!IPAddress.TryParse(address, out _) || port is < 1 or > 65535) throw new ConfigurationException($"Invalid {label}.");

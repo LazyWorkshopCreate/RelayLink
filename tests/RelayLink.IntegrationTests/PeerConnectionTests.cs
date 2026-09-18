@@ -248,8 +248,8 @@ public sealed class PeerConnectionTests
         Assert.Equal(FrameType.PeerOpenGranted, grantFrame?.Type);
         var grant = JsonProtocolSerializer.Deserialize<PeerOpenGrantedMessage>(grantFrame!.Payload.Span);
         using var dataClient = new TcpClient();
-        await dataClient.ConnectAsync(IPAddress.Loopback, fixture.TunnelPort, deadline.Token);
-        await using var dataOuter = await fixture.AuthenticateOuterAsync(dataClient, deadline.Token);
+        await dataClient.ConnectAsync(IPAddress.Loopback, fixture.DataPort, deadline.Token);
+        await using var dataOuter = dataClient.GetStream();
         var dataReader = new FrameReader(dataOuter);
         var dataWriter = new FrameWriter(dataOuter);
         await dataWriter.WriteAsync(new Frame(FrameType.PeerBindData, JsonProtocolSerializer.Serialize(new PeerBindDataMessage(grant.ConnectionId, grant.SessionId, grant.Token, "caller"))), deadline.Token);
@@ -282,6 +282,7 @@ public sealed class PeerConnectionTests
         public int AgentDashboardPort { get; } = FreePort();
         public int ProxyPort { get; } = FreePort();
         public int TunnelPort { get; } = FreePort();
+        public int DataPort { get; } = FreePort();
         private int DashboardPort { get; } = FreePort();
         private string caPath = string.Empty;
         public string DashboardAddress => $"127.0.0.1:{DashboardPort}";
@@ -328,7 +329,7 @@ public sealed class PeerConnectionTests
             var keyPath = Path.Combine(directory, "server-key.pem");
             CreateOuterCertificate(caPath, certificatePath, keyPath);
             var serverConfig = new ServerConfiguration(1,
-                new TunnelConfiguration("127.0.0.1", TunnelPort, true, certificatePath, keyPath, 10, 15, 45),
+                new TunnelConfiguration("127.0.0.1", TunnelPort, true, certificatePath, keyPath, 10, 15, 45) { DataPort = DataPort },
                 new DashboardConfiguration("127.0.0.1", DashboardPort, 5, new DashboardAdminConfiguration("admin", PasswordHash(), 60)),
                 clients, new LimitsConfiguration(50, 20, 50, 10, 20, 120, 300), null);
             var serverPath = Path.Combine(directory, "server.json");
@@ -471,7 +472,7 @@ public sealed class PeerConnectionTests
 
         private string AgentJson(string clientId, string secret) => JsonSerializer.Serialize(new
         {
-            serverHost = "127.0.0.1", serverPort = TunnelPort, clientId, secret, useTls = true, trustedCaPemPath = caPath,
+            serverHost = "127.0.0.1", serverPort = TunnelPort, dataPort = DataPort, clientId, secret, useTls = true, trustedCaPemBase64 = Convert.ToBase64String(File.ReadAllBytes(caPath)),
             dashboardPort = clientId == "caller" ? AgentDashboardPort : 0,
             reconnect = new { initialDelaySeconds = 1, maxDelaySeconds = 2, permanentErrorDelaySeconds = 2 }
         });
