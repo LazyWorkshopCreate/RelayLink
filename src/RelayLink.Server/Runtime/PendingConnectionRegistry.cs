@@ -10,9 +10,9 @@ public sealed class PendingConnectionRegistry
 {
     private readonly ConcurrentDictionary<Guid, PendingConnection> pending = new();
 
-    public PendingConnection Create(Session session, ChannelConfiguration channel, Socket caller, TimeSpan timeout)
+    public PendingConnection Create(Session session, ChannelConfiguration channel, Socket caller, TimeSpan timeout, Guid connectionId)
     {
-        var connection = new PendingConnection(session.SessionId, channel, caller, DateTimeOffset.UtcNow.Add(timeout), session.LifetimeToken);
+        var connection = new PendingConnection(session.SessionId, channel, caller, DateTimeOffset.UtcNow.Add(timeout), session.LifetimeToken, connectionId);
         if (!pending.TryAdd(connection.ConnectionId, connection)) throw new InvalidOperationException("Connection ID collision.");
         return connection;
     }
@@ -46,7 +46,7 @@ public sealed class PendingConnectionRegistry
     public bool TryGet(Guid connectionId, out PendingConnection? connection) => pending.TryGetValue(connectionId, out connection);
 }
 
-public sealed class PendingConnection(Guid sessionId, ChannelConfiguration channel, Socket caller, DateTimeOffset deadlineUtc, CancellationToken sessionToken = default) : IDisposable
+public sealed class PendingConnection(Guid sessionId, ChannelConfiguration channel, Socket caller, DateTimeOffset deadlineUtc, CancellationToken sessionToken = default, Guid? connectionId = null) : IDisposable
 {
     private readonly byte[] tokenBytes = RandomNumberGenerator.GetBytes(32);
     private int tokenConsumed;
@@ -56,7 +56,7 @@ public sealed class PendingConnection(Guid sessionId, ChannelConfiguration chann
     private readonly TaskCompletionSource completed = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     public Guid SessionId { get; } = sessionId;
-    public Guid ConnectionId { get; } = Guid.NewGuid();
+    public Guid ConnectionId { get; } = connectionId ?? Guid.NewGuid();
     public ChannelConfiguration Channel { get; } = channel;
     public Socket Caller { get; } = caller;
     public DateTimeOffset DeadlineUtc { get; } = deadlineUtc;

@@ -1,0 +1,94 @@
+<Slide style={{ width: '1280px', height: '720px', padding: '20px 64px', background: '#FFFFFF' }}>
+    <Box style={{ height: 88, flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between' }}>
+        <Box>
+            <Text style={{ fontSize: 13, fontWeight: 600, color: '#2563EB', letterSpacing: 2 }}>CHAPTER 04 · 交付形态</Text>
+            <Box style={{ height: 8 }} />
+            <Text style={{ fontSize: 34, fontWeight: 'bold', color: '#0F172A', lineHeight: 1.25 }}>三种交付物，一条流水线产出</Text>
+        </Box>
+        <Box style={{ width: 4, height: 44, background: '#2563EB' }} />
+    </Box>
+
+    <Box style={{ height: 524, marginTop: 16 }}>
+        <Box style={{ height: 276, flexDirection: 'row', gap: 16 }}>
+            <Box style={{ width: 380, background: '#0F172A', borderRadius: 10, padding: '22px 22px', justifyContent: 'space-between' }}>
+                <Box>
+                    <Box style={{ width: 48, height: 3, background: '#2563EB' }} />
+                    <Box style={{ height: 16 }} />
+                    <Text style={{ fontSize: 24, fontWeight: 'bold', color: '#FFFFFF' }}>Linux 服务端</Text>
+                    <Box style={{ height: 6 }} />
+                    <Text style={{ fontSize: 14, color: '#60A5FA' }}>linux-x64 自包含</Text>
+                    <Box style={{ height: 16 }} />
+                    <Text style={{ fontSize: 14, color: '#FFFFFF', lineHeight: 1.7 }}>systemd 托管</Text>
+                    <Text style={{ fontSize: 14, color: '#CBD5E1', lineHeight: 1.7 }}>/etc/relaylink/server.json</Text>
+                    <Text style={{ fontSize: 14, color: '#CBD5E1', lineHeight: 1.7 }}>clients/*.json · tls/</Text>
+                    <Text style={{ fontSize: 14, color: '#CBD5E1', lineHeight: 1.7 }}>LimitNOFILE=16384</Text>
+                </Box>
+                <Text style={{ fontSize: 13, color: '#94A3B8', lineHeight: 1.55 }}>非 root 账号运行，配置只读。</Text>
+            </Box>
+
+            <Box style={{ width: 340, background: '#EEF2F8', borderRadius: 10, padding: '22px 22px', justifyContent: 'space-between' }}>
+                <Box>
+                    <Box style={{ width: 48, height: 3, background: '#2563EB' }} />
+                    <Box style={{ height: 16 }} />
+                    <Text style={{ fontSize: 24, fontWeight: 'bold', color: '#0F172A' }}>Windows 服务端</Text>
+                    <Box style={{ height: 6 }} />
+                    <Text style={{ fontSize: 14, color: '#64748B' }}>win-x64 自包含</Text>
+                    <Box style={{ height: 16 }} />
+                    <Text style={{ fontSize: 14, color: '#0F172A', lineHeight: 1.7 }}>Windows Service 托管</Text>
+                    <Text style={{ fontSize: 14, color: '#64748B', lineHeight: 1.7 }}>Kestrel 直接监听</Text>
+                    <Text style={{ fontSize: 14, color: '#64748B', lineHeight: 1.7 }}>服务账号最小读取权限</Text>
+                    <Text style={{ fontSize: 14, color: '#64748B', lineHeight: 1.7 }}>无需 IIS / Nginx 反代</Text>
+                </Box>
+                <Text style={{ fontSize: 13, color: '#64748B', lineHeight: 1.55 }}>与 Agent 共用同一套 Host 生命周期。</Text>
+            </Box>
+
+            <Box style={{ width: 400, background: '#FFFFFF', border: '1.5px solid #DCE3ED', borderRadius: 10, padding: '22px 22px', justifyContent: 'space-between' }}>
+                <Box>
+                    <Box style={{ width: 48, height: 3, background: '#2563EB' }} />
+                    <Box style={{ height: 16 }} />
+                    <Text style={{ fontSize: 24, fontWeight: 'bold', color: '#0F172A' }}>Windows Agent 安装包</Text>
+                    <Box style={{ height: 6 }} />
+                    <Text style={{ fontSize: 14, color: '#64748B' }}>Inno Setup · win-x64</Text>
+                    <Box style={{ height: 16 }} />
+                    <Text style={{ fontSize: 14, color: '#0F172A', lineHeight: 1.7 }}>向导必须选择 Agent JSON 配置</Text>
+                    <Text style={{ fontSize: 14, color: '#64748B', lineHeight: 1.7 }}>无配置 / 校验失败 → 不安装</Text>
+                    <Text style={{ fontSize: 14, color: '#64748B', lineHeight: 1.7 }}>注册自动启动服务并立即启动</Text>
+                    <Text style={{ fontSize: 14, color: '#64748B', lineHeight: 1.7 }}>桌面创建本机状态页快捷方式</Text>
+                </Box>
+                <Text style={{ fontSize: 13, color: '#64748B', lineHeight: 1.55 }}>卸载保留配置与身份文件。</Text>
+            </Box>
+        </Box>
+
+        <Box style={{ height: 234, marginTop: 14, flexDirection: 'row', gap: 32 }}>
+            <Box style={{ width: 560, background: '#EEF2F8', borderRadius: 10, padding: '22px 24px', justifyContent: 'space-between' }}>
+                <Box>
+                    <Text style={{ fontSize: 20, fontWeight: 600, color: '#0F172A' }}>GitHub Actions：校验与发行分开</Text>
+                    <Box style={{ height: 10 }} />
+                    <Text style={{ fontSize: 15, color: '#64748B', lineHeight: 1.65 }}>推送 main 或提交 PR 时，在 Linux 与 Windows 上跑前端类型检查、组件测试与 .NET 单元/集成测试，不产出发布包。</Text>
+                    <Box style={{ height: 10 }} />
+                    <Text style={{ fontSize: 15, color: '#64748B', lineHeight: 1.65 }}>只有 <span style={{ color: '#0F172A', fontWeight: '600' }}>v1.2.3</span> 形式的 tag 才触发发行：先复用全部校验，再产出三件产物并附 SHA-256 清单。</Text>
+                </Box>
+                <Text style={{ fontSize: 13, color: '#2563EB', fontWeight: 600 }}>临时产物保留 7 天 · 仅 Release 作业持有写权限</Text>
+            </Box>
+
+            <Box style={{ width: 560, background: '#0F172A', borderRadius: 10, padding: '22px 24px', justifyContent: 'space-between' }}>
+                <Box>
+                    <Text style={{ fontSize: 20, fontWeight: 600, color: '#FFFFFF' }}>流水线通过 ≠ 环境验收通过</Text>
+                    <Box style={{ height: 10 }} />
+                    <Text style={{ fontSize: 15, color: '#CBD5E1', lineHeight: 1.65 }}>安装包不是签名发行版；Windows Service 最小权限的专项核查、多种 NAT 类型的系统验收、24 小时满载压测都未完成。</Text>
+                    <Box style={{ height: 10 }} />
+                    <Text style={{ fontSize: 15, color: '#CBD5E1', lineHeight: 1.65 }}>构建机 SDK 为预览版，正式发布前还需稳定运行时复验。</Text>
+                </Box>
+                <Text style={{ fontSize: 13, color: '#60A5FA', fontWeight: 600 }}>把"能编译"和"能用"分开记录</Text>
+            </Box>
+        </Box>
+    </Box>
+
+    <Box style={{ height: 36, marginTop: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+        <Box style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+            <Box style={{ width: 6, height: 6, background: '#2563EB' }} />
+            <Text style={{ fontSize: 14, color: '#64748B' }}>RelayLink · 开源反向 TCP 代理</Text>
+        </Box>
+        <Text style={{ fontSize: 14, color: '#64748B' }}>{{PAGE}} / {{TOTAL}}</Text>
+    </Box>
+</Slide>

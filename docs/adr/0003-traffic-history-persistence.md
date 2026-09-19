@@ -1,6 +1,6 @@
 # ADR-0003：流量历史持久化
 
-状态：Accepted\
+状态：Superseded（由 [ADR-0010](0010-sqlite-minute-traffic-history.md) 替代）\
 日期：2026-09-16
 
 ## 背景

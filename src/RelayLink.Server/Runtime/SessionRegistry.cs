@@ -41,7 +41,6 @@ public sealed class Session(Guid sessionId, string clientId, DateTimeOffset conn
     public DateTimeOffset LastHeartbeatUtc { get; set; } = connectedAtUtc;
     public TimeSpan? LastHeartbeatRtt { get; set; }
     public string? AgentVersion { get; set; }
-    public string? E2eCertificateSha256 { get; set; }
     private FrameWriter? ControlWriter { get; set; }
     private long expectedPongSequence;
     private long pingTimestamp;

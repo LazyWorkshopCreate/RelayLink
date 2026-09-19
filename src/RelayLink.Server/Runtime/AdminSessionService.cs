@@ -42,6 +42,8 @@ public sealed class AdminSessionService(ServerRuntime runtime)
         if (request.Cookies.TryGetValue(CookieName, out var id)) sessions.TryRemove(id, out _);
     }
 
+    public void Revoke(AdminSession session) => sessions.TryRemove(session.Id, out _);
+
     private static bool VerifyPassword(string? password, string encoded)
     {
         if (password is null) return false;

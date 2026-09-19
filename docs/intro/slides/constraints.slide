@@ -1,0 +1,62 @@
+<Slide style={{ width: '1280px', height: '720px', padding: '20px 64px', background: '#FFFFFF' }}>
+    <Box style={{ height: 88, flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between' }}>
+        <Box>
+            <Text style={{ fontSize: 13, fontWeight: 600, color: '#2563EB', letterSpacing: 2 }}>CHAPTER 01 · 问题</Text>
+            <Box style={{ height: 8 }} />
+            <Text style={{ fontSize: 34, fontWeight: 'bold', color: '#0F172A', lineHeight: 1.25 }}>三个硬约束，锁死了几乎所有常规方案</Text>
+        </Box>
+        <Box style={{ width: 4, height: 44, background: '#2563EB' }} />
+    </Box>
+
+    <Box style={{ height: 524, marginTop: 16, flexDirection: 'row', gap: 28 }}>
+        <Box style={{ width: 704, justifyContent: 'space-between' }}>
+            <Box style={{ height: 164, background: '#EEF2F8', borderRadius: 10, padding: '22px 26px', flexDirection: 'row', gap: 20 }}>
+                <Text style={{ fontSize: 40, fontWeight: 'bold', color: '#2563EB', width: 56 }}>1</Text>
+                <Box style={{ flex: 1 }}>
+                    <Text style={{ fontSize: 22, fontWeight: 600, color: '#0F172A' }}>内网侧没有可拨号的公网地址</Text>
+                    <Box style={{ height: 10 }} />
+                    <Text style={{ fontSize: 16, color: '#64748B', lineHeight: 1.6 }}>分支机构和门店的出口大多在运营商 NAT 之后，云端拿不到一个能反向拨号的稳定地址，专线与 SD-WAN 的成本又远超项目预算。</Text>
+                </Box>
+            </Box>
+
+            <Box style={{ height: 164, background: '#EEF2F8', borderRadius: 10, padding: '22px 26px', flexDirection: 'row', gap: 20 }}>
+                <Text style={{ fontSize: 40, fontWeight: 'bold', color: '#2563EB', width: 56 }}>2</Text>
+                <Box style={{ flex: 1 }}>
+                    <Text style={{ fontSize: 22, fontWeight: 600, color: '#0F172A' }}>不允许为内网开放公网入站端口</Text>
+                    <Box style={{ height: 10 }} />
+                    <Text style={{ fontSize: 16, color: '#64748B', lineHeight: 1.6 }}>把 1433 或 3389 暴露到公网等于把数据库和桌面直接交出去，安全评审这一关基本不可能过，也不应该过。</Text>
+                </Box>
+            </Box>
+
+            <Box style={{ height: 164, background: '#EEF2F8', borderRadius: 10, padding: '22px 26px', flexDirection: 'row', gap: 20 }}>
+                <Text style={{ fontSize: 40, fontWeight: 'bold', color: '#2563EB', width: 56 }}>3</Text>
+                <Box style={{ flex: 1 }}>
+                    <Text style={{ fontSize: 22, fontWeight: 600, color: '#0F172A' }}>业务系统这一侧几乎不能改动</Text>
+                    <Box style={{ height: 10 }} />
+                    <Text style={{ fontSize: 16, color: '#64748B', lineHeight: 1.6 }}>ERP、MES 的连接串和驱动版本多年未变，让它改成走消息队列或者 HTTP 网关，改造量和风险都比接一条 TCP 隧道大得多。</Text>
+                </Box>
+            </Box>
+        </Box>
+
+        <Box style={{ width: 420, background: '#0F172A', borderRadius: 10, padding: '30px 28px', justifyContent: 'space-between' }}>
+            <Box>
+                <Text style={{ fontSize: 13, fontWeight: 600, color: '#60A5FA', letterSpacing: 2 }}>结论</Text>
+                <Box style={{ height: 16 }} />
+                <Text style={{ fontSize: 30, fontWeight: 'bold', color: '#FFFFFF', lineHeight: 1.3 }}>能动的，只有<br />"由谁发起连接"<br />这一件事</Text>
+            </Box>
+            <Box>
+                <Box style={{ width: 52, height: 3, background: '#2563EB' }} />
+                <Box style={{ height: 18 }} />
+                <Text style={{ fontSize: 16, color: '#CBD5E1', lineHeight: 1.65 }}>反向连接本身不是新东西。真正的工程量在于：把配置下发、身份校验、可观测性和生命周期管理一并做进去，让它不再是运维手里的一个脚本。</Text>
+            </Box>
+        </Box>
+    </Box>
+
+    <Box style={{ height: 36, marginTop: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+        <Box style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+            <Box style={{ width: 6, height: 6, background: '#2563EB' }} />
+            <Text style={{ fontSize: 14, color: '#64748B' }}>RelayLink · 开源反向 TCP 代理</Text>
+        </Box>
+        <Text style={{ fontSize: 14, color: '#64748B' }}>{{PAGE}} / {{TOTAL}}</Text>
+    </Box>
+</Slide>

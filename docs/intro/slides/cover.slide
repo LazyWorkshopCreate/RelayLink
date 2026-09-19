@@ -1,0 +1,56 @@
+<Slide style={{ width: '1280px', height: '720px', padding: 0, background: '#FFFFFF', flexDirection: 'row', position: 'relative' }}>
+    <Box style={{ position: 'absolute', top: 0, right: 0, width: 660, height: 720, background: 'linear-gradient(135deg,#EEF2F8 0%,#FFFFFF 100%)' }} />
+    <Box style={{ position: 'absolute', left: 0, bottom: 0, width: 420, height: 6, background: '#2563EB' }} />
+
+    <Box style={{ width: 680, height: '100%', padding: '0 40px 0 64px', justifyContent: 'center', zIndex: 1 }}>
+        <Text style={{ fontSize: 13, fontWeight: 600, color: '#2563EB', letterSpacing: 2 }}>OPEN SOURCE · .NET 10 · TCP RELAY</Text>
+        <Box style={{ height: 24 }} />
+        <Text style={{ fontSize: 76, fontWeight: 'bold', color: '#0F172A', lineHeight: 1.1 }}>RelayLink</Text>
+        <Box style={{ height: 22 }} />
+        <Text style={{ fontSize: 30, fontWeight: 'bold', color: '#0F172A', lineHeight: 1.35 }}>让云端应用访问<br />任意内网 TCP 服务</Text>
+        <Box style={{ height: 26 }} />
+        <Box style={{ width: 72, height: 3, background: '#2563EB' }} />
+        <Box style={{ height: 24 }} />
+        <Text style={{ fontSize: 18, color: '#64748B', lineHeight: 1.6 }}>
+            内网不开公网入站端口<span style={{ color: '#0F172A', fontWeight: 'bold' }}> —— 连接永远由 Agent 主动发起</span>
+        </Text>
+        <Box style={{ height: 40 }} />
+        <Text style={{ fontSize: 15, color: '#2563EB', letterSpacing: 0.5 }}>github.com/LazyWorkshopCreate/RelayLink</Text>
+    </Box>
+
+    <Box style={{ width: 600, height: '100%', alignItems: 'center', justifyContent: 'center', zIndex: 1 }}>
+        <svg width={540} height={520} viewBox='0 0 540 520'>
+            <circle cx='270' cy='260' r='196' fill='none' stroke='#DCE3ED' strokeWidth='1.5' strokeDasharray='4 8' />
+            <circle cx='270' cy='260' r='128' fill='none' stroke='#DCE3ED' strokeWidth='1.5' strokeDasharray='4 8' />
+            <path d='M78 92 L228 216' stroke='#2563EB' strokeWidth='1.6' />
+            <path d='M470 108 L318 214' stroke='#2563EB' strokeWidth='1.6' />
+            <path d='M62 268 L206 258' stroke='#2563EB' strokeWidth='1.6' />
+            <path d='M488 272 L340 262' stroke='#2563EB' strokeWidth='1.6' />
+            <path d='M108 452 L232 316' stroke='#2563EB' strokeWidth='1.6' />
+            <path d='M446 438 L312 312' stroke='#2563EB' strokeWidth='1.6' />
+            <path d='M246 234 L214 206 L262 200 Z' fill='#2563EB' />
+            <path d='M300 232 L332 202 L332 250 Z' fill='#2563EB' />
+            <path d='M206 258 L172 248 L172 274 Z' fill='#2563EB' />
+            <path d='M340 262 L374 252 L374 278 Z' fill='#2563EB' />
+            <path d='M240 300 L208 336 L246 348 Z' fill='#2563EB' />
+            <path d='M304 300 L336 336 L298 348 Z' fill='#2563EB' />
+            <circle cx='270' cy='260' r='62' fill='#0F172A' />
+            <circle cx='270' cy='260' r='44' fill='none' stroke='#60A5FA' strokeWidth='1.5' />
+            <rect x='244' y='238' width='52' height='10' rx='5' fill='#FFFFFF' />
+            <rect x='244' y='256' width='36' height='10' rx='5' fill='#60A5FA' />
+            <rect x='244' y='274' width='44' height='10' rx='5' fill='#FFFFFF' opacity='0.55' />
+            <circle cx='78' cy='92' r='17' fill='#FFFFFF' stroke='#0F172A' strokeWidth='2' />
+            <circle cx='470' cy='108' r='17' fill='#FFFFFF' stroke='#0F172A' strokeWidth='2' />
+            <circle cx='62' cy='268' r='17' fill='#FFFFFF' stroke='#0F172A' strokeWidth='2' />
+            <circle cx='488' cy='272' r='17' fill='#FFFFFF' stroke='#0F172A' strokeWidth='2' />
+            <circle cx='108' cy='452' r='17' fill='#FFFFFF' stroke='#0F172A' strokeWidth='2' />
+            <circle cx='446' cy='438' r='17' fill='#FFFFFF' stroke='#0F172A' strokeWidth='2' />
+            <rect x='52' y='124' width='52' height='6' rx='3' fill='#DCE3ED' />
+            <rect x='444' y='140' width='52' height='6' rx='3' fill='#DCE3ED' />
+            <rect x='34' y='300' width='52' height='6' rx='3' fill='#DCE3ED' />
+            <rect x='462' y='304' width='52' height='6' rx='3' fill='#DCE3ED' />
+            <rect x='84' y='484' width='52' height='6' rx='3' fill='#DCE3ED' />
+            <rect x='420' y='470' width='52' height='6' rx='3' fill='#DCE3ED' />
+        </svg>
+    </Box>
+</Slide>

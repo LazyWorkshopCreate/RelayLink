@@ -21,7 +21,8 @@ RelayLink/
 │   ├── adr/                  架构决策记录
 │   ├── development/          开发及文档管理规则
 │   ├── operations/           安装与使用指南
-│   └── testing/              验证状态和测试证据
+│   ├── testing/              验证状态和测试证据
+│   └── intro/                对外介绍材料的源、插图与重建脚本
 ├── src/
 │   ├── RelayLink.Protocol/   帧协议、DTO、错误码
 │   ├── RelayLink.Transport/  TLS、转发和连接生命周期
@@ -48,6 +49,7 @@ RelayLink/
 - .github/workflows 保存只读日常验证与 tag 发行流水线，不存真实配置或部署凭据。
 - tools 保存独立的模拟目标与模拟调用方程序，不作为服务端或 Agent 的运行依赖。
 - 需要新增 docs/operations 等类别时，须在有实际内容后创建并加入索引，不预建大量空文档。
+- docs/intro 是演示文稿与公众号文章的唯一位置，`pages.json` 是页码来源；生成的 PPTX 与插图提交，`.build/`、`.cache/`、`.slidep/` 和 `legacy-bak/` 由目录内 .gitignore 排除。
 - 管理端源码放 `src/RelayLink.AdminWeb`；构建生成的 `dist/` 不提交。Server 构建/发布时复制产物到输出目录的 `wwwroot/`，不再手工维护服务端静态页面；参见 [ADR-0004](../adr/0004-standalone-admin-web.md)。
 
 ## 命名

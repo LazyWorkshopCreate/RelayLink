@@ -1,0 +1,75 @@
+<Slide style={{ width: '1280px', height: '720px', padding: '20px 64px', background: '#FFFFFF' }}>
+    <Box style={{ height: 88, flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between' }}>
+        <Box>
+            <Text style={{ fontSize: 13, fontWeight: 600, color: '#2563EB', letterSpacing: 2 }}>CHAPTER 02 · 工程结构</Text>
+            <Box style={{ height: 8 }} />
+            <Text style={{ fontSize: 34, fontWeight: 'bold', color: '#0F172A', lineHeight: 1.25 }}>五个工程，各管一件事</Text>
+        </Box>
+        <Box style={{ width: 4, height: 44, background: '#2563EB' }} />
+    </Box>
+
+    <Box style={{ height: 524, marginTop: 16, flexDirection: 'row', gap: 28 }}>
+        <Box style={{ width: 260, background: '#0F172A', borderRadius: 10, padding: '28px 24px', justifyContent: 'space-between' }}>
+            <Box>
+                <Text style={{ fontSize: 26, fontWeight: 'bold', color: '#FFFFFF', lineHeight: 1.3 }}>.NET 10<br />五个工程</Text>
+                <Box style={{ height: 16 }} />
+                <Box style={{ width: 44, height: 3, background: '#2563EB' }} />
+            </Box>
+            <Box>
+                <Text style={{ fontSize: 15, color: '#CBD5E1', lineHeight: 1.6 }}>会变的（管理页、部署脚本）和不能错的（帧格式、字节转发）被刻意切开。</Text>
+                <Box style={{ height: 18 }} />
+                <Text style={{ fontSize: 13, color: '#64748B', lineHeight: 1.5 }}>约 7,000 行 C# · 约 2,500 行 TS</Text>
+            </Box>
+        </Box>
+
+        <Box style={{ flex: 1, justifyContent: 'space-between' }}>
+            <Box style={{ height: 96, flexDirection: 'row', alignItems: 'center', borderBottom: '1px solid #DCE3ED' }}>
+                <Box style={{ width: 210 }}>
+                    <Text style={{ fontSize: 19, fontWeight: 600, color: '#0F172A' }}>RelayLink.Protocol</Text>
+                    <Text style={{ fontSize: 13, color: '#2563EB' }}>帧 / 消息 / 错误码</Text>
+                </Box>
+                <Text style={{ flex: 1, fontSize: 15, color: '#64748B', lineHeight: 1.6 }}>帧头编解码、消息 DTO、错误码、协议版本与配置摘要哈希。Server 与 Agent 引用同一份定义，杜绝两侧各写一版解析。</Text>
+            </Box>
+
+            <Box style={{ height: 96, flexDirection: 'row', alignItems: 'center', borderBottom: '1px solid #DCE3ED' }}>
+                <Box style={{ width: 210 }}>
+                    <Text style={{ fontSize: 19, fontWeight: 600, color: '#0F172A' }}>RelayLink.Transport</Text>
+                    <Text style={{ fontSize: 13, color: '#2563EB' }}>TLS / 转发泵</Text>
+                </Box>
+                <Text style={{ flex: 1, fontSize: 15, color: '#64748B', lineHeight: 1.6 }}>TLS 握手、帧读写、双向复制、超时与字节计数。它只负责"怎么把字节搬过去"，不关心搬的是 SQL 还是别的什么。</Text>
+            </Box>
+
+            <Box style={{ height: 96, flexDirection: 'row', alignItems: 'center', borderBottom: '1px solid #DCE3ED' }}>
+                <Box style={{ width: 210 }}>
+                    <Text style={{ fontSize: 19, fontWeight: 600, color: '#0F172A' }}>RelayLink.Server</Text>
+                    <Text style={{ fontSize: 13, color: '#2563EB' }}>宿主 / 管理 API</Text>
+                </Box>
+                <Text style={{ flex: 1, fontSize: 15, color: '#64748B', lineHeight: 1.6 }}>ASP.NET Core 宿主：控制入口、数据入口、通道监听、会话注册表、管理 API 与 SQLite 分钟流量历史。</Text>
+            </Box>
+
+            <Box style={{ height: 96, flexDirection: 'row', alignItems: 'center', borderBottom: '1px solid #DCE3ED' }}>
+                <Box style={{ width: 210 }}>
+                    <Text style={{ fontSize: 19, fontWeight: 600, color: '#0F172A' }}>RelayLink.Agent</Text>
+                    <Text style={{ fontSize: 13, color: '#2563EB' }}>Windows Service</Text>
+                </Box>
+                <Text style={{ flex: 1, fontSize: 15, color: '#64748B', lineHeight: 1.6 }}>Generic Host + Windows Service：控制会话、目标拨号、本机互访入口与只读状态页；同一程序也能以控制台方式调试。</Text>
+            </Box>
+
+            <Box style={{ height: 96, flexDirection: 'row', alignItems: 'center' }}>
+                <Box style={{ width: 210 }}>
+                    <Text style={{ fontSize: 19, fontWeight: 600, color: '#0F172A' }}>RelayLink.AdminWeb</Text>
+                    <Text style={{ fontSize: 13, color: '#2563EB' }}>React + TS + Vite</Text>
+                </Box>
+                <Text style={{ flex: 1, fontSize: 15, color: '#64748B', lineHeight: 1.6 }}>独立前端项目，构建产物复制到 Server 的 wwwroot 由同源托管。生产发布物不依赖 Node.js，也不从 CDN 拉资源。</Text>
+            </Box>
+        </Box>
+    </Box>
+
+    <Box style={{ height: 36, marginTop: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+        <Box style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+            <Box style={{ width: 6, height: 6, background: '#2563EB' }} />
+            <Text style={{ fontSize: 14, color: '#64748B' }}>RelayLink · 开源反向 TCP 代理</Text>
+        </Box>
+        <Text style={{ fontSize: 14, color: '#64748B' }}>{{PAGE}} / {{TOTAL}}</Text>
+    </Box>
+</Slide>

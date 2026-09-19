@@ -1,6 +1,6 @@
 # ADR-0005：服务端协调的 Agent 互访与内层 TLS
 
-状态：Accepted\
+状态：Superseded by [ADR-0011](0011-client-level-e2e-identity.md)（证书登记部分）；其余互访决策仍适用\
 日期：2026-09-17
 
 ## 背景

@@ -15,7 +15,7 @@ public sealed class ProxyListenerTests
         var port = FreePort();
         var initial = Configuration("127.0.0.1", port);
         var runtime = new ServerRuntime(initial, new SessionRegistry());
-        using var service = new ProxyListenerService(runtime, new PendingConnectionRegistry(), new MetricsRegistry(initial), NullLogger<ProxyListenerService>.Instance);
+        using var service = new ProxyListenerService(runtime, new PendingConnectionRegistry(), new MetricsRegistry(initial), new AuditService(runtime, NullLogger<AuditService>.Instance), NullLogger<ProxyListenerService>.Instance);
         await service.ApplyConfigurationAsync(initial, CancellationToken.None);
 
         await service.ApplyConfigurationAsync(Configuration("0.0.0.0", port), CancellationToken.None);
@@ -31,7 +31,7 @@ public sealed class ProxyListenerTests
         var port = FreePort();
         var initial = Configuration("127.0.0.1", port);
         var runtime = new ServerRuntime(initial, new SessionRegistry());
-        using var service = new ProxyListenerService(runtime, new PendingConnectionRegistry(), new MetricsRegistry(initial), NullLogger<ProxyListenerService>.Instance);
+        using var service = new ProxyListenerService(runtime, new PendingConnectionRegistry(), new MetricsRegistry(initial), new AuditService(runtime, NullLogger<AuditService>.Instance), NullLogger<ProxyListenerService>.Instance);
         await service.ApplyConfigurationAsync(initial, CancellationToken.None);
         var occupiedPort = FreePort();
         using var competitor = new TcpListener(IPAddress.Any, occupiedPort);

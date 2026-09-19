@@ -16,8 +16,7 @@ public static class ConfigurationSnapshotFactory
                 .Select(channel => new ChannelSnapshot(channel.ChannelId, channel.DisplayName, channel.Enabled, channel.TargetHost, channel.TargetPort, channel.MaxConnections, channel.TargetConnectTimeoutSeconds)
                 {
                     AuthorizedClientsOnly = channel.AuthorizedClientsOnly,
-                    AccessSecret = channel.AuthorizedClientsOnly ? channel.AccessSecret : null,
-                    E2eCertificateSha256 = channel.AuthorizedClientsOnly ? channel.E2eCertificateSha256 : null
+                    AccessSecret = channel.AuthorizedClientsOnly ? channel.AccessSecret : null
                 }).ToArray())
         {
             OutboundMappings = client.OutboundMappings.OrderBy(mapping => mapping.MappingId, StringComparer.Ordinal)

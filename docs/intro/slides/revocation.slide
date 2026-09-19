@@ -1,0 +1,81 @@
+<Slide style={{ width: '1280px', height: '720px', padding: '20px 64px', background: '#FFFFFF' }}>
+    <Box style={{ height: 88, flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between' }}>
+        <Box>
+            <Text style={{ fontSize: 13, fontWeight: 600, color: '#2563EB', letterSpacing: 2 }}>CHAPTER 03 · 生效与收敛</Text>
+            <Box style={{ height: 8 }} />
+            <Text style={{ fontSize: 34, fontWeight: 'bold', color: '#0F172A', lineHeight: 1.25 }}>安全边界必须能立刻生效，否则等于没有</Text>
+        </Box>
+        <Box style={{ width: 4, height: 44, background: '#2563EB' }} />
+    </Box>
+
+    <Box style={{ height: 524, marginTop: 16, flexDirection: 'row', gap: 28 }}>
+        <Box style={{ width: 740 }}>
+            <Box style={{ height: 250, background: '#EEF2F8', borderRadius: 10, padding: '24px 26px', justifyContent: 'space-between' }}>
+                <Box>
+                    <Text style={{ fontSize: 22, fontWeight: 600, color: '#0F172A' }}>配置一改，就撤销对应的连接</Text>
+                    <Box style={{ height: 12 }} />
+                    <Text style={{ fontSize: 15, color: '#64748B', lineHeight: 1.65 }}>通道的监听端口、目标端点、启用状态、访问映射发生真实变化时，只断开该通道（或该映射）的待建立与已建立连接；其他通道继续传输，不受影响。</Text>
+                    <Box style={{ height: 12 }} />
+                    <Text style={{ fontSize: 15, color: '#64748B', lineHeight: 1.65 }}>内容是"按客户端 + 按通道/映射"比对后判断的：相同内容重复保存不会中断任何连接，避免误伤正在跑的查询。</Text>
+                </Box>
+                <Box style={{ flexDirection: 'row', gap: 12 }}>
+                    <Box style={{ background: '#FFFFFF', borderRadius: 6, padding: '8px 12px' }}>
+                        <Text style={{ fontSize: 13, color: '#0F172A' }}>改端口 / 改目标 → 断开</Text>
+                    </Box>
+                    <Box style={{ background: '#FFFFFF', borderRadius: 6, padding: '8px 12px' }}>
+                        <Text style={{ fontSize: 13, color: '#0F172A' }}>禁用 / 删除 → 断开</Text>
+                    </Box>
+                    <Box style={{ background: '#FFFFFF', borderRadius: 6, padding: '8px 12px' }}>
+                        <Text style={{ fontSize: 13, color: '#0F172A' }}>原样保存 → 不断开</Text>
+                    </Box>
+                </Box>
+            </Box>
+
+            <Box style={{ height: 262, marginTop: 12, background: '#0F172A', borderRadius: 10, padding: '24px 26px', justifyContent: 'space-between' }}>
+                <Box>
+                    <Text style={{ fontSize: 22, fontWeight: 600, color: '#FFFFFF' }}>应用层安全组：按来源地址放行</Text>
+                    <Box style={{ height: 12 }} />
+                    <Text style={{ fontSize: 15, color: '#CBD5E1', lineHeight: 1.65 }}>每组至少包含一个 IPv4 / IPv6 单地址或 CIDR，匹配依据是服务端 TCP socket 的实际来源地址，不信任任何 HTTP 转发头；IPv4-mapped IPv6 会先归一化为 IPv4。</Text>
+                    <Box style={{ height: 12 }} />
+                    <Text style={{ fontSize: 15, color: '#CBD5E1', lineHeight: 1.65 }}>规则收紧后，不再匹配的存量连接会被立即撤销；解析失败、组不存在或地址族不匹配一律拒绝，不会把错误策略解释成"全开放"。</Text>
+                </Box>
+                <Box style={{ flexDirection: 'row', gap: 12 }}>
+                    <Box style={{ background: '#1E293B', borderRadius: 6, padding: '8px 12px' }}>
+                        <Text style={{ fontSize: 13, color: '#60A5FA' }}>不绑定 = 任意来源</Text>
+                    </Box>
+                    <Box style={{ background: '#1E293B', borderRadius: 6, padding: '8px 12px' }}>
+                        <Text style={{ fontSize: 13, color: '#60A5FA' }}>被引用时不可删除</Text>
+                    </Box>
+                    <Box style={{ background: '#1E293B', borderRadius: 6, padding: '8px 12px' }}>
+                        <Text style={{ fontSize: 13, color: '#60A5FA' }}>端到端通道不绑定</Text>
+                    </Box>
+                </Box>
+            </Box>
+        </Box>
+
+        <Box style={{ width: 384, border: '1.5px solid #DCE3ED', borderRadius: 10, padding: '26px 24px', justifyContent: 'space-between' }}>
+            <Box>
+                <Text style={{ fontSize: 13, fontWeight: 600, color: '#2563EB', letterSpacing: 2 }}>容易误解的一点</Text>
+                <Box style={{ height: 14 }} />
+                <Text style={{ fontSize: 24, fontWeight: 'bold', color: '#0F172A', lineHeight: 1.3 }}>安全组<br />不是加密</Text>
+                <Box style={{ height: 18 }} />
+                <Text style={{ fontSize: 15, color: '#64748B', lineHeight: 1.65 }}>它只回答"这个来源能不能进"，不提供任何机密性或完整性保护。普通数据通道上的字节仍是明文 TCP。</Text>
+                <Box style={{ height: 16 }} />
+                <Text style={{ fontSize: 15, color: '#64748B', lineHeight: 1.65 }}>真正的保密要靠两件事：业务自身的端到端 TLS（如 SQL TLS），或者把数据链路放在受信隔离网络上。</Text>
+            </Box>
+            <Box>
+                <Box style={{ width: 44, height: 3, background: '#2563EB' }} />
+                <Box style={{ height: 14 }} />
+                <Text style={{ fontSize: 14, color: '#0F172A', lineHeight: 1.55, fontWeight: 600 }}>云安全组 / 防火墙仍然是第一道边界，应用层安全组只是补充。</Text>
+            </Box>
+        </Box>
+    </Box>
+
+    <Box style={{ height: 36, marginTop: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+        <Box style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+            <Box style={{ width: 6, height: 6, background: '#2563EB' }} />
+            <Text style={{ fontSize: 14, color: '#64748B' }}>RelayLink · 开源反向 TCP 代理</Text>
+        </Box>
+        <Text style={{ fontSize: 14, color: '#64748B' }}>{{PAGE}} / {{TOTAL}}</Text>
+    </Box>
+</Slide>

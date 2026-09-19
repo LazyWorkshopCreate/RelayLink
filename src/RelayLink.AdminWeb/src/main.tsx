@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import * as Dialog from '@radix-ui/react-dialog';
 import {
     Activity,
+    ClipboardList,
     ArrowDownToLine,
     ArrowLeftRight,
     Check,
@@ -17,6 +18,7 @@ import {
     Search,
     Settings2,
     ShieldCheck,
+    Shield,
     X,
 } from 'lucide-react';
 import './styles.css';
@@ -41,6 +43,7 @@ type Client = {
     displayName: string;
     enabled: boolean;
     online: boolean;
+    e2eCertificateSha256?: string;
     lastHeartbeatUtc?: string;
     maxConnections: number;
     maxPendingConnections: number;
@@ -50,7 +53,7 @@ type Channel = {
     displayName: string;
     enabled: boolean;
     authorizedClientsOnly?: boolean;
-    e2eCertificateSha256?: string;
+    securityGroupId?: string | null;
     available: boolean;
     listenAddress: string;
     listenPort: number;
@@ -75,7 +78,52 @@ type Mapping = {
     targetClientId: string;
     targetChannelId: string;
 };
+type SecurityGroup = { id: string; name: string; entries: string[] };
+type SecurityGroupForm = { id: string; name: string; entries: string };
 type HistorySample = { timestampUtc: string; bytesToTarget: number; bytesToCaller: number };
+type LiveConnection = {
+    connectionId: string;
+    kind: string;
+    state: string;
+    source: string;
+    startedAtUtc: string;
+    bytesToTarget: number;
+    bytesToCaller: number;
+};
+type AuditRow = {
+    eventId: string;
+    occurredAtUtc: string;
+    eventType: string;
+    outcome: string;
+    reasonCode?: string;
+    connectionId?: string;
+    sessionId?: string;
+    clientId?: string;
+    channelId?: string;
+    mappingId?: string;
+    callerClientId?: string;
+    targetClientId?: string;
+    actor?: string;
+    remoteIp?: string;
+    durationMs?: number;
+    bytesToTarget: number;
+    bytesToCaller: number;
+};
+type AuditPage = { total: number; events: AuditRow[] };
+const auditLabels: Record<string, string> = {
+    admin_login_success: '管理员登录成功',
+    admin_login_failure: '管理员登录失败',
+    admin_logout: '管理员退出',
+    agent_session_ready: 'Agent 上线',
+    agent_session_closed: 'Agent 离线',
+    agent_session_rejected: 'Agent 认证拒绝',
+    proxy_connection_opened: '普通连接建立',
+    proxy_connection_closed: '普通连接断开',
+    proxy_connection_rejected: '普通连接拒绝',
+    peer_connection_opened: '端到端连接建立',
+    peer_connection_closed: '端到端连接断开',
+    peer_connection_rejected: '端到端连接拒绝',
+};
 type ViewClient = Client & { channels: Channel[]; mappings: Mapping[] };
 type ClientForm = {
     clientId: string;
@@ -96,11 +144,9 @@ type ChannelForm = {
     maxConnections: number;
     targetConnectTimeoutSeconds: number;
     authorizedClientsOnly: boolean;
-    e2eCertificateSha256: string;
+    securityGroupId: string;
 };
 type MappingForm = {
-    mappingId: string;
-    enabled: boolean;
     targetClientId: string;
     targetChannelId: string;
 };
@@ -124,11 +170,9 @@ const emptyChannel: ChannelForm = {
     maxConnections: 100,
     targetConnectTimeoutSeconds: 10,
     authorizedClientsOnly: false,
-    e2eCertificateSha256: '',
+    securityGroupId: '',
 };
 const emptyMapping: MappingForm = {
-    mappingId: '',
-    enabled: true,
     targetClientId: '',
     targetChannelId: '',
 };
@@ -156,6 +200,7 @@ function Modal({
     open,
     onClose,
     error,
+    wide,
     children,
 }: {
     title: string;
@@ -163,6 +208,7 @@ function Modal({
     open: boolean;
     onClose: () => void;
     error?: string;
+    wide?: boolean;
     children: ReactNode;
 }) {
     return (
@@ -174,7 +220,7 @@ function Modal({
         >
             <Dialog.Portal>
                 <Dialog.Overlay className="modal-overlay" />
-                <Dialog.Content className="modal">
+                <Dialog.Content className={wide ? 'modal audit-modal' : 'modal'}>
                     <div className="modal-heading">
                         <div>
                             <Dialog.Title>{title}</Dialog.Title>
@@ -235,7 +281,7 @@ function TrafficChart({ samples }: { samples: HistorySample[] }) {
             .join(' ');
     return (
         <div className="chart-wrap">
-            <svg viewBox="0 0 750 240" role="img" aria-label="目标和访问方历史累计流量折线图">
+            <svg viewBox="0 0 750 240" role="img" aria-label="目标和访问方每分钟流量折线图">
                 <line x1="38" y1="210" x2="720" y2="210" className="axis" />
                 <line x1="38" y1="32" x2="38" y2="210" className="axis" />
                 <text x="3" y="38">
@@ -259,6 +305,18 @@ export function App() {
     const [session, setSession] = useState<Session>({ authenticated: false });
     const [overview, setOverview] = useState<Overview | null>(null);
     const [clients, setClients] = useState<ViewClient[]>([]);
+    const [securityGroups, setSecurityGroups] = useState<SecurityGroup[]>([]);
+    const [securityGroupsOpen, setSecurityGroupsOpen] = useState(false);
+    const [auditOpen, setAuditOpen] = useState(false);
+    const [auditPage, setAuditPage] = useState<AuditPage>({ total: 0, events: [] });
+    const [auditPageNumber, setAuditPageNumber] = useState(1);
+    const [auditHours, setAuditHours] = useState(24);
+    const [auditType, setAuditType] = useState('');
+    const [auditClient, setAuditClient] = useState('');
+    const [auditBusy, setAuditBusy] = useState(false);
+    const [securityGroupForm, setSecurityGroupForm] = useState<SecurityGroupForm | null>(null);
+    const [securityGroupOriginalId, setSecurityGroupOriginalId] = useState<string | null>(null);
+    const [securityGroupToDelete, setSecurityGroupToDelete] = useState<SecurityGroup | null>(null);
     const [query, setQuery] = useState('');
     const [status, setStatus] = useState('all');
     const [busy, setBusy] = useState(true);
@@ -275,7 +333,6 @@ export function App() {
     } | null>(null);
     const [mappingDialog, setMappingDialog] = useState<{
         clientId: string;
-        original?: Mapping;
         form: MappingForm;
     } | null>(null);
     const [confirmDeleteMapping, setConfirmDeleteMapping] = useState<{
@@ -288,6 +345,13 @@ export function App() {
         hours: number;
         samples: HistorySample[];
     } | null>(null);
+    const [connectionDialog, setConnectionDialog] = useState<{
+        client: ViewClient;
+        channel: Channel;
+        connections: LiveConnection[];
+        loading: boolean;
+    } | null>(null);
+    const [confirmConnectionId, setConfirmConnectionId] = useState<string | null>(null);
     const [confirmDelete, setConfirmDelete] = useState<{ clientId: string; channel: Channel } | null>(null);
     const [saving, setSaving] = useState(false);
     const [updatedAt, setUpdatedAt] = useState(0);
@@ -298,8 +362,12 @@ export function App() {
         channelDialog ||
         mappingDialog ||
         historyDialog ||
+        connectionDialog ||
         confirmDelete ||
-        confirmDeleteMapping,
+        confirmDeleteMapping ||
+        securityGroupsOpen ||
+        auditOpen ||
+        securityGroupToDelete,
     );
     const editingRef = useRef(editing);
     editingRef.current = editing;
@@ -321,11 +389,7 @@ export function App() {
                 allClients.map(async (client) => {
                     const [channels, mappings] = await Promise.all([
                         api<{ channels: Channel[] }>(`/api/v1/clients/${enc(client.clientId)}/channels`),
-                        nextSession.authenticated
-                            ? api<{ mappings: Mapping[] }>(
-                                  `/api/v1/admin/clients/${enc(client.clientId)}/mappings`,
-                              )
-                            : Promise.resolve({ mappings: [] }),
+                        api<{ mappings: Mapping[] }>(`/api/v1/clients/${enc(client.clientId)}/mappings`),
                     ]);
                     return { ...client, channels: channels.channels, mappings: mappings.mappings };
                 }),
@@ -357,6 +421,86 @@ export function App() {
             body: data === undefined ? undefined : JSON.stringify(data),
         });
 
+    async function loadSecurityGroups() {
+        const response = await api<{ securityGroups: SecurityGroup[] }>('/api/v1/admin/security-groups');
+        setSecurityGroups(response.securityGroups);
+    }
+
+    async function openSecurityGroups() {
+        setError('');
+        try {
+            await loadSecurityGroups();
+            setSecurityGroupsOpen(true);
+        } catch (e) {
+            setError((e as Error).message);
+        }
+    }
+    async function loadAudit(page = 1, hours = auditHours, eventType = auditType, clientId = auditClient) {
+        setAuditBusy(true);
+        setError('');
+        try {
+            const result = await api<AuditPage>(
+                `/api/v1/admin/audit?hours=${hours}&page=${page}&pageSize=50&eventType=${enc(eventType)}&clientId=${enc(clientId.trim())}`,
+            );
+            setAuditPage(result);
+            setAuditPageNumber(page);
+        } catch (e) {
+            setAuditPage({ total: 0, events: [] });
+            setError((e as Error).message);
+        } finally {
+            setAuditBusy(false);
+        }
+    }
+    function openAudit() {
+        setAuditPage({ total: 0, events: [] });
+        setAuditOpen(true);
+        void loadAudit();
+    }
+
+    async function saveSecurityGroup(e: FormEvent) {
+        e.preventDefault();
+        if (!securityGroupForm) return;
+        setSaving(true);
+        setError('');
+        try {
+            const entries = securityGroupForm.entries
+                .split(/[\n,]+/)
+                .map((entry) => entry.trim())
+                .filter(Boolean);
+            await write(
+                `/api/v1/admin/security-groups${securityGroupOriginalId ? `/${enc(securityGroupOriginalId)}` : ''}`,
+                securityGroupOriginalId ? 'PUT' : 'POST',
+                securityGroupOriginalId
+                    ? { name: securityGroupForm.name, entries }
+                    : { id: securityGroupForm.id, name: securityGroupForm.name, entries },
+            );
+            setSecurityGroupForm(null);
+            setSecurityGroupOriginalId(null);
+            await loadSecurityGroups();
+            setNotice('安全组已保存，访问规则立即生效。');
+        } catch (e) {
+            setError((e as Error).message);
+        } finally {
+            setSaving(false);
+        }
+    }
+
+    async function deleteSecurityGroup() {
+        if (!securityGroupToDelete) return;
+        setSaving(true);
+        setError('');
+        try {
+            await write(`/api/v1/admin/security-groups/${enc(securityGroupToDelete.id)}`, 'DELETE');
+            setSecurityGroupToDelete(null);
+            await loadSecurityGroups();
+            setNotice('安全组已删除。');
+        } catch (e) {
+            setError((e as Error).message);
+        } finally {
+            setSaving(false);
+        }
+    }
+
     async function login(e: FormEvent) {
         e.preventDefault();
         setSaving(true);
@@ -382,6 +526,10 @@ export function App() {
         try {
             await api('/api/v1/admin/session', { method: 'DELETE' });
             setSession({ authenticated: false });
+            setSecurityGroups([]);
+            setSecurityGroupsOpen(false);
+            setAuditOpen(false);
+            setAuditPage({ total: 0, events: [] });
             setNotice('已退出登录。');
         } catch (e) {
             setError((e as Error).message);
@@ -391,6 +539,18 @@ export function App() {
         try {
             const defaults = await api<AgentDefaults>('/api/v1/admin/agent-defaults');
             setClientDialog({ form: { ...emptyClient, agentServerHost: defaults.serverHost || '' } });
+            setError('');
+        } catch (e) {
+            setError((e as Error).message);
+        }
+    }
+    async function openCreateChannel(clientId: string) {
+        try {
+            const [suggestion] = await Promise.all([
+                api<{ listenPort: number }>('/api/v1/admin/next-channel-port'),
+                loadSecurityGroups(),
+            ]);
+            setChannelDialog({ clientId, form: { ...emptyChannel, listenPort: suggestion.listenPort } });
             setError('');
         } catch (e) {
             setError((e as Error).message);
@@ -469,14 +629,10 @@ export function App() {
         setSaving(true);
         setError('');
         try {
-            const { clientId, original, form } = mappingDialog;
-            await write(
-                `/api/v1/admin/clients/${enc(clientId)}/mappings${original ? `/${enc(original.mappingId)}` : ''}`,
-                original ? 'PUT' : 'POST',
-                original ? { ...form, mappingId: undefined } : form,
-            );
+            const { clientId, form } = mappingDialog;
+            await write(`/api/v1/admin/clients/${enc(clientId)}/mappings`, 'POST', form);
             setMappingDialog(null);
-            setNotice('本机互访映射已保存并下发。');
+            setNotice('端到端访问入口已创建并下发。创建后不可修改；如需调整，请删除后重建。');
             await refresh();
         } catch (e) {
             setError((e as Error).message);
@@ -494,31 +650,12 @@ export function App() {
                 'DELETE',
             );
             setConfirmDeleteMapping(null);
-            setNotice('互访映射已删除并下发。');
+            setNotice('端到端访问入口已删除并下发，原有连接已断开。');
             await refresh();
         } catch (e) {
             setError((e as Error).message);
         } finally {
             setSaving(false);
-        }
-    }
-    async function loadIdentityFingerprint(clientId: string) {
-        try {
-            const result = await api<{ e2eCertificateSha256?: string }>(
-                `/api/v1/admin/clients/${enc(clientId)}/identity`,
-            );
-            if (!result.e2eCertificateSha256) throw new Error('客户端尚未在线登记端到端证书指纹。');
-            setChannelDialog((current) =>
-                current?.clientId === clientId
-                    ? {
-                          ...current,
-                          form: { ...current.form, e2eCertificateSha256: result.e2eCertificateSha256! },
-                      }
-                    : current,
-            );
-            setNotice('已读取在线 Agent 指纹；启用前请与 Agent 本机指纹核对。');
-        } catch (e) {
-            setError((e as Error).message);
         }
     }
     async function showHistory(client: ViewClient, channel: Channel, hours = 24) {
@@ -538,6 +675,58 @@ export function App() {
             setError((e as Error).message);
         }
     }
+    const loadConnections = useCallback(async (clientId: string, channelId: string) => {
+        try {
+            const result = await api<{ connections: LiveConnection[] }>(
+                `/api/v1/clients/${enc(clientId)}/channels/${enc(channelId)}/connections`,
+            );
+            setConnectionDialog((current) =>
+                current?.client.clientId === clientId && current.channel.channelId === channelId
+                    ? { ...current, connections: result.connections, loading: false }
+                    : current,
+            );
+            setError('');
+        } catch (e) {
+            setConnectionDialog((current) =>
+                current?.client.clientId === clientId && current.channel.channelId === channelId
+                    ? { ...current, loading: false }
+                    : current,
+            );
+            setError((e as Error).message);
+        }
+    }, []);
+    function showConnections(client: ViewClient, channel: Channel) {
+        setError('');
+        setConfirmConnectionId(null);
+        setConnectionDialog({ client, channel, connections: [], loading: true });
+        void loadConnections(client.clientId, channel.channelId);
+    }
+    useEffect(() => {
+        if (!connectionDialog) return;
+        const clientId = connectionDialog.client.clientId;
+        const channelId = connectionDialog.channel.channelId;
+        const timer = window.setInterval(() => void loadConnections(clientId, channelId), 5000);
+        return () => window.clearInterval(timer);
+    }, [connectionDialog?.client.clientId, connectionDialog?.channel.channelId, loadConnections]);
+    async function disconnectConnection() {
+        if (!connectionDialog || !confirmConnectionId) return;
+        setSaving(true);
+        setError('');
+        try {
+            await write(
+                `/api/v1/admin/clients/${enc(connectionDialog.client.clientId)}/channels/${enc(connectionDialog.channel.channelId)}/connections/${enc(confirmConnectionId)}`,
+                'DELETE',
+            );
+            setConfirmConnectionId(null);
+            await loadConnections(connectionDialog.client.clientId, connectionDialog.channel.channelId);
+            await refresh();
+            setNotice('已断开指定连接。');
+        } catch (e) {
+            setError((e as Error).message);
+        } finally {
+            setSaving(false);
+        }
+    }
     const visible = clients.filter(
         (c) =>
             (status === 'all' ||
@@ -554,9 +743,7 @@ export function App() {
         <div className="shell">
             <header className="topbar">
                 <div className="brand">
-                    <span className="brand-mark">
-                        <ArrowLeftRight size={19} strokeWidth={2.5} />
-                    </span>
+                    <img className="brand-mark" src="/relaylink-icon.svg" alt="" />
                     <span>
                         RelayLink <small>CONTROL CENTER</small>
                     </span>
@@ -566,6 +753,16 @@ export function App() {
                         <span className={`live-dot${stale ? ' stale' : ''}`} />{' '}
                         {stale ? '数据已过期' : '实时监控'}
                     </span>
+                    {session.authenticated && (
+                        <button className="ghost" onClick={openAudit}>
+                            <ClipboardList size={15} /> 审计日志
+                        </button>
+                    )}
+                    {session.authenticated && (
+                        <button className="ghost" onClick={() => void openSecurityGroups()}>
+                            <Shield size={15} /> 安全组
+                        </button>
+                    )}
                     {session.authenticated ? (
                         <>
                             <span className="auth-status">
@@ -655,7 +852,7 @@ export function App() {
                             <span>本次运行累计流量</span>
                             <strong>
                                 {overview
-                                    ? `${fmt(overview.bytesToTarget)} / ${fmt(overview.bytesToCaller)}`
+                                    ? `${fmt(overview.bytesToTarget + (overview.peerCiphertextToTarget ?? 0))} / ${fmt(overview.bytesToCaller + (overview.peerCiphertextToCaller ?? 0))}`
                                     : '—'}
                             </strong>
                             <small>
@@ -734,6 +931,19 @@ export function App() {
                                             <small>
                                                 {client.clientId} · 最近心跳 {time(client.lastHeartbeatUtc)}
                                             </small>
+                                            {session.authenticated && (
+                                                <small
+                                                    title={
+                                                        client.e2eCertificateSha256 ||
+                                                        'Agent 首次认证上线后自动登记'
+                                                    }
+                                                >
+                                                    端到端证书：
+                                                    {client.e2eCertificateSha256
+                                                        ? `${client.e2eCertificateSha256.slice(0, 12)}…${client.e2eCertificateSha256.slice(-8)}`
+                                                        : '待登记'}
+                                                </small>
+                                            )}
                                         </div>
                                     </div>
                                     {session.authenticated && (
@@ -767,12 +977,7 @@ export function App() {
                                             </button>
                                             <button
                                                 className="ghost"
-                                                onClick={() =>
-                                                    setChannelDialog({
-                                                        clientId: client.clientId,
-                                                        form: { ...emptyChannel },
-                                                    })
-                                                }
+                                                onClick={() => void openCreateChannel(client.clientId)}
                                             >
                                                 <Plus size={15} /> 添加通道
                                             </button>
@@ -785,7 +990,7 @@ export function App() {
                                                     })
                                                 }
                                             >
-                                                <Plus size={15} /> 添加互访入口
+                                                <Plus size={15} /> 添加端到端访问入口
                                             </button>
                                         </div>
                                     )}
@@ -821,6 +1026,9 @@ export function App() {
                                                             {ch.authorizedClientsOnly
                                                                 ? '仅客户端互访'
                                                                 : `${ch.listenAddress}:${ch.listenPort}`}
+                                                            {ch.securityGroupId && (
+                                                                <small>安全组：{ch.securityGroupId}</small>
+                                                            )}
                                                         </td>
                                                         <td className="mono">
                                                             {ch.targetHost}:{ch.targetPort}
@@ -840,7 +1048,14 @@ export function App() {
                                                             </span>
                                                         </td>
                                                         <td className="mono">
-                                                            {ch.pendingConnections} / {ch.activeConnections}
+                                                            <button
+                                                                className="flow"
+                                                                title="查看此通道当前连接"
+                                                                onClick={() => showConnections(client, ch)}
+                                                            >
+                                                                {ch.pendingConnections} /{' '}
+                                                                {ch.activeConnections}
+                                                            </button>
                                                         </td>
                                                         <td>
                                                             {ch.authorizedClientsOnly ? (
@@ -851,13 +1066,26 @@ export function App() {
                                                             ) : (
                                                                 <button
                                                                     className="flow"
-                                                                    title="查看此通道历史流量"
+                                                                    title={
+                                                                        ch.authorizedClientsOnly
+                                                                            ? '查看此通道端到端密文历史流量'
+                                                                            : '查看此通道历史流量'
+                                                                    }
                                                                     onClick={() =>
                                                                         void showHistory(client, ch)
                                                                     }
                                                                 >
-                                                                    {fmt(ch.bytesToTarget)} /{' '}
-                                                                    {fmt(ch.bytesToCaller)}
+                                                                    {fmt(
+                                                                        ch.authorizedClientsOnly
+                                                                            ? (ch.peerCiphertextToTarget ?? 0)
+                                                                            : ch.bytesToTarget,
+                                                                    )}{' '}
+                                                                    /{' '}
+                                                                    {fmt(
+                                                                        ch.authorizedClientsOnly
+                                                                            ? (ch.peerCiphertextToCaller ?? 0)
+                                                                            : ch.bytesToCaller,
+                                                                    )}
                                                                 </button>
                                                             )}
                                                         </td>
@@ -866,7 +1094,13 @@ export function App() {
                                                                 <div className="row-actions">
                                                                     <button
                                                                         className="text-button"
-                                                                        onClick={() =>
+                                                                        onClick={() => {
+                                                                            void loadSecurityGroups().catch(
+                                                                                (e) =>
+                                                                                    setError(
+                                                                                        (e as Error).message,
+                                                                                    ),
+                                                                            );
                                                                             setChannelDialog({
                                                                                 clientId: client.clientId,
                                                                                 original: ch,
@@ -888,12 +1122,12 @@ export function App() {
                                                                                         Boolean(
                                                                                             ch.authorizedClientsOnly,
                                                                                         ),
-                                                                                    e2eCertificateSha256:
-                                                                                        ch.e2eCertificateSha256 ||
+                                                                                    securityGroupId:
+                                                                                        ch.securityGroupId ||
                                                                                         '',
                                                                                 },
-                                                                            })
-                                                                        }
+                                                                            });
+                                                                        }}
                                                                     >
                                                                         编辑
                                                                     </button>
@@ -926,52 +1160,78 @@ export function App() {
                                         </tbody>
                                     </table>
                                 </div>
-                                {session.authenticated && client.mappings.length > 0 && (
-                                    <div className="mapping-list">
-                                        <strong>本机互访入口</strong>
-                                        {client.mappings.map((mapping) => (
-                                            <div className="mapping-row" key={mapping.mappingId}>
-                                                <span>
-                                                    {mapping.mappingId} ·{' '}
-                                                    {mapping.available && mapping.localPort
-                                                        ? `127.0.0.1:${mapping.localPort}`
-                                                        : mapping.enabled
-                                                          ? '等待 Agent 上报地址'
-                                                          : '已禁用'}{' '}
-                                                    → {mapping.targetClientId}/{mapping.targetChannelId} ·{' '}
-                                                    {mapping.enabled ? '启用' : '禁用'}
-                                                </span>
-                                                <button
-                                                    className="text-button"
-                                                    onClick={() =>
-                                                        setMappingDialog({
-                                                            clientId: client.clientId,
-                                                            original: mapping,
-                                                            form: {
-                                                                mappingId: mapping.mappingId,
-                                                                enabled: mapping.enabled,
-                                                                targetClientId: mapping.targetClientId,
-                                                                targetChannelId: mapping.targetChannelId,
-                                                            },
-                                                        })
-                                                    }
-                                                >
-                                                    编辑
-                                                </button>
-                                                <button
-                                                    className="text-button danger"
-                                                    onClick={() =>
-                                                        setConfirmDeleteMapping({
-                                                            clientId: client.clientId,
-                                                            mapping,
-                                                        })
-                                                    }
-                                                >
-                                                    删除
-                                                </button>
-                                            </div>
-                                        ))}
-                                    </div>
+                                {client.mappings.length > 0 && (
+                                    <section className="mapping-section" aria-label="端到端访问入口">
+                                        <div className="mapping-heading">端到端访问入口</div>
+                                        <div className="table-scroll">
+                                            <table className="mapping-table">
+                                                <thead>
+                                                    <tr>
+                                                        <th>入口 ID</th>
+                                                        <th>本机地址</th>
+                                                        <th>访问目标</th>
+                                                        <th>状态</th>
+                                                        {session.authenticated && (
+                                                            <th className="action-col">操作</th>
+                                                        )}
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    {client.mappings.map((mapping) => (
+                                                        <tr key={mapping.mappingId}>
+                                                            <td>
+                                                                <strong
+                                                                    className="mapping-id"
+                                                                    title={mapping.mappingId}
+                                                                >
+                                                                    {mapping.mappingId}
+                                                                </strong>
+                                                            </td>
+                                                            <td className="mono">
+                                                                {mapping.available && mapping.localPort
+                                                                    ? `${mapping.localAddress || '127.0.0.1'}:${mapping.localPort}`
+                                                                    : '—'}
+                                                            </td>
+                                                            <td
+                                                                className="mono"
+                                                                title={`${mapping.targetClientId}/${mapping.targetChannelId}`}
+                                                            >
+                                                                {mapping.targetClientId}/
+                                                                {mapping.targetChannelId}
+                                                            </td>
+                                                            <td>
+                                                                <span
+                                                                    className={`state ${!mapping.enabled ? 'muted' : mapping.available ? 'good' : 'warn'}`}
+                                                                >
+                                                                    <span />
+                                                                    {!mapping.enabled
+                                                                        ? '已禁用'
+                                                                        : mapping.available
+                                                                          ? '已监听'
+                                                                          : '等待 Agent 上报'}
+                                                                </span>
+                                                            </td>
+                                                            {session.authenticated && (
+                                                                <td>
+                                                                    <button
+                                                                        className="text-button danger"
+                                                                        onClick={() =>
+                                                                            setConfirmDeleteMapping({
+                                                                                clientId: client.clientId,
+                                                                                mapping,
+                                                                            })
+                                                                        }
+                                                                    >
+                                                                        删除
+                                                                    </button>
+                                                                </td>
+                                                            )}
+                                                        </tr>
+                                                    ))}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    </section>
                                 )}
                             </article>
                         ))
@@ -981,6 +1241,280 @@ export function App() {
                     RelayLink · 安全的内网 TCP 连接管理 <span>数据每 5 秒更新，编辑时暂停自动刷新</span>
                 </footer>
             </main>
+
+            <Modal
+                title="审计日志"
+                description="仅管理员可查看。记录登录、Agent 会话和连接生命周期元数据，不包含密码、密钥或业务内容。"
+                open={auditOpen}
+                onClose={() => setAuditOpen(false)}
+                error={error}
+                wide
+            >
+                <form
+                    className="audit-filters"
+                    onSubmit={(event) => {
+                        event.preventDefault();
+                        void loadAudit(1);
+                    }}
+                >
+                    <label>
+                        时间范围
+                        <select
+                            value={auditHours}
+                            onChange={(event) => setAuditHours(Number(event.target.value))}
+                        >
+                            <option value={24}>最近 24 小时</option>
+                            <option value={168}>最近 7 天</option>
+                            <option value={720}>最近 30 天</option>
+                            <option value={2160}>最近 90 天</option>
+                        </select>
+                    </label>
+                    <label>
+                        事件
+                        <select value={auditType} onChange={(event) => setAuditType(event.target.value)}>
+                            <option value="">全部事件</option>
+                            {Object.entries(auditLabels).map(([value, label]) => (
+                                <option key={value} value={value}>
+                                    {label}
+                                </option>
+                            ))}
+                        </select>
+                    </label>
+                    <label>
+                        客户端 ID
+                        <input
+                            value={auditClient}
+                            maxLength={128}
+                            onChange={(event) => setAuditClient(event.target.value)}
+                            placeholder="全部客户端"
+                        />
+                    </label>
+                    <button className="primary" disabled={auditBusy}>
+                        查询
+                    </button>
+                </form>
+                <div className="audit-summary">
+                    共 {auditPage.total} 条 · 第 {auditPageNumber} 页{' '}
+                    <button
+                        className="text-button"
+                        disabled={auditBusy}
+                        onClick={() => void loadAudit(auditPageNumber)}
+                    >
+                        刷新
+                    </button>
+                </div>
+                <div className="table-scroll">
+                    <table className="audit-table">
+                        <thead>
+                            <tr>
+                                <th>时间</th>
+                                <th>事件</th>
+                                <th>结果 / 原因</th>
+                                <th>客户端 / 通道</th>
+                                <th>来源</th>
+                                <th>连接 ID</th>
+                                <th>流量 →目标 / →访问方</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {auditPage.events.map((item) => (
+                                <tr key={item.eventId}>
+                                    <td>{time(item.occurredAtUtc)}</td>
+                                    <td>{auditLabels[item.eventType] || item.eventType}</td>
+                                    <td>
+                                        {item.outcome}
+                                        {item.reasonCode ? ` · ${item.reasonCode}` : ''}
+                                    </td>
+                                    <td className="mono">
+                                        {item.clientId || item.actor || '—'}
+                                        {item.channelId ? ` / ${item.channelId}` : ''}
+                                    </td>
+                                    <td className="mono">{item.remoteIp || item.callerClientId || '—'}</td>
+                                    <td className="mono" title={item.connectionId || ''}>
+                                        {item.connectionId ? `${item.connectionId.slice(0, 8)}…` : '—'}
+                                    </td>
+                                    <td className="mono">
+                                        {fmt(item.bytesToTarget)} / {fmt(item.bytesToCaller)}
+                                    </td>
+                                </tr>
+                            ))}
+                            {!auditPage.events.length && (
+                                <tr>
+                                    <td className="empty-row" colSpan={7}>
+                                        {auditBusy ? '加载中…' : '所选范围没有审计事件'}
+                                    </td>
+                                </tr>
+                            )}
+                        </tbody>
+                    </table>
+                </div>
+                <div className="audit-pages">
+                    <button
+                        className="ghost"
+                        disabled={auditBusy || auditPageNumber <= 1}
+                        onClick={() => void loadAudit(auditPageNumber - 1)}
+                    >
+                        上一页
+                    </button>
+                    <button
+                        className="ghost"
+                        disabled={auditBusy || auditPageNumber * 50 >= auditPage.total}
+                        onClick={() => void loadAudit(auditPageNumber + 1)}
+                    >
+                        下一页
+                    </button>
+                </div>
+            </Modal>
+
+            <Modal
+                title="安全组"
+                description="仅作用于普通通道的来源 IP；不设置安全组时允许任意来源。规则变更会立即撤销不再允许的连接。"
+                open={securityGroupsOpen}
+                onClose={() => {
+                    setSecurityGroupsOpen(false);
+                    setSecurityGroupForm(null);
+                }}
+                error={error}
+            >
+                <div className="security-group-actions">
+                    <button
+                        type="button"
+                        className="primary subtle"
+                        onClick={() => {
+                            setSecurityGroupOriginalId(null);
+                            setSecurityGroupForm({ id: '', name: '', entries: '' });
+                        }}
+                    >
+                        <Plus size={15} /> 添加安全组
+                    </button>
+                </div>
+                <div className="table-scroll">
+                    <table className="security-group-table">
+                        <thead>
+                            <tr>
+                                <th>名称 / ID</th>
+                                <th>允许的 IP 或 IP 段</th>
+                                <th>操作</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {securityGroups.map((group) => (
+                                <tr key={group.id}>
+                                    <td>
+                                        <strong>{group.name}</strong>
+                                        <small>{group.id}</small>
+                                    </td>
+                                    <td className="mono">{group.entries.join('、')}</td>
+                                    <td>
+                                        <div className="row-actions">
+                                            <button
+                                                type="button"
+                                                className="text-button"
+                                                onClick={() => {
+                                                    setSecurityGroupOriginalId(group.id);
+                                                    setSecurityGroupForm({
+                                                        ...group,
+                                                        entries: group.entries.join('\n'),
+                                                    });
+                                                }}
+                                            >
+                                                编辑
+                                            </button>
+                                            <button
+                                                type="button"
+                                                className="text-button danger"
+                                                onClick={() => setSecurityGroupToDelete(group)}
+                                            >
+                                                删除
+                                            </button>
+                                        </div>
+                                    </td>
+                                </tr>
+                            ))}
+                            {securityGroups.length === 0 && (
+                                <tr>
+                                    <td colSpan={3} className="empty-row">
+                                        暂无安全组
+                                    </td>
+                                </tr>
+                            )}
+                        </tbody>
+                    </table>
+                </div>
+                {securityGroupForm && (
+                    <form className="form security-group-form" onSubmit={saveSecurityGroup}>
+                        <div className="form-grid">
+                            <label className="field">
+                                安全组 ID
+                                <input
+                                    required
+                                    disabled={!!securityGroupOriginalId}
+                                    pattern="[a-z0-9][a-z0-9_-]{0,63}"
+                                    value={securityGroupForm.id}
+                                    onChange={(e) =>
+                                        setSecurityGroupForm({
+                                            ...securityGroupForm,
+                                            id: e.target.value.toLowerCase(),
+                                        })
+                                    }
+                                />
+                            </label>
+                            <label className="field">
+                                名称
+                                <input
+                                    required
+                                    maxLength={100}
+                                    value={securityGroupForm.name}
+                                    onChange={(e) =>
+                                        setSecurityGroupForm({ ...securityGroupForm, name: e.target.value })
+                                    }
+                                />
+                            </label>
+                        </div>
+                        <label className="field">
+                            允许的 IP 或 CIDR（每行一个）
+                            <textarea
+                                required
+                                rows={5}
+                                placeholder={'192.0.2.10\n198.51.100.0/24\n2001:db8::/32'}
+                                value={securityGroupForm.entries}
+                                onChange={(e) =>
+                                    setSecurityGroupForm({ ...securityGroupForm, entries: e.target.value })
+                                }
+                            />
+                        </label>
+                        <div className="form-actions">
+                            <button
+                                type="button"
+                                className="ghost"
+                                onClick={() => setSecurityGroupForm(null)}
+                            >
+                                取消
+                            </button>
+                            <button className="primary" disabled={saving}>
+                                保存安全组
+                            </button>
+                        </div>
+                    </form>
+                )}
+            </Modal>
+            <Modal
+                title="删除安全组？"
+                description="正在使用的安全组不能删除，请先从所有通道移除。"
+                open={!!securityGroupToDelete}
+                onClose={() => setSecurityGroupToDelete(null)}
+                error={error}
+            >
+                <p>确定删除 {securityGroupToDelete?.name} 吗？</p>
+                <div className="form-actions">
+                    <button className="ghost" onClick={() => setSecurityGroupToDelete(null)}>
+                        取消
+                    </button>
+                    <button className="primary" disabled={saving} onClick={() => void deleteSecurityGroup()}>
+                        删除安全组
+                    </button>
+                </div>
+            </Modal>
 
             <Modal
                 title="管理员登录"
@@ -1128,6 +1662,15 @@ export function App() {
                                 </>
                             )}
                         </div>
+                        {clientDialog.original && (
+                            <label className="field">
+                                端到端证书 SHA-256 指纹（Agent 首次认证后自动登记，只读）
+                                <input
+                                    readOnly
+                                    value={clientDialog.original.e2eCertificateSha256 || '尚未登记'}
+                                />
+                            </label>
+                        )}
                         <label className="check">
                             <input
                                 type="checkbox"
@@ -1155,7 +1698,7 @@ export function App() {
 
             <Modal
                 title={channelDialog?.original ? '编辑通道' : '添加通道'}
-                description="保存后立即更新服务端监听，并向在线客户端下发配置。"
+                description="保存变更会更新监听、下发配置，并断开此通道的原有连接；相同内容重复保存不会断开。"
                 open={!!channelDialog}
                 onClose={() => setChannelDialog(null)}
                 error={error}
@@ -1218,6 +1761,28 @@ export function App() {
                                             })
                                         }
                                     />
+                                    <label className="field">
+                                        安全组
+                                        <select
+                                            value={channelDialog.form.securityGroupId}
+                                            onChange={(e) =>
+                                                setChannelDialog({
+                                                    ...channelDialog,
+                                                    form: {
+                                                        ...channelDialog.form,
+                                                        securityGroupId: e.target.value,
+                                                    },
+                                                })
+                                            }
+                                        >
+                                            <option value="">不设置（允许任意来源）</option>
+                                            {securityGroups.map((group) => (
+                                                <option key={group.id} value={group.id}>
+                                                    {group.name}（{group.id}）
+                                                </option>
+                                            ))}
+                                        </select>
+                                    </label>
                                 </>
                             )}
                             <label className="field">
@@ -1265,32 +1830,6 @@ export function App() {
                                 }
                                 max={3600}
                             />
-                            {channelDialog.form.authorizedClientsOnly && (
-                                <label className="field">
-                                    被访问 Agent 端到端证书 SHA-256 指纹
-                                    <input
-                                        required
-                                        pattern="[A-Fa-f0-9]{64}"
-                                        value={channelDialog.form.e2eCertificateSha256}
-                                        onChange={(e) =>
-                                            setChannelDialog({
-                                                ...channelDialog,
-                                                form: {
-                                                    ...channelDialog.form,
-                                                    e2eCertificateSha256: e.target.value,
-                                                },
-                                            })
-                                        }
-                                    />
-                                    <button
-                                        type="button"
-                                        className="ghost"
-                                        onClick={() => void loadIdentityFingerprint(channelDialog.clientId)}
-                                    >
-                                        读取当前在线 Agent 指纹
-                                    </button>
-                                </label>
-                            )}
                         </div>
                         <label className="check">
                             <input
@@ -1302,6 +1841,9 @@ export function App() {
                                         form: {
                                             ...channelDialog.form,
                                             authorizedClientsOnly: e.target.checked,
+                                            securityGroupId: e.target.checked
+                                                ? ''
+                                                : channelDialog.form.securityGroupId,
                                         },
                                     })
                                 }
@@ -1334,8 +1876,8 @@ export function App() {
             </Modal>
 
             <Modal
-                title={mappingDialog?.original ? '编辑互访入口' : '添加互访入口'}
-                description="映射和访问密钥由服务端管理并下发；仅监听本机 127.0.0.1。"
+                title="添加端到端访问入口"
+                description="入口创建后不可修改；服务端下发访问配置，Agent 仅监听本机 127.0.0.1。"
                 open={!!mappingDialog}
                 onClose={() => setMappingDialog(null)}
                 error={error}
@@ -1345,26 +1887,25 @@ export function App() {
                         <div className="form-grid">
                             <label className="field">
                                 <span className="field-label">
-                                    映射 ID
+                                    入口 ID（自动生成）
                                     <span
                                         className="field-help"
-                                        title="本机端口由 Agent 自动选择并保存，冲突时自动轮换；上线后显示实际地址。"
-                                        aria-label="本机端口由 Agent 自动选择并保存，冲突时自动轮换；上线后显示实际地址。"
+                                        title="入口 ID 为目标客户端 ID-目标通道 ID。本机端口由 Agent 自动选择并保存，冲突时自动轮换。"
+                                        aria-label="入口 ID 为目标客户端 ID-目标通道 ID。本机端口由 Agent 自动选择并保存，冲突时自动轮换。"
                                         tabIndex={0}
                                     >
                                         <CircleAlert size={15} />
                                     </span>
                                 </span>
                                 <input
-                                    required
-                                    aria-label="映射 ID"
-                                    disabled={!!mappingDialog.original}
-                                    value={mappingDialog.form.mappingId}
-                                    onChange={(e) =>
-                                        setMappingDialog({
-                                            ...mappingDialog,
-                                            form: { ...mappingDialog.form, mappingId: e.target.value },
-                                        })
+                                    aria-label="入口 ID（自动生成）"
+                                    readOnly
+                                    placeholder="选择目标后自动生成"
+                                    value={
+                                        mappingDialog.form.targetClientId &&
+                                        mappingDialog.form.targetChannelId
+                                            ? `${mappingDialog.form.targetClientId}-${mappingDialog.form.targetChannelId}`
+                                            : ''
                                     }
                                 />
                             </label>
@@ -1423,19 +1964,6 @@ export function App() {
                                 </select>
                             </label>
                         </div>
-                        <label className="check">
-                            <input
-                                type="checkbox"
-                                checked={mappingDialog.form.enabled}
-                                onChange={(e) =>
-                                    setMappingDialog({
-                                        ...mappingDialog,
-                                        form: { ...mappingDialog.form, enabled: e.target.checked },
-                                    })
-                                }
-                            />{' '}
-                            启用互访入口
-                        </label>
                         <div className="form-actions">
                             <button type="button" className="ghost" onClick={() => setMappingDialog(null)}>
                                 取消
@@ -1449,7 +1977,7 @@ export function App() {
             </Modal>
 
             <Modal
-                title="删除互访入口？"
+                title="删除端到端访问入口？"
                 description="删除后访问方 Agent 将停止对应本机监听。"
                 open={!!confirmDeleteMapping}
                 onClose={() => setConfirmDeleteMapping(null)}
@@ -1471,8 +1999,117 @@ export function App() {
             </Modal>
 
             <Modal
+                title={`${connectionDialog?.client.displayName ?? ''} / ${connectionDialog?.channel.displayName ?? ''} 当前连接`}
+                description="建连中与转发中的实时快照，每 5 秒更新。断开连接会中止当前业务会话。"
+                open={!!connectionDialog}
+                onClose={() => {
+                    setConnectionDialog(null);
+                    setConfirmConnectionId(null);
+                }}
+                error={error}
+            >
+                {connectionDialog && (
+                    <>
+                        <div className="history-toolbar">
+                            <span>当前 {connectionDialog.connections.length} 条连接</span>
+                            <button
+                                className="ghost"
+                                onClick={() =>
+                                    void loadConnections(
+                                        connectionDialog.client.clientId,
+                                        connectionDialog.channel.channelId,
+                                    )
+                                }
+                            >
+                                刷新
+                            </button>
+                        </div>
+                        <div className="table-scroll">
+                            <table className="connection-table">
+                                <thead>
+                                    <tr>
+                                        <th>连接 ID</th>
+                                        <th>来源</th>
+                                        <th>状态</th>
+                                        <th>建立时间</th>
+                                        <th>流量 →目标 / →访问方</th>
+                                        {session.authenticated && <th>操作</th>}
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {connectionDialog.connections.map((connection) => (
+                                        <tr key={connection.connectionId}>
+                                            <td className="mono" title={connection.connectionId}>
+                                                {connection.connectionId.slice(0, 8)}…
+                                            </td>
+                                            <td className="mono">{connection.source}</td>
+                                            <td>
+                                                {connection.state === 'relaying' ? '转发中' : '建连中'}
+                                                {connection.kind === 'end-to-end' ? ' · 端到端' : ''}
+                                            </td>
+                                            <td>{time(connection.startedAtUtc)}</td>
+                                            <td
+                                                className="mono"
+                                                title={
+                                                    connection.kind === 'end-to-end'
+                                                        ? '端到端密文传输字节'
+                                                        : '普通代理传输字节'
+                                                }
+                                            >
+                                                {fmt(connection.bytesToTarget)} /{' '}
+                                                {fmt(connection.bytesToCaller)}
+                                            </td>
+                                            {session.authenticated && (
+                                                <td>
+                                                    {confirmConnectionId === connection.connectionId ? (
+                                                        <>
+                                                            <button
+                                                                className="text-button danger"
+                                                                disabled={saving}
+                                                                onClick={() => void disconnectConnection()}
+                                                            >
+                                                                确认断开
+                                                            </button>{' '}
+                                                            <button
+                                                                className="text-button"
+                                                                onClick={() => setConfirmConnectionId(null)}
+                                                            >
+                                                                取消
+                                                            </button>
+                                                        </>
+                                                    ) : (
+                                                        <button
+                                                            className="text-button danger"
+                                                            onClick={() =>
+                                                                setConfirmConnectionId(
+                                                                    connection.connectionId,
+                                                                )
+                                                            }
+                                                        >
+                                                            断开
+                                                        </button>
+                                                    )}
+                                                </td>
+                                            )}
+                                        </tr>
+                                    ))}
+                                    {!connectionDialog.connections.length && (
+                                        <tr>
+                                            <td className="empty-row" colSpan={session.authenticated ? 6 : 5}>
+                                                {connectionDialog.loading ? '加载中…' : '当前没有连接'}
+                                            </td>
+                                        </tr>
+                                    )}
+                                </tbody>
+                            </table>
+                        </div>
+                    </>
+                )}
+            </Modal>
+
+            <Modal
                 title={`${historyDialog?.client.displayName ?? ''} / ${historyDialog?.channel.displayName ?? ''}`}
-                description="按客户端与通道聚合的历史流量。曲线为服务每次运行内的累计值，重启后归零。"
+                description="历史流量按分钟存储；图表随时间范围按分钟、15 分钟或小时汇总。端到端通道统计密文字节。"
                 open={!!historyDialog}
                 onClose={() => setHistoryDialog(null)}
                 error={error}
@@ -1501,8 +2138,24 @@ export function App() {
                         </div>
                         <TrafficChart samples={historyDialog.samples} />
                         <div className="history-total">
-                            最新累计　→ 目标 <b>{fmt(historyDialog.samples.at(-1)?.bytesToTarget || 0)}</b>　→
-                            访问方 <b>{fmt(historyDialog.samples.at(-1)?.bytesToCaller || 0)}</b>
+                            所选时段合计　→ 目标{' '}
+                            <b>
+                                {fmt(
+                                    historyDialog.samples.reduce(
+                                        (sum, sample) => sum + sample.bytesToTarget,
+                                        0,
+                                    ),
+                                )}
+                            </b>
+                            　→ 访问方{' '}
+                            <b>
+                                {fmt(
+                                    historyDialog.samples.reduce(
+                                        (sum, sample) => sum + sample.bytesToCaller,
+                                        0,
+                                    ),
+                                )}
+                            </b>
                         </div>
                     </div>
                 )}

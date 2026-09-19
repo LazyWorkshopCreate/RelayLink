@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text.Json;
 using RelayLink.Protocol;
+using RelayLink.Server.Runtime;
 
 namespace RelayLink.Server.Configuration;
 
@@ -42,6 +43,10 @@ public sealed class ConfigurationLoader
         {
             server = server with { History = server.History with { FilePath = Path.GetFullPath(server.History.FilePath, configurationDirectory) } };
         }
+        var auditPath = server.Audit?.FilePath ?? (server.History is not null
+            ? TrafficHistoryService.DatabasePath(server.History.FilePath)
+            : Path.Combine(configurationDirectory, "audit.db"));
+        server = server with { Audit = new AuditConfiguration(Path.GetFullPath(auditPath, configurationDirectory), server.Audit?.RetentionDays ?? 90) };
         ValidateServer(server, serverPath);
 
         var clientsDirectory = Path.GetFullPath(server.ClientsDirectory, configurationDirectory);
@@ -126,6 +131,16 @@ public sealed class ConfigurationLoader
             throw new ConfigurationException($"Unsupported or incomplete server configuration: {path}");
         }
 
+        if (server.SecurityGroups is null || server.SecurityGroups.Count > 100)
+            throw new ConfigurationException("Security groups are invalid.");
+        var groupIds = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var group in server.SecurityGroups)
+        {
+            if (!IsIdentifier(group.Id) || !groupIds.Add(group.Id) || string.IsNullOrWhiteSpace(group.Name) || group.Name.Length > 100 ||
+                group.Entries is null || group.Entries.Count is < 1 or > 256 || group.Entries.Any(entry => !SecurityGroupMatcher.IsValidEntry(entry)))
+                throw new ConfigurationException($"Invalid security group: {group.Id}.");
+        }
+
         ValidateAddressAndPort(server.Tunnel.ListenAddress, server.Tunnel.Port, "tunnel endpoint");
         ValidateAddressAndPort(server.Tunnel.ListenAddress, server.Tunnel.EffectiveDataPort, "data endpoint");
         if (server.Tunnel.Port == server.Tunnel.EffectiveDataPort)
@@ -192,6 +207,8 @@ public sealed class ConfigurationLoader
         {
             throw new ConfigurationException("History configuration is invalid.");
         }
+        if (server.Audit is not null && server.Audit is not { FilePath: { Length: > 0 }, RetentionDays: >= 1 and <= 3650 })
+            throw new ConfigurationException("Audit configuration is invalid.");
     }
 
     private static void ValidateClient(ClientConfiguration client, string path, ServerConfiguration server)
@@ -217,6 +234,9 @@ public sealed class ConfigurationLoader
             throw new ConfigurationException($"Secret is shorter than 32 bytes for {client.ClientId}.");
         }
 
+        if (client.E2eCertificateSha256 is not null)
+            ValidateFingerprint(client.E2eCertificateSha256, client.ClientId);
+
         var ids = new HashSet<string>(StringComparer.Ordinal);
         foreach (var channel in client.Channels)
         {
@@ -234,14 +254,16 @@ public sealed class ConfigurationLoader
             if (channel.AuthorizedClientsOnly)
             {
                 ValidateAccessSecret(channel.AccessSecret, $"{client.ClientId}/{channel.ChannelId}");
-                ValidateFingerprint(channel.E2eCertificateSha256, $"{client.ClientId}/{channel.ChannelId}");
             }
+            if (channel.SecurityGroupId is not null &&
+                (channel.AuthorizedClientsOnly || !server.SecurityGroups.Any(group => group.Id == channel.SecurityGroupId)))
+                throw new ConfigurationException($"Invalid security group for {client.ClientId}/{channel.ChannelId}.");
         }
 
         var mappingIds = new HashSet<string>(StringComparer.Ordinal);
         foreach (var mapping in client.OutboundMappings)
         {
-            if (!IsIdentifier(mapping.MappingId) || !mappingIds.Add(mapping.MappingId) || mapping.LocalAddress != "127.0.0.1" || !IsIdentifier(mapping.TargetClientId) || !IsIdentifier(mapping.TargetChannelId))
+            if (!IsMappingIdentifier(mapping.MappingId) || !mappingIds.Add(mapping.MappingId) || mapping.LocalAddress != "127.0.0.1" || !IsIdentifier(mapping.TargetClientId) || !IsIdentifier(mapping.TargetChannelId))
                 throw new ConfigurationException($"Invalid outbound mapping for {client.ClientId}.");
             ValidateAccessSecret(mapping.AccessSecret, $"{client.ClientId}/{mapping.MappingId}");
             ValidateFingerprint(mapping.TargetCertificateSha256, $"{client.ClientId}/{mapping.MappingId}");
@@ -282,10 +304,10 @@ public sealed class ConfigurationLoader
         foreach (var client in clients)
         foreach (var mapping in client.OutboundMappings.Where(mapping => mapping.Enabled))
         {
-            if (mapping.TargetClientId == client.ClientId || !byId.TryGetValue(mapping.TargetClientId, out var targetClient) || !targetClient.Enabled)
+            if (mapping.TargetClientId == client.ClientId || !byId.TryGetValue(mapping.TargetClientId, out var targetClient))
                 throw new ConfigurationException($"Unavailable outbound target for {client.ClientId}/{mapping.MappingId}.");
             var target = targetClient.Channels.SingleOrDefault(channel => channel.ChannelId == mapping.TargetChannelId);
-            if (target is not { Enabled: true, AuthorizedClientsOnly: true } || !FixedSecretEquals(mapping.AccessSecret, target.AccessSecret!) || !string.Equals(mapping.TargetCertificateSha256, target.E2eCertificateSha256, StringComparison.OrdinalIgnoreCase))
+            if (target is not { Enabled: true, AuthorizedClientsOnly: true } || !FixedSecretEquals(mapping.AccessSecret, target.AccessSecret!) || !string.Equals(mapping.TargetCertificateSha256, targetClient.E2eCertificateSha256, StringComparison.OrdinalIgnoreCase))
                 throw new ConfigurationException($"Outbound mapping is not authorized for {client.ClientId}/{mapping.MappingId}.");
         }
     }
@@ -300,6 +322,12 @@ public sealed class ConfigurationLoader
     {
         foreach (var client in configuration.Clients.Values) ValidateClient(client, "dashboard update", configuration.Server);
         ValidateGlobalConflicts(configuration.Server, configuration.Clients.Values);
+    }
+
+    public void ValidateServerUpdate(LoadedConfiguration configuration)
+    {
+        ValidateServer(configuration.Server, "dashboard update");
+        ValidateClientUpdate(configuration);
     }
 
     public static byte[] DecodeSecret(string secret, string clientId)
@@ -329,6 +357,7 @@ public sealed class ConfigurationLoader
     }
 
     private static bool IsIdentifier(string? value) => value is { Length: > 0 and <= 64 } && System.Text.RegularExpressions.Regex.IsMatch(value, "^[a-z0-9][a-z0-9_-]{0,63}$", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+    private static bool IsMappingIdentifier(string? value) => value is { Length: > 0 and <= 129 } && System.Text.RegularExpressions.Regex.IsMatch(value, "^[a-z0-9][a-z0-9_-]{0,128}$", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
     private static bool EndpointsOverlap(string first, string second) => first == second || first is "0.0.0.0" or "::" || second is "0.0.0.0" or "::";
     private static void ValidateAddressAndPort(string? address, int port, string label)
     {

@@ -1,0 +1,84 @@
+<Slide style={{ width: '1280px', height: '720px', padding: '20px 64px', background: '#FFFFFF' }}>
+    <Box style={{ height: 88, flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between' }}>
+        <Box>
+            <Text style={{ fontSize: 13, fontWeight: 600, color: '#2563EB', letterSpacing: 2 }}>CHAPTER 02 · 双端口设计</Text>
+            <Box style={{ height: 8 }} />
+            <Text style={{ fontSize: 34, fontWeight: 'bold', color: '#0F172A', lineHeight: 1.25 }}>两个端口，靠一次性令牌缝合成一条连接</Text>
+        </Box>
+        <Box style={{ width: 4, height: 44, background: '#2563EB' }} />
+    </Box>
+
+    <Box style={{ height: 524, marginTop: 16, flexDirection: 'row', gap: 28 }}>
+        <Box style={{ width: 740 }}>
+            <Box style={{ height: 150, background: '#EEF2F8', borderRadius: 10, padding: '20px 24px', flexDirection: 'row', gap: 18 }}>
+                <Box style={{ width: 116 }}>
+                    <Text style={{ fontSize: 30, fontWeight: 'bold', color: '#2563EB' }}>7443</Text>
+                    <Box style={{ height: 6 }} />
+                    <Text style={{ fontSize: 13, color: '#64748B' }}>控制入口 · TLS</Text>
+                </Box>
+                <Box style={{ flex: 1 }}>
+                    <Text style={{ fontSize: 19, fontWeight: 600, color: '#0F172A' }}>只回答"谁可以连"</Text>
+                    <Box style={{ height: 8 }} />
+                    <Text style={{ fontSize: 15, color: '#64748B', lineHeight: 1.6 }}>注册认证、下发配置快照、心跳保活，以及为下一条业务连接派发令牌。它不接受数据绑定的首帧，也不承载任何业务字节。</Text>
+                </Box>
+            </Box>
+
+            <Box style={{ height: 150, marginTop: 14, background: '#FFFFFF', border: '1.5px solid #DCE3ED', borderRadius: 10, padding: '20px 24px', flexDirection: 'row', gap: 18 }}>
+                <Box style={{ width: 116 }}>
+                    <Text style={{ fontSize: 30, fontWeight: 'bold', color: '#0F172A' }}>7444</Text>
+                    <Box style={{ height: 6 }} />
+                    <Text style={{ fontSize: 13, color: '#64748B' }}>数据入口 · TCP</Text>
+                </Box>
+                <Box style={{ flex: 1 }}>
+                    <Text style={{ fontSize: 19, fontWeight: 600, color: '#0F172A' }}>只负责"搬字节"</Text>
+                    <Box style={{ height: 8 }} />
+                    <Text style={{ fontSize: 15, color: '#64748B', lineHeight: 1.6 }}>只接受已获授权的连接绑定。绑定完成并收到 Start 之后，这条连接上不再解析任何帧，直接双向复制原始 TCP 字节。</Text>
+                </Box>
+            </Box>
+
+            <Box style={{ height: 196, marginTop: 14, background: '#0F172A', borderRadius: 10, padding: '22px 24px', justifyContent: 'space-between' }}>
+                <Box>
+                    <Text style={{ fontSize: 19, fontWeight: 600, color: '#FFFFFF' }}>令牌把两个端口缝在一起</Text>
+                    <Box style={{ height: 10 }} />
+                    <Text style={{ fontSize: 15, color: '#CBD5E1', lineHeight: 1.65 }}>业务连接到来时，服务端生成 32 字节随机令牌随 Open 发给 Agent；Agent 拿它去数据端口做 BindData。令牌被原子消费恰好一次——重复、过期、跨会话、角色错置全部拒绝，失败后不可恢复。</Text>
+                </Box>
+                <Box style={{ flexDirection: 'row', gap: 14 }}>
+                    <Box style={{ background: '#1E293B', borderRadius: 6, padding: '8px 12px' }}>
+                        <Text style={{ fontSize: 13, color: '#60A5FA' }}>AwaitingBind</Text>
+                    </Box>
+                    <Box style={{ background: '#1E293B', borderRadius: 6, padding: '8px 12px' }}>
+                        <Text style={{ fontSize: 13, color: '#60A5FA' }}>CAS → Bound</Text>
+                    </Box>
+                    <Box style={{ background: '#1E293B', borderRadius: 6, padding: '8px 12px' }}>
+                        <Text style={{ fontSize: 13, color: '#60A5FA' }}>令牌哈希立即清除</Text>
+                    </Box>
+                </Box>
+            </Box>
+        </Box>
+
+        <Box style={{ width: 384, border: '1.5px solid #DCE3ED', borderRadius: 10, padding: '26px 24px', justifyContent: 'space-between' }}>
+            <Box>
+                <Text style={{ fontSize: 13, fontWeight: 600, color: '#2563EB', letterSpacing: 2 }}>代价</Text>
+                <Box style={{ height: 14 }} />
+                <Text style={{ fontSize: 24, fontWeight: 'bold', color: '#0F172A', lineHeight: 1.3 }}>数据入口<br />不叠加 TLS</Text>
+                <Box style={{ height: 18 }} />
+                <Text style={{ fontSize: 15, color: '#64748B', lineHeight: 1.65 }}>普通代理在这段链路上是明文 TCP，绑定元数据同样不保密。因此它只适用于受信隔离链路，或者业务自身已启用端到端 TLS 的场景。</Text>
+                <Box style={{ height: 16 }} />
+                <Text style={{ fontSize: 15, color: '#64748B', lineHeight: 1.65 }}>互访模式不受此限：业务载荷由两端 Agent 之间的内层 TLS 保护，服务端只中继密文。</Text>
+            </Box>
+            <Box>
+                <Box style={{ width: 44, height: 3, background: '#2563EB' }} />
+                <Box style={{ height: 14 }} />
+                <Text style={{ fontSize: 14, color: '#0F172A', lineHeight: 1.55, fontWeight: 600 }}>安全组不提供加密，它只能限制来源。</Text>
+            </Box>
+        </Box>
+    </Box>
+
+    <Box style={{ height: 36, marginTop: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+        <Box style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+            <Box style={{ width: 6, height: 6, background: '#2563EB' }} />
+            <Text style={{ fontSize: 14, color: '#64748B' }}>RelayLink · 开源反向 TCP 代理</Text>
+        </Box>
+        <Text style={{ fontSize: 14, color: '#64748B' }}>{{PAGE}} / {{TOTAL}}</Text>
+    </Box>
+</Slide>

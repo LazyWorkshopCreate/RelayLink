@@ -4,9 +4,13 @@
     <RootNamespace>RelayLink.Server</RootNamespace>
   </PropertyGroup>
   <ItemGroup>
+    <!-- Local test outputs must never become Web SDK publish content. -->
+    <Content Remove="artifacts/**" />
+    <None Remove="artifacts/**" />
     <ProjectReference Include="../RelayLink.Protocol/RelayLink.Protocol.csproj" />
     <ProjectReference Include="../RelayLink.Transport/RelayLink.Transport.csproj" />
     <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.2" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.12" />
   </ItemGroup>
   <Target Name="BuildAdminWeb" BeforeTargets="Build;Publish">
     <Exec Condition="'$(SkipAdminWebBuild)' != 'true'" Command="pnpm --dir &quot;$(MSBuildProjectDirectory)/../RelayLink.AdminWeb&quot; build" />

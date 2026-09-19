@@ -1,0 +1,28 @@
+{
+  "deck": "relaylink-intro.pptx",
+  "article": "wechat-article.md",
+  "pages": [
+    { "slug": "cover",         "type": "cover",    "role": "hero",       "rhythm": "peak",       "chapter": null, "image": true,  "caption": "封面" },
+    { "slug": "toc",           "type": "catalog",  "role": "supporting", "rhythm": "valley",     "chapter": null, "image": false, "caption": "目录" },
+    { "slug": "ch1",           "type": "section",  "role": "transition", "rhythm": "transition", "chapter": 1, "divider": 1, "image": false, "caption": "章节扉页 01 问题" },
+    { "slug": "why-now",       "type": "content",  "role": "supporting", "rhythm": "peak",       "chapter": 1, "image": true,  "caption": "为什么是现在" },
+    { "slug": "constraints",   "type": "content",  "role": "supporting", "rhythm": "valley",     "chapter": 1, "image": false, "caption": "三个硬约束" },
+    { "slug": "alternatives",  "type": "content",  "role": "supporting", "rhythm": "valley",     "chapter": 1, "image": true,  "caption": "现有方案对比" },
+    { "slug": "architecture",  "type": "content",  "role": "hero",       "rhythm": "peak",       "chapter": 1, "image": true,  "caption": "架构总览" },
+    { "slug": "ch2",           "type": "section",  "role": "transition", "rhythm": "transition", "chapter": 2, "divider": 2, "image": false, "caption": "章节扉页 02 架构与协议" },
+    { "slug": "projects",      "type": "content",  "role": "supporting", "rhythm": "valley",     "chapter": 2, "image": false, "caption": "五个工程" },
+    { "slug": "dual-port",     "type": "content",  "role": "supporting", "rhythm": "valley",     "chapter": 2, "image": false, "caption": "双端口设计" },
+    { "slug": "sequence",      "type": "content",  "role": "hero",       "rhythm": "peak",       "chapter": 2, "image": true,  "caption": "连接建立时序" },
+    { "slug": "wire-protocol", "type": "content",  "role": "supporting", "rhythm": "valley",     "chapter": 2, "image": false, "caption": "线协议帧结构" },
+    { "slug": "ch3",           "type": "section",  "role": "transition", "rhythm": "transition", "chapter": 3, "divider": 3, "image": false, "caption": "章节扉页 03 安全模型" },
+    { "slug": "credentials",   "type": "content",  "role": "supporting", "rhythm": "peak",       "chapter": 3, "image": true,  "caption": "三层凭据模型" },
+    { "slug": "peer-tls",      "type": "content",  "role": "hero",       "rhythm": "peak",       "chapter": 3, "image": true,  "caption": "客户端安全互访" },
+    { "slug": "revocation",    "type": "content",  "role": "supporting", "rhythm": "valley",     "chapter": 3, "image": false, "caption": "变更撤销与安全收敛" },
+    { "slug": "ch4",           "type": "section",  "role": "transition", "rhythm": "transition", "chapter": 4, "divider": 4, "image": false, "caption": "章节扉页 04 运维与边界" },
+    { "slug": "observability", "type": "content",  "role": "supporting", "rhythm": "valley",     "chapter": 4, "image": false, "caption": "可观测性" },
+    { "slug": "delivery",      "type": "content",  "role": "supporting", "rhythm": "valley",     "chapter": 4, "image": false, "caption": "交付形态" },
+    { "slug": "production",    "type": "content",  "role": "hero",       "rhythm": "peak",       "chapter": 4, "image": true,  "caption": "真实环境投产情况" },
+    { "slug": "boundaries",    "type": "content",  "role": "supporting", "rhythm": "valley",     "chapter": 4, "image": true,  "caption": "能力边界与验证状态" },
+    { "slug": "ending",        "type": "ending",   "role": "hero",       "rhythm": "peak",       "chapter": null, "image": false, "caption": "结束页 · 开源地址" }
+  ]
+}

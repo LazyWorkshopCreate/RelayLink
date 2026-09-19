@@ -1,0 +1,77 @@
+<Slide style={{ width: '1280px', height: '720px', padding: '20px 64px', background: '#FFFFFF' }}>
+    <Box style={{ height: 88, flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between' }}>
+        <Box>
+            <Text style={{ fontSize: 13, fontWeight: 600, color: '#2563EB', letterSpacing: 2 }}>CONTENTS</Text>
+            <Box style={{ height: 8 }} />
+            <Text style={{ fontSize: 34, fontWeight: 'bold', color: '#0F172A', lineHeight: 1.25 }}>四步看清这套系统</Text>
+        </Box>
+        <Box style={{ width: 4, height: 44, background: '#2563EB' }} />
+    </Box>
+
+    <Box style={{ height: 524, marginTop: 16, flexDirection: 'row', gap: 32 }}>
+        <Box style={{ width: 296, background: '#0F172A', borderRadius: 10, padding: '28px 26px', justifyContent: 'space-between' }}>
+            <Box>
+                <Text style={{ fontSize: 64, fontWeight: 'bold', color: '#FFFFFF', lineHeight: 1 }}>01–04</Text>
+                <Box style={{ height: 14 }} />
+                <Text style={{ fontSize: 19, fontWeight: 600, color: '#60A5FA' }}>目录</Text>
+            </Box>
+            <Box>
+                <Box style={{ width: 44, height: 3, background: '#2563EB' }} />
+                <Box style={{ height: 16 }} />
+                <Text style={{ fontSize: 15, color: '#CBD5E1', lineHeight: 1.6 }}>
+                    从"为什么难"出发，到"它不做什么"收尾。每一章都回答一个具体问题。
+                </Text>
+            </Box>
+        </Box>
+
+        <Box style={{ flex: 1, justifyContent: 'space-between' }}>
+            <Box style={{ height: 118, flexDirection: 'row', alignItems: 'center', borderBottom: '1px solid #DCE3ED' }}>
+                <Text style={{ fontSize: 40, fontWeight: 'bold', color: '#2563EB', width: 78 }}>01</Text>
+                <Box style={{ flex: 1, paddingRight: 20 }}>
+                    <Text style={{ fontSize: 22, fontWeight: 600, color: '#0F172A' }}>问题：数据中台回潮，数据却出不来</Text>
+                    <Box style={{ height: 8 }} />
+                    <Text style={{ fontSize: 15, color: '#64748B', lineHeight: 1.5 }}>三个硬约束摆在那儿，能动的其实只有"由谁发起连接"这一件事。</Text>
+                </Box>
+                <Text style={{ fontSize: 14, color: '#64748B', width: 74, textAlign: 'right' }}>页 {{CH1_FROM}}–{{CH1_TO}}</Text>
+            </Box>
+
+            <Box style={{ height: 118, flexDirection: 'row', alignItems: 'center', borderBottom: '1px solid #DCE3ED' }}>
+                <Text style={{ fontSize: 40, fontWeight: 'bold', color: '#2563EB', width: 78 }}>02</Text>
+                <Box style={{ flex: 1, paddingRight: 20 }}>
+                    <Text style={{ fontSize: 22, fontWeight: 600, color: '#0F172A' }}>架构与协议：控制和数据为什么要分家</Text>
+                    <Box style={{ height: 8 }} />
+                    <Text style={{ fontSize: 15, color: '#64748B', lineHeight: 1.5 }}>双端口、一次性绑定令牌，以及一条业务连接从 accept 到转发字节的九步。</Text>
+                </Box>
+                <Text style={{ fontSize: 14, color: '#64748B', width: 74, textAlign: 'right' }}>页 {{CH2_FROM}}–{{CH2_TO}}</Text>
+            </Box>
+
+            <Box style={{ height: 118, flexDirection: 'row', alignItems: 'center', borderBottom: '1px solid #DCE3ED' }}>
+                <Text style={{ fontSize: 40, fontWeight: 'bold', color: '#2563EB', width: 78 }}>03</Text>
+                <Box style={{ flex: 1, paddingRight: 20 }}>
+                    <Text style={{ fontSize: 22, fontWeight: 600, color: '#0F172A' }}>安全模型：谁被允许连，服务端能看到什么</Text>
+                    <Box style={{ height: 8 }} />
+                    <Text style={{ fontSize: 15, color: '#64748B', lineHeight: 1.5 }}>三层凭据各管一段，两台内网机器互访时服务端只中继密文。</Text>
+                </Box>
+                <Text style={{ fontSize: 14, color: '#64748B', width: 74, textAlign: 'right' }}>页 13–16</Text>
+            </Box>
+
+            <Box style={{ height: 118, flexDirection: 'row', alignItems: 'center' }}>
+                <Text style={{ fontSize: 40, fontWeight: 'bold', color: '#2563EB', width: 78 }}>04</Text>
+                <Box style={{ flex: 1, paddingRight: 20 }}>
+                    <Text style={{ fontSize: 22, fontWeight: 600, color: '#0F172A' }}>运维与边界：看得见、装得上，以及它不做什么</Text>
+                    <Box style={{ height: 8 }} />
+                    <Text style={{ fontSize: 15, color: '#64748B', lineHeight: 1.5 }}>匿名只读页面、分钟级流量、三种交付物，以及一份不粉饰的能力边界。</Text>
+                </Box>
+                <Text style={{ fontSize: 14, color: '#64748B', width: 74, textAlign: 'right' }}>页 {{CH4_FROM}}–{{CH4_TO}}</Text>
+            </Box>
+        </Box>
+    </Box>
+
+    <Box style={{ height: 36, marginTop: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+        <Box style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+            <Box style={{ width: 6, height: 6, background: '#2563EB' }} />
+            <Text style={{ fontSize: 14, color: '#64748B' }}>RelayLink · 开源反向 TCP 代理</Text>
+        </Box>
+        <Text style={{ fontSize: 14, color: '#64748B' }}>{{PAGE}} / {{TOTAL}}</Text>
+    </Box>
+</Slide>

@@ -1,0 +1,96 @@
+<Slide style={{ width: '1280px', height: '720px', padding: '20px 64px', background: '#FFFFFF' }}>
+    <Box style={{ height: 88, flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between' }}>
+        <Box>
+            <Text style={{ fontSize: 13, fontWeight: 600, color: '#2563EB', letterSpacing: 2 }}>CHAPTER 04 · 边界与验证</Text>
+            <Box style={{ height: 8 }} />
+            <Text style={{ fontSize: 34, fontWeight: 'bold', color: '#0F172A', lineHeight: 1.25 }}>它接下来会补什么，永远不做什么</Text>
+        </Box>
+        <Box style={{ width: 4, height: 44, background: '#2563EB' }} />
+    </Box>
+
+    <Box style={{ height: 524, marginTop: 16, flexDirection: 'row', gap: 28 }}>
+        <Box style={{ width: 260, background: '#0F172A', borderRadius: 10, padding: '28px 24px', justifyContent: 'space-between' }}>
+            <Box>
+                <Text style={{ fontSize: 26, fontWeight: 'bold', color: '#FFFFFF', lineHeight: 1.3 }}>网络组件<br />不是网站托管方案</Text>
+                <Box style={{ height: 16 }} />
+                <Box style={{ width: 44, height: 3, background: '#2563EB' }} />
+            </Box>
+            <Box>
+                <Text style={{ fontSize: 14, color: '#CBD5E1', lineHeight: 1.65 }}>它只负责把传输层字节从一端搬到另一端。<span style={{ fontWeight: '600', color: '#FFFFFF' }}>HTTP 域名路由、虚拟主机、证书托管这类应用层能力不会单独提供。</span></Text>
+                <Box style={{ height: 12 }} />
+                <Text style={{ fontSize: 14, color: '#CBD5E1', lineHeight: 1.65 }}>你可以拿它把 443 端口的流量送进内网，但那之后的 Web 服务器该怎么部署，是另一件事。</Text>
+                <Box style={{ height: 14 }} />
+                <Text style={{ fontSize: 12.5, color: '#64748B', lineHeight: 1.55 }}>首期只代理 TCP 字节流，不解析也不改写业务协议。</Text>
+            </Box>
+        </Box>
+
+        <Box style={{ flex: 1 }}>
+            <Box style={{ height: 48, background: '#DBEAFE', borderRadius: 10, padding: '12px 18px', flexDirection: 'row', alignItems: 'center', gap: 14 }}>
+                <Box style={{ background: '#2563EB', borderRadius: 5, padding: '6px 10px' }}>
+                    <Text style={{ fontSize: 13, fontWeight: 600, color: '#FFFFFF' }}>真实环境已投产</Text>
+                </Box>
+                <Text style={{ flex: 1, fontSize: 14, color: '#0F172A', lineHeight: 1.5 }}>跨公网 RDP（自有服务器，连续运行一天）· SQL Server 数据通道（另一环境）——详见上一页的分寸说明。</Text>
+            </Box>
+
+            <Box style={{ height: 148, marginTop: 12, background: '#EEF2F8', borderRadius: 10, padding: '14px 22px', justifyContent: 'space-between' }}>
+                <Box style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                    <Box style={{ background: '#2563EB', borderRadius: 5, padding: '5px 10px' }}>
+                        <Text style={{ fontSize: 13, fontWeight: 600, color: '#FFFFFF' }}>后续会支持</Text>
+                    </Box>
+                    <Box style={{ flex: 1, flexDirection: 'row', flexWrap: 'wrap', gap: 9 }}>
+                        <Box style={{ background: '#FFFFFF', border: '1.5px solid #93C5FD', borderRadius: 5, padding: '5px 10px' }}>
+                            <Text style={{ fontSize: 13, color: '#0F172A' }}>UDP</Text>
+                        </Box>
+                        <Box style={{ background: '#FFFFFF', border: '1.5px solid #93C5FD', borderRadius: 5, padding: '5px 10px' }}>
+                            <Text style={{ fontSize: 13, color: '#0F172A' }}>其他传输层协议</Text>
+                        </Box>
+                        <Box style={{ background: '#FFFFFF', border: '1.5px solid #93C5FD', borderRadius: 5, padding: '5px 10px' }}>
+                            <Text style={{ fontSize: 13, color: '#0F172A' }}>更多连接方式</Text>
+                        </Box>
+                    </Box>
+                </Box>
+                <Box style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                    <Box style={{ background: '#0F172A', borderRadius: 5, padding: '5px 10px' }}>
+                        <Text style={{ fontSize: 13, fontWeight: 600, color: '#FFFFFF' }}>明确不做</Text>
+                    </Box>
+                    <Box style={{ flex: 1, flexDirection: 'row', flexWrap: 'wrap', gap: 9 }}>
+                        <Box style={{ background: '#DCE3ED', borderRadius: 5, padding: '5px 10px' }}>
+                            <Text style={{ fontSize: 13, color: '#0F172A' }}>HTTP 域名路由</Text>
+                        </Box>
+                        <Box style={{ background: '#DCE3ED', borderRadius: 5, padding: '5px 10px' }}>
+                            <Text style={{ fontSize: 13, color: '#0F172A' }}>HTTP(S) 反向代理与虚拟主机</Text>
+                        </Box>
+                        <Box style={{ background: '#DCE3ED', borderRadius: 5, padding: '5px 10px' }}>
+                            <Text style={{ fontSize: 13, color: '#0F172A' }}>证书与站点托管</Text>
+                        </Box>
+                    </Box>
+                </Box>
+                <Text style={{ fontSize: 12.5, color: '#64748B', lineHeight: 1.55 }}>同样不在范围：SOCKS、VPN / IP 层组网、P2P 打洞、SQL Browser、集群与无损迁移、SQL 审计、健康查询、告警、远程升级、断连重放。</Text>
+            </Box>
+
+            <Box style={{ height: 148, marginTop: 12, background: '#FFFFFF', border: '1.5px solid #DCE3ED', borderRadius: 10, padding: '14px 22px' }}>
+                <Text style={{ fontSize: 17, fontWeight: 600, color: '#0F172A' }}>仓库内可重复执行的验证</Text>
+                <Box style={{ height: 10 }} />
+                <Text style={{ fontSize: 13, color: '#64748B', lineHeight: 1.6 }}>· SQL Server 2022 与 PostgreSQL 17：建表、插入、联表分组、UPDATE、事务回滚全部断言通过。</Text>
+                <Text style={{ fontSize: 13, color: '#64748B', lineHeight: 1.6 }}>· 双 Agent 端到端互访：证书固定、访问密钥证明、128 KiB 精确回显与半关闭均通过。</Text>
+                <Text style={{ fontSize: 13, color: '#64748B', lineHeight: 1.6 }}>· 32 路并发每路 1 MiB；单元测试 34/34、集成测试 21/21、前端组件测试 5/5。</Text>
+            </Box>
+
+            <Box style={{ height: 144, marginTop: 12, background: '#0F172A', borderRadius: 10, padding: '14px 22px' }}>
+                <Text style={{ fontSize: 17, fontWeight: 600, color: '#FFFFFF' }}>还没验的（照实说）</Text>
+                <Box style={{ height: 10 }} />
+                <Text style={{ fontSize: 13, color: '#CBD5E1', lineHeight: 1.6 }}>· 受控的 24 小时容量压测未执行；那组拟定基线<span style={{ fontWeight: '600', color: '#FFFFFF' }}>不是实测容量</span>。</Text>
+                <Text style={{ fontSize: 13, color: '#CBD5E1', lineHeight: 1.6 }}>· 多种 NAT 类型与多层 NAT 的系统性验收、安装包完整装卸、最小权限专项核查未闭环。</Text>
+                <Text style={{ fontSize: 13, color: '#CBD5E1', lineHeight: 1.6 }}>· 审计事件只有设计；RDP 登录后数十秒出画面的根因仍未做关闭 UDP 的 A/B 复测。</Text>
+            </Box>
+        </Box>
+    </Box>
+
+    <Box style={{ height: 36, marginTop: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+        <Box style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+            <Box style={{ width: 6, height: 6, background: '#2563EB' }} />
+            <Text style={{ fontSize: 14, color: '#64748B' }}>RelayLink · 开源反向 TCP 代理</Text>
+        </Box>
+        <Text style={{ fontSize: 14, color: '#64748B' }}>{{PAGE}} / {{TOTAL}}</Text>
+    </Box>
+</Slide>
