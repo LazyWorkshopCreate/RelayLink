@@ -533,24 +533,34 @@ public sealed class PeerConnectionTests
         private readonly TcpListener targetB = new(IPAddress.Loopback, 0);
         private readonly List<Process> processes = [];
         private readonly List<StringBuilder> processLogs = [];
+        private readonly HashSet<int> allocatedPorts = [];
         private int targetConnections;
         private int targetConnectionsB;
         public int TargetConnections => Volatile.Read(ref targetConnections);
         public int TargetConnectionsB => Volatile.Read(ref targetConnectionsB);
         public int LocalPort => ReadPort("to-visited");
         public int LocalPortB => ReadPort("to-visited-b");
-        public int AgentDashboardPort { get; } = FreePort();
-        public int ProxyPort { get; } = FreePort();
+        public int AgentDashboardPort { get; }
+        public int ProxyPort { get; }
         public int TargetPort { get; private set; }
-        public int TunnelPort { get; } = FreePort();
-        public int DataPort { get; } = FreePort();
-        private int DashboardPort { get; } = FreePort();
+        public int TunnelPort { get; }
+        public int DataPort { get; }
+        private int DashboardPort { get; }
         private string caPath = string.Empty;
         public string DashboardAddress => $"127.0.0.1:{DashboardPort}";
         public string ClientConfigurationJson(string clientId) => File.ReadAllText(Path.Combine(directory, "clients", $"{clientId}.json"));
         public string IntruderSecret { get; } = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
         public string CallerSecret { get; private set; } = string.Empty;
         public string TargetFingerprint { get; private set; } = string.Empty;
+
+        public Fixture()
+        {
+            AgentDashboardPort = AllocatePort();
+            ProxyPort = AllocatePort();
+            TunnelPort = AllocatePort();
+            DataPort = AllocatePort();
+            DashboardPort = AllocatePort();
+        }
 
         public async Task StartAsync(bool startCallerAgent = true, bool mapDashboard = false)
         {
@@ -576,10 +586,10 @@ public sealed class PeerConnectionTests
             var visitedChannels = new List<ChannelConfiguration>
             { new ChannelConfiguration("private", "Private", true, "127.0.0.1", ProxyPort, "127.0.0.1", targetPort, 10, 5)
             { AuthorizedClientsOnly = true, AccessSecret = accessSecret },
-             new ChannelConfiguration("private-b", "Private B", true, "127.0.0.1", FreePort(), "127.0.0.1", targetPortB, 10, 5)
+             new ChannelConfiguration("private-b", "Private B", true, "127.0.0.1", AllocatePort(), "127.0.0.1", targetPortB, 10, 5)
             { AuthorizedClientsOnly = true, AccessSecret = accessSecretB } };
             if (mapDashboard)
-                visitedChannels.Add(new ChannelConfiguration("server-dashboard", "Server Dashboard", true, "127.0.0.1", FreePort(), "127.0.0.1", DashboardPort, 10, 5)
+                visitedChannels.Add(new ChannelConfiguration("server-dashboard", "Server Dashboard", true, "127.0.0.1", AllocatePort(), "127.0.0.1", DashboardPort, 10, 5)
                 { AuthorizedClientsOnly = true, AccessSecret = dashboardAccessSecret });
             var visited = new ClientConfiguration(1, "visited", "Visited", true, secret, 30, 20, visitedChannels) { E2eCertificateSha256 = fingerprint };
             var callerSecret = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
@@ -683,6 +693,15 @@ public sealed class PeerConnectionTests
         public void StartCaller() => StartProcess(typeof(ControlSessionWorker).Assembly.Location, Path.Combine(directory, "caller", "agent.json"));
 
         private int ReadPort(string mappingId) => TryReadPort(mappingId, out var port) ? port : throw new InvalidOperationException($"Port not reported for {mappingId}.");
+
+        private int AllocatePort()
+        {
+            while (true)
+            {
+                var port = FreePort();
+                if (allocatedPorts.Add(port)) return port;
+            }
+        }
 
         private bool TryReadPort(string mappingId, out int port)
         {
