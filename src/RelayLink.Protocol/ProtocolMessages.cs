@@ -48,5 +48,4 @@ public sealed record ChannelSnapshot(
 {
     public bool AuthorizedClientsOnly { get; init; }
     public string? AccessSecret { get; init; }
-    public string? E2eCertificateSha256 { get; init; }
 }

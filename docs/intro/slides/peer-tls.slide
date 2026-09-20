@@ -1,0 +1,143 @@
+<Slide style={{ width: '1280px', height: '720px', padding: '20px 64px', background: '#FFFFFF' }}>
+    <Box style={{ height: 88, flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between' }}>
+        <Box>
+            <Text style={{ fontSize: 13, fontWeight: 600, color: '#2563EB', letterSpacing: 2 }}>CHAPTER 03 · 客户端安全互访</Text>
+            <Box style={{ height: 8 }} />
+            <Text style={{ fontSize: 34, fontWeight: 'bold', color: '#0F172A', lineHeight: 1.25 }}>两台内网机器互访，服务端全程只见密文</Text>
+        </Box>
+        <Box style={{ width: 4, height: 44, background: '#2563EB' }} />
+    </Box>
+
+    <Box style={{ height: 524, marginTop: 16, flexDirection: 'row', gap: 28 }}>
+        <Box style={{ width: 680, background: '#EEF2F8', borderRadius: 10, padding: '18px 20px' }}>
+            <Box style={{ height: 84, background: '#FFFFFF', border: '1.5px solid #DCE3ED', borderRadius: 8, padding: '12px 16px', flexDirection: 'row', alignItems: 'center', gap: 14 }}>
+                <Box style={{ width: 190 }}>
+                    <Text style={{ fontSize: 16, fontWeight: 600, color: '#0F172A' }}>访问方本机应用</Text>
+                    <Box style={{ height: 4 }} />
+                    <Text style={{ fontSize: 13, color: '#64748B' }}>sqlcmd / 业务程序</Text>
+                </Box>
+                <Box style={{ flex: 1, alignItems: 'center' }}>
+                    <Box style={{ height: 2, width: '100%', background: '#2563EB' }} />
+                    <Text style={{ fontSize: 13, color: '#2563EB', fontWeight: 600 }}>→ 127.0.0.1:端口</Text>
+                </Box>
+                <Box style={{ width: 200, background: '#EEF2F8', borderRadius: 6, padding: '10px 12px' }}>
+                    <Text style={{ fontSize: 16, fontWeight: 600, color: '#0F172A' }}>访问方 Agent</Text>
+                    <Box style={{ height: 4 }} />
+                    <Text style={{ fontSize: 13, color: '#64748B' }}>端口由 Agent 自选并上报</Text>
+                </Box>
+            </Box>
+
+            <Box style={{ height: 22, alignItems: 'center' }}>
+                <Text style={{ fontSize: 14, color: '#94A3B8' }}>↓</Text>
+            </Box>
+
+            <Box style={{ height: 158, background: '#0F172A', borderRadius: 8, padding: '14px 16px', justifyContent: 'space-between' }}>
+                <Box style={{ flexDirection: 'row', alignItems: 'center' }}>
+                    <Box style={{ width: 150 }}>
+                        <Text style={{ fontSize: 15, fontWeight: 600, color: '#FFFFFF' }}>访问方 Agent</Text>
+                        <Box style={{ height: 4 }} />
+                        <Text style={{ fontSize: 12, color: '#60A5FA' }}>内层 TLS 起点</Text>
+                    </Box>
+                    <Box style={{ flex: 1, alignItems: 'center' }}>
+                        <Box style={{ width: '100%', height: 3, background: '#2563EB' }} />
+                        <Box style={{ height: 5 }} />
+                        <Text style={{ fontSize: 12, color: '#CBD5E1' }}>TLS 1.2+ · 证书指纹固定</Text>
+                    </Box>
+                    <Box style={{ width: 130, alignItems: 'center' }}>
+                        <Text style={{ fontSize: 15, fontWeight: 'bold', color: '#FFFFFF' }}>Server</Text>
+                        <Box style={{ height: 4 }} />
+                        <Text style={{ fontSize: 12, color: '#94A3B8' }}>只转发 DATA</Text>
+                    </Box>
+                    <Box style={{ flex: 1, alignItems: 'center' }}>
+                        <Box style={{ width: '100%', height: 3, background: '#2563EB' }} />
+                        <Box style={{ height: 5 }} />
+                        <Text style={{ fontSize: 12, color: '#CBD5E1' }}>随机挑战 + HMAC 证明</Text>
+                    </Box>
+                    <Box style={{ width: 150, alignItems: 'flex-end' }}>
+                        <Text style={{ fontSize: 15, fontWeight: 600, color: '#FFFFFF' }}>被访问 Agent</Text>
+                        <Box style={{ height: 4 }} />
+                        <Text style={{ fontSize: 12, color: '#60A5FA' }}>内层 TLS 终点</Text>
+                    </Box>
+                </Box>
+                <Box style={{ background: '#1E293B', borderRadius: 6, padding: '10px 14px', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <Text style={{ fontSize: 13, color: '#60A5FA' }}>服务端可见：路由元数据、连接时间、密文字节量</Text>
+                    <Text style={{ fontSize: 13, color: '#FFFFFF', fontWeight: 600 }}>服务端不可见：明文业务载荷</Text>
+                </Box>
+            </Box>
+
+            <Box style={{ height: 22, alignItems: 'center' }}>
+                <Text style={{ fontSize: 14, color: '#94A3B8' }}>↓ 证明校验通过之后才允许</Text>
+            </Box>
+
+            <Box style={{ height: 84, background: '#FFFFFF', border: '1.5px solid #DCE3ED', borderRadius: 8, padding: '12px 16px', flexDirection: 'row', alignItems: 'center', gap: 14 }}>
+                <Box style={{ width: 190 }}>
+                    <Text style={{ fontSize: 16, fontWeight: 600, color: '#0F172A' }}>被访问 Agent</Text>
+                    <Box style={{ height: 4 }} />
+                    <Text style={{ fontSize: 13, color: '#64748B' }}>校验密钥与目标通道</Text>
+                </Box>
+                <Box style={{ flex: 1, alignItems: 'center' }}>
+                    <Box style={{ height: 2, width: '100%', background: '#2563EB' }} />
+                    <Text style={{ fontSize: 13, color: '#2563EB', fontWeight: 600 }}>→ 才拨号业务目标</Text>
+                </Box>
+                <Box style={{ width: 200, background: '#EEF2F8', borderRadius: 6, padding: '10px 12px' }}>
+                    <Text style={{ fontSize: 16, fontWeight: 600, color: '#0F172A' }}>内网目标服务</Text>
+                    <Box style={{ height: 4 }} />
+                    <Text style={{ fontSize: 13, color: '#64748B' }}>1433 / 5432 / 任意 TCP</Text>
+                </Box>
+            </Box>
+
+            <Box style={{ height: 104, marginTop: 12, background: '#FFFFFF', borderRadius: 8, padding: '12px 16px', justifyContent: 'space-between' }}>
+                <Text style={{ fontSize: 15, color: '#64748B', lineHeight: 1.6 }}>授权顺序不能颠倒：任何一环失败，被访问方都不会对目标发起 TCP Connect，更不会传递一个字节的业务数据。错误时也不会降级为明文传输。</Text>
+                <Box style={{ flexDirection: 'row', gap: 10 }}>
+                    <Box style={{ background: '#EEF2F8', borderRadius: 6, padding: '6px 10px' }}>
+                        <Text style={{ fontSize: 12, color: '#0F172A' }}>证书指纹固定</Text>
+                    </Box>
+                    <Box style={{ background: '#EEF2F8', borderRadius: 6, padding: '6px 10px' }}>
+                        <Text style={{ fontSize: 12, color: '#0F172A' }}>32 字节随机挑战</Text>
+                    </Box>
+                    <Box style={{ background: '#EEF2F8', borderRadius: 6, padding: '6px 10px' }}>
+                        <Text style={{ fontSize: 12, color: '#0F172A' }}>HMAC-SHA256 证明</Text>
+                    </Box>
+                    <Box style={{ background: '#EEF2F8', borderRadius: 6, padding: '6px 10px' }}>
+                        <Text style={{ fontSize: 12, color: '#0F172A' }}>固定时间比较</Text>
+                    </Box>
+                </Box>
+            </Box>
+        </Box>
+
+        <Box style={{ width: 444, justifyContent: 'space-between' }}>
+            <Box style={{ background: '#0F172A', borderRadius: 10, padding: '26px 24px' }}>
+                <Text style={{ fontSize: 13, fontWeight: 600, color: '#60A5FA', letterSpacing: 2 }}>为什么不一样</Text>
+                <Box style={{ height: 14 }} />
+                <Text style={{ fontSize: 28, fontWeight: 'bold', color: '#FFFFFF', lineHeight: 1.3 }}>服务端是中继者<br />不是解密者</Text>
+                <Box style={{ height: 18 }} />
+                <Text style={{ fontSize: 15, color: '#CBD5E1', lineHeight: 1.65 }}>普通内网穿透通常是"服务端解密再转发"，业务数据对服务端完全可见。RelayLink 的互访路径把 TLS 建在两端 Agent 之间，服务端只配对并转发密文帧。</Text>
+            </Box>
+
+            <Box style={{ marginTop: 16 }}>
+                <Box style={{ flexDirection: 'row', gap: 12, alignItems: 'flex-start' }}>
+                    <Text style={{ fontSize: 15, fontWeight: 'bold', color: '#2563EB', width: 22 }}>1</Text>
+                    <Text style={{ flex: 1, fontSize: 15, color: '#64748B', lineHeight: 1.6 }}>入口只监听访问方本机 loopback，被访问通道不再开放云端代理端口。</Text>
+                </Box>
+                <Box style={{ height: 14 }} />
+                <Box style={{ flexDirection: 'row', gap: 12, alignItems: 'flex-start' }}>
+                    <Text style={{ fontSize: 15, fontWeight: 'bold', color: '#2563EB', width: 22 }}>2</Text>
+                    <Text style={{ flex: 1, fontSize: 15, color: '#64748B', lineHeight: 1.6 }}>映射与目标授权全在服务端下发，Agent 本地不落地访问密钥，状态页也不展示密钥。</Text>
+                </Box>
+                <Box style={{ height: 14 }} />
+                <Box style={{ flexDirection: 'row', gap: 12, alignItems: 'flex-start' }}>
+                    <Text style={{ fontSize: 15, fontWeight: 'bold', color: '#2563EB', width: 22 }}>3</Text>
+                    <Text style={{ flex: 1, fontSize: 15, color: '#64748B', lineHeight: 1.6 }}>两端都只主动出网；任一控制会话断开，相关互访连接立即释放。</Text>
+                </Box>
+            </Box>
+        </Box>
+    </Box>
+
+    <Box style={{ height: 36, marginTop: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+        <Box style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+            <Box style={{ width: 6, height: 6, background: '#2563EB' }} />
+            <Text style={{ fontSize: 14, color: '#64748B' }}>RelayLink · 开源反向 TCP 代理</Text>
+        </Box>
+        <Text style={{ fontSize: 14, color: '#64748B' }}>{{PAGE}} / {{TOTAL}}</Text>
+    </Box>
+</Slide>

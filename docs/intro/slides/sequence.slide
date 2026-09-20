@@ -1,0 +1,213 @@
+<Slide style={{ width: '1280px', height: '720px', padding: '20px 64px', background: '#FFFFFF' }}>
+    <Box style={{ height: 88, flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between' }}>
+        <Box>
+            <Text style={{ fontSize: 13, fontWeight: 600, color: '#2563EB', letterSpacing: 2 }}>CHAPTER 02 · 连接时序</Text>
+            <Box style={{ height: 8 }} />
+            <Text style={{ fontSize: 34, fontWeight: 'bold', color: '#0F172A', lineHeight: 1.25 }}>一条业务连接：九步建立，20 秒总预算</Text>
+        </Box>
+        <Box style={{ width: 4, height: 44, background: '#2563EB' }} />
+    </Box>
+
+    <Box style={{ height: 524, marginTop: 16 }}>
+        <Box style={{ height: 330, background: '#EEF2F8', borderRadius: 10, padding: '14px 18px' }}>
+            <Box style={{ height: 46, flexDirection: 'row', alignItems: 'center' }}>
+                <Box style={{ width: 320 }}>
+                    <Text style={{ fontSize: 13, fontWeight: 600, color: '#64748B' }}>步骤</Text>
+                </Box>
+                <Box style={{ flex: 1, flexDirection: 'row' }}>
+                    <Box style={{ width: 190, alignItems: 'center' }}>
+                        <Text style={{ fontSize: 14, fontWeight: 600, color: '#0F172A' }}>云端调用方</Text>
+                    </Box>
+                    <Box style={{ width: 190, alignItems: 'center' }}>
+                        <Text style={{ fontSize: 14, fontWeight: 600, color: '#0F172A' }}>Server</Text>
+                    </Box>
+                    <Box style={{ width: 190, alignItems: 'center' }}>
+                        <Text style={{ fontSize: 14, fontWeight: 600, color: '#0F172A' }}>Agent</Text>
+                    </Box>
+                    <Box style={{ width: 190, alignItems: 'center' }}>
+                        <Text style={{ fontSize: 14, fontWeight: 600, color: '#0F172A' }}>内网目标</Text>
+                    </Box>
+                </Box>
+            </Box>
+
+            <Box style={{ height: 28, flexDirection: 'row', alignItems: 'center' }}>
+                <Box style={{ width: 320, flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                    <Text style={{ fontSize: 15, fontWeight: 'bold', color: '#2563EB', width: 22 }}>1</Text>
+                    <Text style={{ fontSize: 14, color: '#0F172A' }}>业务 TCP 连接到代理端口</Text>
+                </Box>
+                <Box style={{ flex: 1, flexDirection: 'row', height: 2 }}>
+                    <Box style={{ width: 190, background: '#2563EB' }} />
+                    <Box style={{ width: 190, background: '#2563EB' }} />
+                    <Box style={{ width: 190, background: 'transparent' }} />
+                    <Box style={{ width: 190, background: 'transparent' }} />
+                </Box>
+                <Box style={{ width: 26, alignItems: 'center' }}>
+                    <Text style={{ fontSize: 14, color: '#2563EB', fontWeight: 'bold' }}>→</Text>
+                </Box>
+            </Box>
+
+            <Box style={{ height: 28, flexDirection: 'row', alignItems: 'center' }}>
+                <Box style={{ width: 320, flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                    <Text style={{ fontSize: 15, fontWeight: 'bold', color: '#2563EB', width: 22 }}>2</Text>
+                    <Text style={{ fontSize: 14, color: '#0F172A' }}>预留配额，生成 Pending 与一次性令牌</Text>
+                </Box>
+                <Box style={{ flex: 1, flexDirection: 'row', height: 2 }}>
+                    <Box style={{ width: 190, background: 'transparent' }} />
+                    <Box style={{ width: 190, background: '#0F172A' }} />
+                    <Box style={{ width: 190, background: 'transparent' }} />
+                    <Box style={{ width: 190, background: 'transparent' }} />
+                </Box>
+                <Box style={{ width: 26, alignItems: 'center' }}>
+                    <Text style={{ fontSize: 14, color: '#64748B' }}>·</Text>
+                </Box>
+            </Box>
+
+            <Box style={{ height: 28, flexDirection: 'row', alignItems: 'center' }}>
+                <Box style={{ width: 320, flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                    <Text style={{ fontSize: 15, fontWeight: 'bold', color: '#2563EB', width: 22 }}>3</Text>
+                    <Text style={{ fontSize: 14, color: '#0F172A' }}>Open（走已认证的控制连接）</Text>
+                </Box>
+                <Box style={{ flex: 1, flexDirection: 'row', height: 2 }}>
+                    <Box style={{ width: 190, background: 'transparent' }} />
+                    <Box style={{ width: 190, background: '#2563EB' }} />
+                    <Box style={{ width: 190, background: '#2563EB' }} />
+                    <Box style={{ width: 190, background: 'transparent' }} />
+                </Box>
+                <Box style={{ width: 26, alignItems: 'center' }}>
+                    <Text style={{ fontSize: 14, color: '#2563EB', fontWeight: 'bold' }}>→</Text>
+                </Box>
+            </Box>
+
+            <Box style={{ height: 28, flexDirection: 'row', alignItems: 'center' }}>
+                <Box style={{ width: 320, flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                    <Text style={{ fontSize: 15, fontWeight: 'bold', color: '#2563EB', width: 22 }}>4</Text>
+                    <Text style={{ fontSize: 14, color: '#0F172A' }}>新建 TCP 到数据端口并 BindData</Text>
+                </Box>
+                <Box style={{ flex: 1, flexDirection: 'row', height: 2 }}>
+                    <Box style={{ width: 190, background: 'transparent' }} />
+                    <Box style={{ width: 190, background: '#0F172A' }} />
+                    <Box style={{ width: 190, background: '#0F172A' }} />
+                    <Box style={{ width: 190, background: 'transparent' }} />
+                </Box>
+                <Box style={{ width: 26, alignItems: 'center' }}>
+                    <Text style={{ fontSize: 14, color: '#0F172A', fontWeight: 'bold' }}>←</Text>
+                </Box>
+            </Box>
+
+            <Box style={{ height: 28, flexDirection: 'row', alignItems: 'center' }}>
+                <Box style={{ width: 320, flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                    <Text style={{ fontSize: 15, fontWeight: 'bold', color: '#2563EB', width: 22 }}>5</Text>
+                    <Text style={{ fontSize: 14, color: '#0F172A' }}>原子消费令牌 → BindAccepted</Text>
+                </Box>
+                <Box style={{ flex: 1, flexDirection: 'row', height: 2 }}>
+                    <Box style={{ width: 190, background: 'transparent' }} />
+                    <Box style={{ width: 190, background: '#2563EB' }} />
+                    <Box style={{ width: 190, background: '#2563EB' }} />
+                    <Box style={{ width: 190, background: 'transparent' }} />
+                </Box>
+                <Box style={{ width: 26, alignItems: 'center' }}>
+                    <Text style={{ fontSize: 14, color: '#2563EB', fontWeight: 'bold' }}>→</Text>
+                </Box>
+            </Box>
+
+            <Box style={{ height: 28, flexDirection: 'row', alignItems: 'center' }}>
+                <Box style={{ width: 320, flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                    <Text style={{ fontSize: 15, fontWeight: 'bold', color: '#2563EB', width: 22 }}>6</Text>
+                    <Text style={{ fontSize: 14, color: '#0F172A' }}>拨号快照中指定的目标（5 秒子期限）</Text>
+                </Box>
+                <Box style={{ flex: 1, flexDirection: 'row', height: 2 }}>
+                    <Box style={{ width: 190, background: 'transparent' }} />
+                    <Box style={{ width: 190, background: 'transparent' }} />
+                    <Box style={{ width: 190, background: '#2563EB' }} />
+                    <Box style={{ width: 190, background: '#2563EB' }} />
+                </Box>
+                <Box style={{ width: 26, alignItems: 'center' }}>
+                    <Text style={{ fontSize: 14, color: '#2563EB', fontWeight: 'bold' }}>→</Text>
+                </Box>
+            </Box>
+
+            <Box style={{ height: 28, flexDirection: 'row', alignItems: 'center' }}>
+                <Box style={{ width: 320, flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                    <Text style={{ fontSize: 15, fontWeight: 'bold', color: '#2563EB', width: 22 }}>7</Text>
+                    <Text style={{ fontSize: 14, color: '#0F172A' }}>TargetReady（回到控制连接）</Text>
+                </Box>
+                <Box style={{ flex: 1, flexDirection: 'row', height: 2 }}>
+                    <Box style={{ width: 190, background: 'transparent' }} />
+                    <Box style={{ width: 190, background: '#0F172A' }} />
+                    <Box style={{ width: 190, background: '#0F172A' }} />
+                    <Box style={{ width: 190, background: 'transparent' }} />
+                </Box>
+                <Box style={{ width: 26, alignItems: 'center' }}>
+                    <Text style={{ fontSize: 14, color: '#0F172A', fontWeight: 'bold' }}>←</Text>
+                </Box>
+            </Box>
+
+            <Box style={{ height: 28, flexDirection: 'row', alignItems: 'center' }}>
+                <Box style={{ width: 320, flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                    <Text style={{ fontSize: 15, fontWeight: 'bold', color: '#2563EB', width: 22 }}>8</Text>
+                    <Text style={{ fontSize: 14, color: '#0F172A' }}>Start：校验未超时且会话仍有效</Text>
+                </Box>
+                <Box style={{ flex: 1, flexDirection: 'row', height: 2 }}>
+                    <Box style={{ width: 190, background: 'transparent' }} />
+                    <Box style={{ width: 190, background: '#2563EB' }} />
+                    <Box style={{ width: 190, background: '#2563EB' }} />
+                    <Box style={{ width: 190, background: 'transparent' }} />
+                </Box>
+                <Box style={{ width: 26, alignItems: 'center' }}>
+                    <Text style={{ fontSize: 14, color: '#2563EB', fontWeight: 'bold' }}>→</Text>
+                </Box>
+            </Box>
+
+            <Box style={{ height: 28, flexDirection: 'row', alignItems: 'center' }}>
+                <Box style={{ width: 320, flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                    <Text style={{ fontSize: 15, fontWeight: 'bold', color: '#2563EB', width: 22 }}>9</Text>
+                    <Text style={{ fontSize: 14, color: '#0F172A' }}>双向复制原始 TCP 字节，不再分帧</Text>
+                </Box>
+                <Box style={{ flex: 1, flexDirection: 'row', height: 2 }}>
+                    <Box style={{ width: 190, background: '#2563EB' }} />
+                    <Box style={{ width: 190, background: '#2563EB' }} />
+                    <Box style={{ width: 190, background: '#2563EB' }} />
+                    <Box style={{ width: 190, background: '#2563EB' }} />
+                </Box>
+                <Box style={{ width: 26, alignItems: 'center' }}>
+                    <Text style={{ fontSize: 14, color: '#2563EB', fontWeight: 'bold' }}>⇄</Text>
+                </Box>
+            </Box>
+        </Box>
+
+        <Box style={{ height: 180, marginTop: 14, flexDirection: 'row', gap: 26 }}>
+            <Box style={{ width: 380, background: '#0F172A', borderRadius: 10, padding: '20px 22px', justifyContent: 'space-between' }}>
+                <Box>
+                    <Text style={{ fontSize: 19, fontWeight: 600, color: '#FFFFFF' }}>20 秒是总预算，不是各步累加</Text>
+                    <Box style={{ height: 10 }} />
+                    <Text style={{ fontSize: 15, color: '#CBD5E1', lineHeight: 1.6 }}>期限从服务端 accept 那一刻开始计时，覆盖绑定、目标拨号到 Start 的全过程；Agent 按收到的剩余预算自算截止时间。</Text>
+                </Box>
+                <Text style={{ fontSize: 13, color: '#60A5FA', fontWeight: 600 }}>服务端期限始终权威</Text>
+            </Box>
+            <Box style={{ width: 420, background: '#FFFFFF', border: '1.5px solid #DCE3ED', borderRadius: 10, padding: '20px 22px', justifyContent: 'space-between' }}>
+                <Box>
+                    <Text style={{ fontSize: 19, fontWeight: 600, color: '#0F172A' }}>每一步都有独立失败语义</Text>
+                    <Box style={{ height: 10 }} />
+                    <Text style={{ fontSize: 15, color: '#64748B', lineHeight: 1.6 }}>目标拒绝、DNS 失败、隧道超时、容量已满各自分类计数，不会被揉成一个笼统的"连接失败"。一个目标出问题不影响其他通道。</Text>
+                </Box>
+                <Text style={{ fontSize: 13, color: '#2563EB', fontWeight: 600 }}>可观测的前提是分类正确</Text>
+            </Box>
+            <Box style={{ width: 300, background: '#EEF2F8', borderRadius: 10, padding: '20px 22px', justifyContent: 'space-between' }}>
+                <Box>
+                    <Text style={{ fontSize: 19, fontWeight: 600, color: '#0F172A' }}>失败即关闭，不重放</Text>
+                    <Box style={{ height: 10 }} />
+                    <Text style={{ fontSize: 15, color: '#64748B', lineHeight: 1.6 }}>隧道断开就终止对应业务连接，不恢复原 TCP、不重放 SQL 语句、不自动恢复事务。</Text>
+                </Box>
+                <Text style={{ fontSize: 13, color: '#64748B', fontWeight: 600 }}>事务结果由业务判断</Text>
+            </Box>
+        </Box>
+    </Box>
+
+    <Box style={{ height: 36, marginTop: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+        <Box style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+            <Box style={{ width: 6, height: 6, background: '#2563EB' }} />
+            <Text style={{ fontSize: 14, color: '#64748B' }}>RelayLink · 开源反向 TCP 代理</Text>
+        </Box>
+        <Text style={{ fontSize: 14, color: '#64748B' }}>{{PAGE}} / {{TOTAL}}</Text>
+    </Box>
+</Slide>

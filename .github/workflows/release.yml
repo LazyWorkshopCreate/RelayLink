@@ -18,6 +18,9 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: Parse version
         id: version
         env:
@@ -28,6 +31,15 @@ jobs:
             exit 1
           fi
           echo "version=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
+      - name: Validate release notes
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          notes_file="docs/releases/${RELEASE_TAG}.md"
+          if [[ ! -s "$notes_file" ]]; then
+            echo "Expected non-empty release notes at $notes_file" >&2
+            exit 1
+          fi
 
   verify:
     name: Verify release source
@@ -153,6 +165,9 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@v8
         with:
           pattern: release-*
@@ -171,6 +186,13 @@ jobs:
             exit 1
           fi
           sha256sum "${assets[@]}" | sed 's#release-assets/##' > release-assets/SHA256SUMS
+          notes_file="docs/releases/${RELEASE_TAG}.md"
+          test -s "$notes_file"
           release_flags=()
           if [[ "$RELEASE_TAG" == *-* ]]; then release_flags+=(--prerelease); fi
-          gh release create "$RELEASE_TAG" release-assets/* --verify-tag --generate-notes "${release_flags[@]}"
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" --title "$RELEASE_TAG" --notes-file "$notes_file" "${release_flags[@]}"
+            gh release upload "$RELEASE_TAG" release-assets/* --clobber
+          else
+            gh release create "$RELEASE_TAG" release-assets/* --verify-tag --title "$RELEASE_TAG" --notes-file "$notes_file" "${release_flags[@]}"
+          fi

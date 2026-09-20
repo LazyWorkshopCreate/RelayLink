@@ -1,0 +1,32 @@
+<Slide style={{ width: '1280px', height: '720px', padding: 0, background: '#FFFFFF', flexDirection: 'row', position: 'relative' }}>
+    <Box style={{ position: 'absolute', top: 0, right: 0, width: 620, height: 720, background: 'linear-gradient(135deg,#EEF2F8 0%,#FFFFFF 100%)' }} />
+
+    <Box style={{ width: 700, height: '100%', padding: '0 40px 0 64px', justifyContent: 'center', zIndex: 1 }}>
+        <Text style={{ fontSize: 88, fontWeight: 'bold', color: '#2563EB', lineHeight: 1 }}>03</Text>
+        <Box style={{ height: 18 }} />
+        <Text style={{ fontSize: 54, fontWeight: 'bold', color: '#0F172A', lineHeight: 1.15 }}>安全模型<br />谁被允许连<br />服务端能看到什么</Text>
+        <Box style={{ height: 22 }} />
+        <Box style={{ width: 72, height: 3, background: '#2563EB' }} />
+        <Box style={{ height: 20 }} />
+        <Text style={{ fontSize: 19, color: '#64748B', lineHeight: 1.55 }}>凭据分三层，各管一段；信任范围能收多小就收多小。</Text>
+    </Box>
+
+    <Box style={{ width: 580, height: '100%', alignItems: 'center', justifyContent: 'center', zIndex: 1 }}>
+        <svg width={520} height={430} viewBox='0 0 520 430'>
+            <rect x='42' y='30' width='436' height='370' rx='18' fill='none' stroke='#CBD5E1' strokeWidth='1.6' strokeDasharray='8 8' />
+            <rect x='94' y='80' width='332' height='270' rx='14' fill='none' stroke='#0F172A' strokeWidth='1.8' />
+            <rect x='148' y='128' width='224' height='174' rx='14' fill='#FFFFFF' stroke='#2563EB' strokeWidth='2' />
+
+            <path d='M212 196 V160 A48 48 0 0 1 308 160 V196' fill='none' stroke='#0F172A' strokeWidth='7' />
+            <circle cx='260' cy='232' r='20' fill='#2563EB' />
+            <rect x='252' y='240' width='16' height='34' rx='8' fill='#2563EB' />
+
+            <circle cx='76' cy='215' r='9' fill='#2563EB' />
+            <rect x='52' y='234' width='48' height='7' rx='3' fill='#DCE3ED' />
+            <circle cx='444' cy='215' r='9' fill='#2563EB' />
+            <rect x='420' y='234' width='48' height='7' rx='3' fill='#DCE3ED' />
+            <circle cx='260' cy='62' r='9' fill='#2563EB' />
+            <rect x='236' y='374' width='48' height='7' rx='3' fill='#DCE3ED' />
+        </svg>
+    </Box>
+</Slide>

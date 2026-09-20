@@ -1,0 +1,12 @@
+# 渲染与构建中间产物
+.build/
+.cache/
+.slidep/
+node_modules/
+
+# 迁移前的幻灯片旧备份（已被 slides/*.slide 取代，仅在本地留档）
+legacy-bak/
+*.bak
+
+# 插图渲染 HTML 的副本：正式产物是 PNG，HTML 源在 build-images.mjs 的模板里
+assets/*.html

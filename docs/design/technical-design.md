@@ -2,7 +2,7 @@
 
 文档 ID：DES-001\
 状态：Draft（待评审）\
-版本：v1.8 设计评审稿\
+版本：v2.4 设计评审稿\
 更新日期：2026-09-18\
 调研日期：2026-09-15\
 配套文档：[需求文档](../requirements/requirements.md)
@@ -14,6 +14,7 @@
 - Linux 或 Windows 服务端分别提供控制端口与数据端口；只有已认证控制会话能授权建立数据连接。
 - 每个 Windows Agent 保持一条控制连接；每条业务 TCP 连接按需建立一条独立数据 TCP 连接。
 - 通道及每客户端密钥保存在服务端每客户端一个 JSON 文件中；启动加载、认证后及管理保存后下发快照。
+- Agent 注册时上报本机端到端证书指纹，服务端首次认证并确认配置后固定到对应客户端 JSON；授权通道不保存指纹，访问映射引用目标客户端固定身份。后续变化拒绝自动覆盖；旧通道级字段不兼容，加载时拒绝，见 [ADR-0011](../adr/0011-client-level-e2e-identity.md)。
 - 普通代理在数据连接绑定、目标就绪后直接双向复制 TCP 字节；互访仍使用端到端 TLS 与必要的半关闭封装。不实现多业务连接在同一 TCP 上的复用。
 - ASP.NET Core 提供内网只读页面和 JSON API；运行状态和计数保存在内存。
 
@@ -60,7 +61,7 @@ flowchart LR
 | TCP 21433、21434… | `10.20.0.10` | 业务 TCP 监听 | 仅 VPC/局域网，安全组控制 |
 | TCP 18080 | `10.20.0.10` | 仪表盘和只读 API | 仅 VPC/局域网，安全组控制 |
 
-公网 IP 若为云平台 NAT 映射地址，不要求它出现在服务器网卡上。接入端口绑定本机地址，由云平台映射。管理端新增普通通道默认以 `0.0.0.0` 监听全部 IPv4 网卡，避免误用 `127.0.0.1` 导致其他主机无法连接；需要仅监听 VPC 网卡时可显式填具体内网 IPv4 地址。`0.0.0.0` 只是绑定地址，不是调用方连接地址；业务端口仍须由安全组或防火墙限制在受信任网络，代码不实现 IP ACL。目标主机名可由 Agent 解析，但必须在连接总超时内完成。
+公网 IP 若为云平台 NAT 映射地址，不要求它出现在服务器网卡上。接入端口绑定本机地址，由云平台映射。管理端新增普通通道默认以 `0.0.0.0` 监听全部 IPv4 网卡，避免误用 `127.0.0.1` 导致其他主机无法连接；需要仅监听 VPC 网卡时可显式填具体内网 IPv4 地址。新增表单从受保护的 `GET /api/v1/admin/next-channel-port` 获取建议端口：从 19000 递增，跳过控制、数据、仪表盘端口以及所有已配置的普通通道端口（包括禁用通道），并在服务端尝试独占绑定 `0.0.0.0:端口`。仅授权客户端的通道没有云端业务监听，不占用建议端口。接口只给出瞬时建议、不预留；管理员可修改，保存时仍按现有配置冲突及 OS 绑定流程复验。`0.0.0.0` 只是绑定地址，不是调用方连接地址；业务端口仍须由云安全组或防火墙限制在受信任网络，应用层安全组仅作为普通通道的补充来源限制。目标主机名可由 Agent 解析，但必须在连接总超时内完成。
 
 控制和数据连接访问不同服务端端口。控制入口运行可选 TLS 上的自定义协议；数据入口先完成短时绑定帧握手，再转为普通代理原始字节流或互访密文中继。普通代理的目标就绪和开始转发信号始终在控制连接上交换。两者均不能放在仅支持 HTTP 的七层代理后面；如需负载入口须使用四层 TCP 透传，首期直接访问 VM。
 
@@ -197,14 +198,20 @@ Windows Service 使用 `Microsoft.Extensions.Hosting.WindowsServices`，支持�
 ### 5.5 加载与生效
 
 1. 启动显式读取 `server.json` 及目录中全部 `*.json`，禁止自动 reload。
-2. 严格解析：拒绝重复 JSON 属性、未知字段、无效 schema、重复 ID、无效限额；ID 匹配 `[a-z0-9][a-z0-9_-]{0,63}`，channelId 在客户端内唯一。
+2. 严格解析：拒绝重复 JSON 属性、未知字段、无效 schema、重复 ID、无效限额；客户端和通道 ID 匹配 `[a-z0-9][a-z0-9_-]{0,63}`，channelId 在客户端内唯一。端到端访问入口 ID 由两个最长 64 字符的目标 ID 和连接符组成，最多 129 字符；旧入口 ID 仍可加载。
 3. 文件名须等于 `clientId.json`；认证只查询已加载字典，不拼接客户端输入读取路径。
 4. 校验启用端点全局唯一，排除与接入/仪表盘的绑定冲突；校验完整快照不超过 256 KiB。
 5. 创建所有启用通道监听器。任一绑定失败，撤销已创建监听器并使启动失败；静态检查不能保证 OS 端口实际可绑定。
 6. 所有必要监听成功后，服务进入 ready；客户端是否在线不影响进程 ready。
 7. 通道监听器在 Agent 离线时继续占用端口，但 accept 后立即关闭业务连接，并记录离线拒绝。
 
-`--check-config` 只做解析与静态校验，不监听网络；正常启动才检查实际端口占用。仪表盘保存会先校验完整配置、启动新增监听、原子写入客户端 JSON，再切换运行时快照并下发给在线 Agent；已有业务连接不被主动中断。若旧、新监听地址在同一端口重叠（例如 `127.0.0.1` 改为 `0.0.0.0`），须先短暂停止旧监听再绑定新监听；绑定失败时恢复旧监听并返回明确错误，不写入新配置。该切换可能短暂影响新连接的接入，不主动断开已建立的业务连接。直接改文件、密钥或基础服务端配置仍须在维护窗口重启。
+`--check-config` 只做解析与静态校验，不监听网络；正常启动才检查实际端口占用。仪表盘保存先校验完整配置、启动新增监听、原子写入客户端 JSON，再切换运行时快照；按客户端及通道/访问映射比较更新前后的记录，仅真实变化时撤销受影响的待建立与已建立连接，然后向在线 Agent 下发快照。相同内容保存仍沿用持久化和下发流程，但不撤销连接；其他通道连接不受影响。若旧、新监听地址在同一端口重叠（例如 `127.0.0.1` 改为 `0.0.0.0`），须先短暂停止旧监听再绑定新监听；绑定失败时恢复旧监听并返回明确错误，不写入新配置或撤销旧连接。该切换可能短暂影响新连接的接入。详情见 [ADR-0009](../adr/0009-revoke-connections-on-channel-change.md)。直接改文件、密钥或基础服务端配置仍须在维护窗口重启。
+
+客户端禁用是独立于单条通道变更的安全操作：被其他客户端端到端入口引用不妨碍保存，因为入口元数据及授权材料保持不变；运行时目标是否启用仍在每次建立连接时检查。配置原子写入并切换后，停止该客户端的云端监听，撤销其普通连接与以其为访问方或目标方的端到端连接，关闭控制会话；新认证、业务接入及入口请求均拒绝。重新启用只恢复原配置，不复活旧连接。
+
+管理端创建端到端访问入口时只提交目标客户端 ID 与目标通道 ID；服务端生成 `<目标客户端 ID>-<目标通道 ID>` 作为入口 ID，默认启用，重复 ID 返回错误。入口无 PUT 修改路由；管理端只提供创建和删除。删除后重建会触发旧连接撤销和新配置下发，旧配置中的自定义入口 ID 保持可读、可删。
+
+应用层安全组保存在 `server.json` 的 `securityGroups` 数组（ID、名称、非空 `entries`）；普通通道可设置 `securityGroupId`，缺省或 `null` 表示任意来源。条目仅为 IPv4/IPv6 单地址或 CIDR，按服务端 TCP socket 的 `RemoteEndPoint` 判断，不信任 HTTP 转发头；IPv4-mapped IPv6 来源归一化为 IPv4。解析失败、组不存在或地址族不匹配均拒绝，不把错误策略解释为全开放。安全组写操作与客户端/通道配置写操作共用序列化锁，先验证引用及格式，再原子替换 `server.json` 和运行时快照；更新组规则时撤销不再匹配的存量连接。被任一通道引用时拒绝删除安全组；端到端专用通道不得绑定安全组。该功能不改变 Agent 快照和内层端到端转发。架构取舍见 [ADR-0012](../adr/0012-application-security-groups.md)。
 
 ## 6. TLS 与认证
 
@@ -386,7 +393,8 @@ Agent：Disconnected → Connecting → Authenticating → Configuring → Onlin
 | 达到容量上限 | accept 后尽快关闭，标记 LIMIT_EXCEEDED，不无限排队 |
 | 心跳黑洞 | 45 秒失效会话；重新认证获取新 sessionId |
 | 服务端重启 | 全量断连、统计重置，Agent 退避重连 |
-| 密钥轮换/禁用 | 修改文件并重启服务端；旧会话全部失效，新认证按新快照 |
+| 密钥轮换 | 修改文件并重启服务端；旧会话全部失效，新认证按新快照 |
+| 管理端禁用客户端 | 完整配置持久化；停止监听、撤销相关普通及端到端连接、关闭控制会话，直到重新启用前拒绝新认证和业务接入 |
 | SQL 执行中断 | 返回连接错误，由业务判断事务结果；代理绝不重放 |
 
 ## 10. 统计与仪表盘实现
@@ -407,7 +415,7 @@ Agent：Disconnected → Connecting → Authenticating → Configuring → Onlin
 
 快照一致时满足：`acceptedTotal = pendingConnections + openedTotal + openFailedTotal`，`openedTotal = activeConnections + normalClosedTotal + abortedTotal`。使用每通道短临界区完成生命周期计数变更，快照统一读取；字节用 Interlocked 64 位计数，允许与生命周期快照相差一个采样周期。
 
-每秒取一次计数，速率使用最近 5 秒差值/单调时间差；不足 5 秒使用实际窗口。响应携带 `serverInstanceId`、`statsSinceUtc`、`snapshotTimeUtc`，防止进程重启后算出负速率。客户端重连不清空服务端累计，但目标当前状态重置 Unknown。若 `history.enabled` 为 true，服务端按 `sampleIntervalSeconds` 将通道级累计字节、接收/建立/失败数以 JSONL 追加到 `filePath`，按 `retentionDays` 清理；重启后的新样本与旧样本并存，不保存业务载荷。
+每秒取一次计数，速率使用最近 5 秒差值/单调时间差；不足 5 秒使用实际窗口。响应携带 `serverInstanceId`、`statsSinceUtc`、`snapshotTimeUtc`，防止进程重启后算出负速率。客户端重连不清空服务端累计，但目标当前状态重置 Unknown。`history.enabled` 时，服务端最多每 5 秒从累计计数求差，按 UTC 分钟以 SQLite UPSERT 保存通道级增量；普通代理业务字节与端到端密文 DATA 载荷字节分列，默认保留 90 天。旧 `.jsonl` 配置派生同名 `.db` 并一次性导入，旧文件保留。分钟归属按采样时刻，不能作为计费依据；详见 [ADR-0010](../adr/0010-sqlite-minute-traffic-history.md) 与 [审计与流量设计](audit-and-traffic.md)。
 
 ### 10.2 页面布局
 
@@ -422,7 +430,9 @@ Agent：Disconnected → Connecting → Authenticating → Configuring → Onlin
 ▶ 成都节点 02  [Offline] 最近断线 ...
 ```
 
-采用 ASP.NET Core Minimal API + `src/RelayLink.AdminWeb` 独立 React/TypeScript/Vite 项目。构建输出复制到 Server 的 `wwwroot/` 由同源静态文件中间件托管，不依赖外部 CDN；生产发布物不依赖 Node.js。React 默认转义配置展示名称，目标地址属于内网运维信息，不向公网提供。页面不设左侧侧栏；匿名只读，登录入口点击后以弹窗呈现；管理表单打开时暂停轮询。架构决定见 [ADR-0004](../adr/0004-standalone-admin-web.md)。
+采用 ASP.NET Core Minimal API + `src/RelayLink.AdminWeb` 独立 React/TypeScript/Vite 项目。构建输出复制到 Server 的 `wwwroot/` 由同源静态文件中间件托管，不依赖外部 CDN；生产发布物不依赖 Node.js。React 默认转义配置展示名称，目标地址属于内网运维信息，不向公网提供。页面不设左侧侧栏；匿名只读，客户端卡片下的端到端访问入口以表格展示入口 ID、当前 Agent 上报的本机地址、目标和状态；仅登录后显示删除操作。登录入口点击后以弹窗呈现；管理表单打开时暂停轮询。架构决定见 [ADR-0004](../adr/0004-standalone-admin-web.md)。
+
+点击通道的“建连中 / 转发中”数字打开实时连接弹窗；普通代理与端到端转发分别从运行时连接注册表读取，使用同一连接 ID 关联协议和管理操作。列表含来源（普通代理为远端 IP:端口，端到端为访问方客户端 ID）、阶段、建立时间与两个方向的已转发字节；端到端字节为服务端可见的密文 DATA 载荷，不表示业务明文。弹窗每 5 秒刷新，也可手动刷新；匿名可读，已登录管理员可在二次确认后断开单条连接。断开通过取消连接生命周期令牌释放数据通道与配额，不删除通道配置；ID 必须同时匹配目标客户端及通道，已结束连接返回 404。运行时快照与汇总计数由不同并发结构读取，瞬时竞争下可能短暂不一致。
 
 ### 10.3 HTTP API
 
@@ -431,20 +441,28 @@ Agent：Disconnected → Connecting → Authenticating → Configuring → Onlin
 | GET `/api/v1/overview` | 总览计数、实例与采样时间 |
 | GET `/api/v1/clients` | 客户端列表，支持 query/status/page/pageSize，pageSize ≤ 100 |
 | GET `/api/v1/clients/{id}/channels` | 所属通道状态、配置和计数，响应封装采样时间 |
-| GET `/api/v1/history` | 历史通道汇总样本，支持 clientId、channelId 与 hours（最长 365 天） |
+| GET `/api/v1/clients/{id}/channels/{channelId}/connections` | 匿名只读；当前普通/端到端连接的 ID、来源、阶段、建立时间及方向字节，不含令牌或业务载荷 |
+| GET `/api/v1/clients/{id}/mappings` | 匿名只读；入口 ID、启用及上报状态、本机地址、目标客户端/通道，不含访问密钥和目标证书指纹 |
+| GET `/api/v1/history` | 历史通道分钟增量，支持 clientId、channelId 与 hours（最长 365 天）；查询超过 24 小时按 15 分钟或小时聚合 |
 | POST `/api/v1/admin/session` | 管理员登录，创建 HttpOnly 会话 Cookie，返回 CSRF 令牌 |
 | GET `/api/v1/admin/session` | 返回当前会话认证状态；已登录时返回 CSRF 令牌 |
+| GET `/api/v1/admin/audit` | 需管理员会话；按 hours（1–2160）、eventType、clientId、page、pageSize（≤100）查询 SQLite 审计事件，不返回凭据或业务载荷 |
 | DELETE `/api/v1/admin/session` | 注销当前管理会话 |
 | POST `/api/v1/admin/clients` | 需会话与 CSRF 令牌；创建独立密钥客户端配置 |
-| PUT `/api/v1/admin/clients/{id}` | 需会话与 CSRF 令牌；编辑显示名、启用状态与连接上限 |
+| PUT `/api/v1/admin/clients/{id}` | 需会话与 CSRF 令牌；编辑显示名、启用状态与连接上限；禁用时立即撤销该客户端相关连接并停止监听 |
 | GET `/api/v1/admin/clients/{id}/agent-config` | 需会话；下载包含独立密钥的 Agent JSON 配置，响应不得缓存或写日志 |
+| GET/POST `/api/v1/admin/security-groups` | 需管理员会话；写入另需 CSRF；列出或新增安全组 |
+| PUT/DELETE `/api/v1/admin/security-groups/{id}` | 需管理员会话及 CSRF；修改或删除安全组；被通道引用时不可删除 |
 | POST `/api/v1/admin/clients/{id}/channels` | 需会话与 CSRF 令牌；新增通道并立即更新监听、下发快照 |
 | PUT `/api/v1/admin/clients/{id}/channels/{channelId}` | 需会话与 CSRF 令牌；修改或禁用通道，立即更新监听、下发快照 |
 | DELETE `/api/v1/admin/clients/{id}/channels/{channelId}` | 需会话与 CSRF 令牌；停止监听、删除通道并下发快照 |
+| DELETE `/api/v1/admin/clients/{id}/channels/{channelId}/connections/{connectionId}` | 需会话与 CSRF 令牌；仅断开与客户端、通道和 ID 全部匹配的存量连接，成功返回 204，不匹配返回 404 |
 | GET `/health/live` | 进程存活，200 |
 | GET `/health/ready` | 配置与必要监听完成为 200，否则 503 |
 
 未找到客户端返回 404；非法分页 400。除受会话和 CSRF 保护的客户端、通道管理接口外，不提供其他业务写接口或 HTTP 重启接口。`Cache-Control: no-store`，不启用跨域访问，敏感字段使用独立响应 DTO 排除。仪表盘默认每 5 秒拉取一次；编辑弹窗打开时暂停自动刷新，数据超过两个刷新周期未更新时提示过期。
+
+审计默认与流量历史共用 SQLite 数据库，也可配置 `audit.filePath`；无历史配置时默认在服务端配置文件目录创建 `audit.db`。起始审计落库后才允许成功登录、Agent Ready 或业务数据开始转发；存储不可写时拒绝新连接。默认保留 90 天，管理员可从管理页顶部的审计弹窗查询。故障取舍与运维边界见[审计与流量设计](audit-and-traffic.md)及 [ADR-0013](../adr/0013-sqlite-audit-gate.md)。
 
 ## 11. 资源限制与运行参数
 
@@ -533,7 +551,7 @@ Linux 对应 systemd 模板见 [deploy/linux/relaylink-server.service](../../dep
 
 ### 13.2 Windows Agent
 
-发布 win-x64 自包含包，使用 [Windows Agent 安装包](../../deploy/windows/README.md) 选择并校验配置；无配置不得安装。程序位于 Program Files，配置和 TLS 信任 CA 复制到受限的 ProgramData 目录，Agent 生成的身份及端口状态也存于该目录。服务以 LocalService 运行，开机自动启动并配置失败恢复；安装成功后按 `dashboardPort` 在公共桌面创建指向本机状态页的 Internet Shortcut，由系统默认浏览器打开，状态页关闭时不创建。安装和卸载需要本机管理员权限。已存在同名服务时拒绝隐式覆盖，卸载移除安装程序生成的快捷方式，但保留敏感配置与身份文件供管理员处理。实际架构不同则另行构建；生产连接和 Windows Service 生命周期仍需目标机验收。
+发布 win-x64 自包含包，使用 [Windows Agent 安装包](../../deploy/windows/README.md) 选择并校验配置；首次安装及重新配置无 JSON 不得继续。程序位于 Program Files，配置和 TLS 信任 CA 复制到受限的 ProgramData 目录，Agent 生成的身份及端口状态也存于该目录。服务以 LocalService 运行，开机自动启动并配置失败恢复；安装成功后按 `dashboardPort` 在公共桌面创建指向本机状态页的 Internet Shortcut，由系统默认浏览器打开，状态页关闭时不创建。安装和卸载需要本机管理员权限。已有安装须显式选择仅更新或重新配置，且校验服务确属当前安装：仅更新停止服务、替换程序并重启，不触碰 ProgramData；重新配置在校验新 JSON 后清理 ProgramData 中 Agent 管理的配置、CA、身份、端口状态和诊断日志，写入新配置再重启，并更新快捷方式。不清理未知文件、Windows 事件日志或其他应用目录。卸载移除安装程序生成的快捷方式，但保留敏感配置与身份文件供管理员处理。实际架构不同则另行构建；生产连接和 Windows Service 生命周期仍需目标机验收。
 
 ### 13.3 运维步骤
 
@@ -578,7 +596,7 @@ Agent↔Agent 授权互访是后续增量设计，见 [DES-002](agent-to-agent.m
 - 新建连接时延成为主要瓶颈：先评估业务连接池，再评估预建数据连接池；不要直接增加复用协议复杂度。
 - 单 VM 达到带宽、FD 或 CPU 边界：可先按客户端静态分片到多个服务端，每片仍保持独立端口和配置。
 - 需要高可用：重新设计会话归属、端点路由和配置分发；存量 TCP 无损迁移不作为自然获得的能力。
-- 需要跨实例或复杂历史报表：评估时序系统；现有 JSONL 通道聚合历史不作为业务计费依据。
+- 需要跨实例或复杂历史报表：评估时序系统；现有 SQLite 分钟聚合历史不作为业务计费依据。
 
 ## 16. 调研依据与结论性质
 

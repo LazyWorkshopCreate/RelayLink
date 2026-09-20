@@ -9,9 +9,17 @@ public sealed record ServerConfiguration(
     DashboardConfiguration Dashboard,
     string ClientsDirectory,
     LimitsConfiguration Limits,
-    HistoryConfiguration? History);
+    HistoryConfiguration? History)
+{
+    public IReadOnlyList<SecurityGroupConfiguration> SecurityGroups { get; init; } = [];
+    public AuditConfiguration? Audit { get; init; }
+}
 
-public sealed record HistoryConfiguration(bool Enabled, string FilePath, int SampleIntervalSeconds, int RetentionDays);
+public sealed record AuditConfiguration(string FilePath, int RetentionDays = 90);
+
+public sealed record SecurityGroupConfiguration(string Id, string Name, IReadOnlyList<string> Entries);
+
+public sealed record HistoryConfiguration(bool Enabled, string FilePath, int SampleIntervalSeconds = 5, int RetentionDays = 90);
 
 public sealed record TunnelConfiguration(
     string ListenAddress,
@@ -60,6 +68,8 @@ public sealed record ClientConfiguration(
 {
     public string? AgentServerHost { get; init; }
     public string? TrustedCaPemPath { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? E2eCertificateSha256 { get; init; }
     public IReadOnlyList<OutboundMappingConfiguration> OutboundMappings { get; init; } = [];
 }
 
@@ -89,8 +99,8 @@ public sealed record ChannelConfiguration(
     int TargetConnectTimeoutSeconds)
 {
     public bool AuthorizedClientsOnly { get; init; }
+    public string? SecurityGroupId { get; init; }
     public string? AccessSecret { get; init; }
-    public string? E2eCertificateSha256 { get; init; }
     [JsonIgnore]
     public IPEndPoint ListenEndPoint => new(IPAddress.Parse(ListenAddress), ListenPort);
 }

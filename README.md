@@ -1,5 +1,7 @@
 # RelayLink
 
+<img src="src/RelayLink.AdminWeb/public/relaylink-icon.svg" alt="RelayLink 项目图标" width="48" height="48">
+
 RelayLink 是基于 .NET 的反向 TCP 代理，用于让云端内网应用访问分布在不同内网中的 TCP 服务，例如 SQL Server。部署在内网的 Windows Agent 主动连接服务端，不需要为 Agent 所在网络开放公网入站端口。
 
 ## 连接模式
@@ -13,12 +15,12 @@ RelayLink 是基于 .NET 的反向 TCP 代理，用于让云端内网应用访�
 
 - 每个 Agent 使用独立客户端 ID 和密钥认证；通道及访问映射由服务端集中管理，认证后下发。
 - 控制连接与按业务连接建立的数据隧道使用独立服务端端口。控制连接默认使用 TLS；普通代理数据通道完成绑定后直接复制原始 TCP 字节，不提供链路加密。客户端安全互访要求控制 TLS，并在两端 Agent 之间建立内层 TLS。
-- 服务端管理页面支持匿名只读查看状态、通道和流量历史；管理员登录后可管理客户端、通道及访问映射。
+- 服务端管理页面支持匿名只读查看状态、通道和流量历史；管理员登录后可管理客户端、通道、访问映射及普通通道的来源 IP 安全组，并查看登录与连接生命周期审计日志。
 - Agent 提供本机只读状态页，展示通道和可用的访问方地址。Windows Agent 可作为开机自动启动的 Windows Service 运行。
 
 ## 组成与边界
 
-服务端支持 Linux 和 Windows，Agent 面向 Windows。后端使用 C# / .NET，管理前端使用 React 和 TypeScript。控制与数据入口只应对 Agent 开放；普通数据入口为明文 TCP，敏感业务必须使用业务自身 TLS 或受保护的网络链路。业务代理端口及管理页面应限定在受信任内网，网络访问控制由部署环境的安全组或防火墙承担。
+服务端支持 Linux 和 Windows，Agent 面向 Windows。后端使用 C# / .NET，管理前端使用 React 和 TypeScript。控制与数据入口只应对 Agent 开放；普通数据入口为明文 TCP，敏感业务必须使用业务自身 TLS 或受保护的网络链路。普通通道可用应用层安全组限制来源 IP；部署环境的安全组或防火墙仍须限制业务端口及管理页面的可达范围。
 
 RelayLink 不提供 UDP、VPN/IP 层组网或 P2P 打洞，也不替代目标服务自身的身份认证。TCP 连接中断后不会重放业务请求或恢复原连接。
 
@@ -53,6 +55,7 @@ RelayLink/
 | 组件 | 说明 |
 |---|---|
 | [.NET / ASP.NET Core](https://dotnet.microsoft.com/en-us/apps/aspnet)、`Microsoft.Extensions.Hosting.WindowsServices` | 服务端与 Agent 的运行框架、管理 API、Windows Service 托管 |
+| [Microsoft.Data.Sqlite](https://www.nuget.org/packages/Microsoft.Data.Sqlite/) | 服务端分钟流量历史与审计日志的 SQLite 持久化 |
 | [React / React DOM](https://react.dev/) | 管理页面的组件与浏览器渲染 |
 | [Radix Dialog](https://www.radix-ui.com/primitives/docs/components/dialog)、[Lucide](https://lucide.dev/) | 管理页面的弹窗交互与图标 |
 | [TypeScript](https://www.typescriptlang.org/)、[Vite](https://vite.dev/)、[Node.js](https://nodejs.org/)、[pnpm](https://pnpm.io/) | 前端类型检查、依赖管理和静态资源构建；发布后的服务端不需要 Node.js 或 pnpm |

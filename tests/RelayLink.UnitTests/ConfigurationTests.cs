@@ -211,21 +211,50 @@ public sealed class ConfigurationTests
     }
 
     [Fact]
-    public void Authorized_channel_requires_strong_secret_and_certificate_fingerprint()
+    public void Authorized_channel_requires_strong_secret_but_fingerprint_belongs_to_client()
     {
         var loader = new ConfigurationLoader();
         var channel = new ChannelConfiguration("private", "Private", true, "127.0.0.1", 19001, "127.0.0.1", 19002, 5, 5)
         {
             AuthorizedClientsOnly = true,
-            AccessSecret = Convert.ToBase64String(new byte[16]),
-            E2eCertificateSha256 = new string('A', 64)
+            AccessSecret = Convert.ToBase64String(new byte[16])
         };
         var client = new ClientConfiguration(1, "visited", "Visited", true, Convert.ToBase64String(new byte[32]), 10, 5, [channel]);
         var configuration = TestConfiguration(client);
 
         Assert.Contains("Access secret", Assert.Throws<ConfigurationException>(() => loader.ValidateClientUpdate(configuration)).Message);
-        var strong = client with { Channels = [channel with { AccessSecret = Convert.ToBase64String(new byte[32]), E2eCertificateSha256 = "bad" }] };
+        var strong = client with { Channels = [channel with { AccessSecret = Convert.ToBase64String(new byte[32]) }], E2eCertificateSha256 = "bad" };
         Assert.Contains("fingerprint", Assert.Throws<ConfigurationException>(() => loader.ValidateClientUpdate(TestConfiguration(strong))).Message);
+        loader.ValidateClientUpdate(TestConfiguration(strong with { E2eCertificateSha256 = null }));
+    }
+
+    [Fact]
+    public void Channel_level_fingerprint_is_rejected_instead_of_migrated()
+    {
+        using var directory = new TemporaryDirectory();
+        var clientsPath = Path.Combine(directory.Path, "clients");
+        Directory.CreateDirectory(clientsPath);
+        var pin = new string('A', 64);
+        var channel = new ChannelConfiguration("echo", "Echo", true, "127.0.0.1", 19000, "127.0.0.1", 19001, 5, 5);
+        var client = new ClientConfiguration(1, "visited", "Visited", true, Convert.ToBase64String(new byte[32]), 10, 5, [channel]);
+        var server = TestConfiguration(client).Server with
+        {
+            ClientsDirectory = clientsPath,
+            Tunnel = TestConfiguration(client).Server.Tunnel with { TlsEnabled = false }
+        };
+        var options = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
+        var serverPath = Path.Combine(directory.Path, "server.json");
+        var clientPath = Path.Combine(clientsPath, "visited.json");
+        File.WriteAllText(serverPath, JsonSerializer.Serialize(server, options));
+        File.WriteAllText(clientPath, JsonSerializer.Serialize(client, options));
+
+        var oldFormat = JsonNode.Parse(File.ReadAllText(clientPath))!;
+        oldFormat["channels"]![0]!["e2eCertificateSha256"] = pin;
+        File.WriteAllText(clientPath, oldFormat.ToJsonString());
+        Assert.Contains("e2eCertificateSha256", Assert.Throws<ConfigurationException>(() => new ConfigurationLoader().Load(serverPath)).Message);
+
+        File.WriteAllText(clientPath, JsonSerializer.Serialize(client with { E2eCertificateSha256 = pin }, options));
+        Assert.Equal(pin, new ConfigurationLoader().Load(serverPath).Clients["visited"].E2eCertificateSha256);
     }
 
     [Fact]
@@ -234,8 +263,8 @@ public sealed class ConfigurationTests
         var secret = Convert.ToBase64String(Enumerable.Range(1, 32).Select(value => (byte)value).ToArray());
         var fingerprint = new string('B', 64);
         var channel = new ChannelConfiguration("private", "Private", true, "127.0.0.1", 19001, "127.0.0.1", 19002, 5, 5)
-        { AuthorizedClientsOnly = true, AccessSecret = secret, E2eCertificateSha256 = fingerprint };
-        var visited = new ClientConfiguration(1, "visited", "Visited", true, Convert.ToBase64String(Enumerable.Repeat((byte)1, 32).ToArray()), 10, 5, [channel]);
+        { AuthorizedClientsOnly = true, AccessSecret = secret };
+        var visited = new ClientConfiguration(1, "visited", "Visited", true, Convert.ToBase64String(Enumerable.Repeat((byte)1, 32).ToArray()), 10, 5, [channel]) { E2eCertificateSha256 = fingerprint };
         var mapping = new OutboundMappingConfiguration("caller", true, "0.0.0.0", "visited", "private", secret, fingerprint);
         var caller = new ClientConfiguration(1, "caller", "Caller", true, Convert.ToBase64String(Enumerable.Repeat((byte)2, 32).ToArray()), 10, 5, []) { OutboundMappings = [mapping] };
         var loader = new ConfigurationLoader();
@@ -246,10 +275,27 @@ public sealed class ConfigurationTests
     }
 
     [Fact]
+    public void Referenced_target_client_can_be_disabled_without_deleting_its_configuration()
+    {
+        var accessSecret = Convert.ToBase64String(Enumerable.Repeat((byte)7, 32).ToArray());
+        var fingerprint = new string('B', 64);
+        var channel = new ChannelConfiguration("private", "Private", true, "127.0.0.1", 19001, "127.0.0.1", 19002, 5, 5)
+        { AuthorizedClientsOnly = true, AccessSecret = accessSecret };
+        var visited = new ClientConfiguration(1, "visited", "Visited", false, Convert.ToBase64String(Enumerable.Repeat((byte)1, 32).ToArray()), 10, 5, [channel]) { E2eCertificateSha256 = fingerprint };
+        var caller = new ClientConfiguration(1, "caller", "Caller", true, Convert.ToBase64String(Enumerable.Repeat((byte)2, 32).ToArray()), 10, 5, [])
+        { OutboundMappings = [new OutboundMappingConfiguration("to-visited", true, "127.0.0.1", "visited", "private", accessSecret, fingerprint)] };
+        var loader = new ConfigurationLoader();
+
+        loader.ValidateClientUpdate(TestConfiguration(visited, caller));
+        Assert.Contains("not authorized", Assert.Throws<ConfigurationException>(() => loader.ValidateClientUpdate(TestConfiguration(visited with
+        { Channels = [channel with { AccessSecret = Convert.ToBase64String(Enumerable.Repeat((byte)8, 32).ToArray()) }] }, caller))).Message);
+    }
+
+    [Fact]
     public void Private_channel_rejects_plaintext_control_transport()
     {
         var channel = new ChannelConfiguration("private", "Private", true, "127.0.0.1", 19001, "127.0.0.1", 19002, 5, 5)
-        { AuthorizedClientsOnly = true, AccessSecret = Convert.ToBase64String(new byte[32]), E2eCertificateSha256 = new string('A', 64) };
+        { AuthorizedClientsOnly = true, AccessSecret = Convert.ToBase64String(new byte[32]) };
         var client = new ClientConfiguration(1, "visited", "Visited", true, Convert.ToBase64String(new byte[32]), 10, 5, [channel]);
         var config = TestConfiguration(client);
         config = config with { Server = config.Server with { Tunnel = config.Server.Tunnel with { TlsEnabled = false } } };
@@ -262,6 +308,37 @@ public sealed class ConfigurationTests
         var channel = new ChannelConfiguration("echo", "Echo", true, "127.0.0.1", 7444, "127.0.0.1", 19002, 5, 5);
         var client = new ClientConfiguration(1, "agent", "Agent", true, Convert.ToBase64String(new byte[32]), 10, 5, [channel]);
         Assert.Contains("conflicts with a server endpoint", Assert.Throws<ConfigurationException>(() => new ConfigurationLoader().ValidateClientUpdate(TestConfiguration(client))).Message);
+    }
+
+    [Fact]
+    public void Security_group_matches_only_configured_source_ranges_and_rejects_invalid_references()
+    {
+        var channel = new ChannelConfiguration("echo", "Echo", true, "127.0.0.1", 19000, "127.0.0.1", 19001, 5, 5)
+        { SecurityGroupId = "office" };
+        var client = new ClientConfiguration(1, "agent", "Agent", true, Convert.ToBase64String(new byte[32]), 10, 5, [channel]);
+        var config = TestConfiguration(client) with
+        {
+            Server = TestConfiguration(client).Server with
+            {
+                Tunnel = TestConfiguration(client).Server.Tunnel with { TlsEnabled = false },
+                SecurityGroups = [new SecurityGroupConfiguration("office", "Office", ["127.0.0.1", "192.0.2.0/24", "2001:db8::/32"])]
+            }
+        };
+        var loader = new ConfigurationLoader();
+        loader.ValidateServerUpdate(config);
+        Assert.True(SecurityGroupMatcher.IsAllowed(channel, config.Server, IPAddress.Loopback));
+        Assert.True(SecurityGroupMatcher.IsAllowed(channel, config.Server, IPAddress.Parse("192.0.2.42")));
+        Assert.True(SecurityGroupMatcher.IsAllowed(channel, config.Server, IPAddress.Parse("2001:db8::1")));
+        Assert.False(SecurityGroupMatcher.IsAllowed(channel, config.Server, IPAddress.Parse("192.0.3.1")));
+        Assert.False(SecurityGroupMatcher.IsAllowed(channel, config.Server, IPAddress.Parse("127.0.0.2")));
+        Assert.False(SecurityGroupMatcher.IsValidEntry("127.1"));
+        Assert.True(SecurityGroupMatcher.IsAllowed(channel with { SecurityGroupId = null }, config.Server, IPAddress.Parse("192.0.3.1")));
+        Assert.Contains("Invalid security group", Assert.Throws<ConfigurationException>(() => loader.ValidateServerUpdate(config with
+        { Server = config.Server with { SecurityGroups = [new SecurityGroupConfiguration("office", "Office", ["192.0.2.0/33"])] } })).Message);
+        Assert.Contains("Invalid security group for", Assert.Throws<ConfigurationException>(() => loader.ValidateServerUpdate(config with
+        { Server = config.Server with { SecurityGroups = [] } })).Message);
+        Assert.Contains("Invalid security group for", Assert.Throws<ConfigurationException>(() => loader.ValidateServerUpdate(config with
+        { Clients = new Dictionary<string, ClientConfiguration> { ["agent"] = client with { Channels = [channel with { AuthorizedClientsOnly = true, AccessSecret = Convert.ToBase64String(new byte[32]) }] } } })).Message);
     }
 
     private static LoadedConfiguration TestConfiguration(params ClientConfiguration[] clients) => new(

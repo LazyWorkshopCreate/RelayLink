@@ -1,0 +1,49 @@
+<Slide style={{ width: '1280px', height: '720px', padding: 0, background: '#FFFFFF', flexDirection: 'row', position: 'relative' }}>
+    <Box style={{ position: 'absolute', top: 0, right: 0, width: 620, height: 720, background: 'linear-gradient(135deg,#EEF2F8 0%,#FFFFFF 100%)' }} />
+
+    <Box style={{ width: 700, height: '100%', padding: '0 40px 0 64px', justifyContent: 'center', zIndex: 1 }}>
+        <Text style={{ fontSize: 88, fontWeight: 'bold', color: '#2563EB', lineHeight: 1 }}>01</Text>
+        <Box style={{ height: 18 }} />
+        <Text style={{ fontSize: 54, fontWeight: 'bold', color: '#0F172A', lineHeight: 1.15 }}>问题<br />数据出不来<br />中台就是空的</Text>
+        <Box style={{ height: 22 }} />
+        <Box style={{ width: 72, height: 3, background: '#2563EB' }} />
+        <Box style={{ height: 20 }} />
+        <Text style={{ fontSize: 19, color: '#64748B', lineHeight: 1.55 }}>AI 时代，数据中台又一次成了刚需。但零售企业要过的第一道坎，不是建模也不是算力，是分散在全国几百个门店里的数据根本出不来。</Text>
+    </Box>
+
+    <Box style={{ width: 580, height: '100%', alignItems: 'center', justifyContent: 'center', zIndex: 1 }}>
+        <svg width={520} height={430} viewBox='0 0 520 430'>
+            <rect x='16' y='34' width='150' height='82' rx='9' fill='#FFFFFF' stroke='#0F172A' strokeWidth='1.8' />
+            <rect x='36' y='56' width='62' height='8' rx='4' fill='#0F172A' />
+            <rect x='36' y='74' width='94' height='6' rx='3' fill='#DCE3ED' />
+            <rect x='36' y='88' width='78' height='6' rx='3' fill='#DCE3ED' />
+
+            <rect x='16' y='174' width='150' height='82' rx='9' fill='#FFFFFF' stroke='#0F172A' strokeWidth='1.8' />
+            <rect x='36' y='196' width='62' height='8' rx='4' fill='#0F172A' />
+            <rect x='36' y='214' width='94' height='6' rx='3' fill='#DCE3ED' />
+            <rect x='36' y='228' width='78' height='6' rx='3' fill='#DCE3ED' />
+
+            <rect x='16' y='314' width='150' height='82' rx='9' fill='#FFFFFF' stroke='#0F172A' strokeWidth='1.8' />
+            <rect x='36' y='336' width='62' height='8' rx='4' fill='#0F172A' />
+            <rect x='36' y='354' width='94' height='6' rx='3' fill='#DCE3ED' />
+            <rect x='36' y='368' width='78' height='6' rx='3' fill='#DCE3ED' />
+
+            <path d='M174 70 L352 176' stroke='#2563EB' strokeWidth='2.2' />
+            <path d='M174 210 L352 206' stroke='#2563EB' strokeWidth='2.2' />
+            <path d='M174 350 L352 236' stroke='#2563EB' strokeWidth='2.2' />
+            <path d='M358 178 L340 166 L346 196 Z' fill='#2563EB' />
+            <path d='M358 208 L340 196 L340 216 Z' fill='#2563EB' />
+            <path d='M358 234 L340 224 L346 254 Z' fill='#2563EB' />
+
+            <path d='M366 268 L186 366' stroke='#CBD5E1' strokeWidth='2' strokeDasharray='7 7' />
+            <path d='M266 306 L286 326' stroke='#94A3B8' strokeWidth='2.4' />
+            <path d='M286 306 L266 326' stroke='#94A3B8' strokeWidth='2.4' />
+
+            <rect x='358' y='150' width='140' height='116' rx='12' fill='#0F172A' />
+            <rect x='380' y='174' width='96' height='10' rx='5' fill='#FFFFFF' />
+            <rect x='380' y='194' width='68' height='10' rx='5' fill='#60A5FA' />
+            <rect x='380' y='214' width='84' height='10' rx='5' fill='#FFFFFF' opacity='0.5' />
+            <rect x='380' y='234' width='52' height='10' rx='5' fill='#FFFFFF' opacity='0.3' />
+        </svg>
+    </Box>
+</Slide>

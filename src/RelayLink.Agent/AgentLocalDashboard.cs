@@ -58,10 +58,10 @@ public sealed class AgentLocalDashboard(AgentConfiguration configuration, AgentS
         foreach (var channel in snapshot.Channels)
             html.Append("<tr><td>").Append(E(channel.DisplayName)).Append(" <small>").Append(E(channel.ChannelId)).Append("</small></td><td>").Append(channel.AuthorizedClientsOnly ? "仅授权客户端" : "普通代理").Append("</td><td><code>").Append(E(channel.TargetHost)).Append(':').Append(channel.TargetPort).Append("</code></td><td>").Append(channel.Enabled ? "启用" : "禁用").Append("</td></tr>");
         if (snapshot.Channels.Count == 0) html.Append("<tr><td colspan=\"4\" class=\"muted\">当前无在线通道</td></tr>");
-        html.Append("</tbody></table></section><section><h2>本机访问入口</h2><table><thead><tr><th>映射</th><th>访问目标</th><th>本机地址</th></tr></thead><tbody>");
+        html.Append("</tbody></table></section><section><h2>端到端访问入口</h2><table><thead><tr><th>入口 ID</th><th>访问目标</th><th>本机地址</th></tr></thead><tbody>");
         foreach (var mapping in snapshot.OutboundMappings)
             html.Append("<tr><td>").Append(E(mapping.MappingId)).Append("</td><td>").Append(E(mapping.TargetClientId)).Append('/').Append(E(mapping.TargetChannelId)).Append("</td><td>").Append(mapping.LocalAddress is null ? "<span class=\"muted\">不可用</span>" : $"<code>{E(mapping.LocalAddress)}</code>").Append("</td></tr>");
-        if (snapshot.OutboundMappings.Count == 0) html.Append("<tr><td colspan=\"3\" class=\"muted\">当前无访问映射</td></tr>");
+        if (snapshot.OutboundMappings.Count == 0) html.Append("<tr><td colspan=\"3\" class=\"muted\">当前无端到端访问入口</td></tr>");
         html.Append("</tbody></table></section><p class=\"muted\">此页面仅在本机 127.0.0.1 提供，只读且不展示密钥。</p></main></body></html>");
         return html.ToString();
     }

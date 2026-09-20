@@ -1,0 +1,139 @@
+<Slide style={{ width: '1280px', height: '720px', padding: '20px 64px', background: '#FFFFFF' }}>
+    <Box style={{ height: 88, flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between' }}>
+        <Box>
+            <Text style={{ fontSize: 13, fontWeight: 600, color: '#2563EB', letterSpacing: 2 }}>CHAPTER 02 · 线协议</Text>
+            <Box style={{ height: 8 }} />
+            <Text style={{ fontSize: 34, fontWeight: 'bold', color: '#0F172A', lineHeight: 1.25 }}>12 字节定长头，版本写死在第 5 个字节</Text>
+        </Box>
+        <Box style={{ width: 4, height: 44, background: '#2563EB' }} />
+    </Box>
+
+    <Box style={{ height: 524, marginTop: 16, flexDirection: 'row', gap: 28 }}>
+        <Box style={{ width: 260, background: '#0F172A', borderRadius: 10, padding: '28px 24px', justifyContent: 'space-between' }}>
+            <Box>
+                <Text style={{ fontSize: 30, fontWeight: 'bold', color: '#FFFFFF', letterSpacing: 1 }}>NTP1</Text>
+                <Box style={{ height: 10 }} />
+                <Text style={{ fontSize: 15, color: '#60A5FA', letterSpacing: 1 }}>version = 2</Text>
+                <Box style={{ height: 18 }} />
+                <Box style={{ width: 44, height: 3, background: '#2563EB' }} />
+            </Box>
+            <Box>
+                <Text style={{ fontSize: 15, color: '#CBD5E1', lineHeight: 1.6 }}>帧头越笨，出问题时越容易定位。没有协商、没有可选字段、没有隐式兼容。</Text>
+                <Box style={{ height: 16 }} />
+                <Text style={{ fontSize: 13, color: '#64748B', lineHeight: 1.5 }}>旧版本首帧直接被拒绝，不做静默降级。</Text>
+            </Box>
+        </Box>
+
+        <Box style={{ flex: 1 }}>
+            <Box style={{ height: 120, flexDirection: 'row', gap: 4 }}>
+                <Box style={{ width: 280, background: '#0F172A', borderRadius: 8, padding: '16px 14px', justifyContent: 'center' }}>
+                    <Text style={{ fontSize: 16, fontWeight: 'bold', color: '#FFFFFF', letterSpacing: 1 }}>magic</Text>
+                    <Box style={{ height: 8 }} />
+                    <Text style={{ fontSize: 13, color: '#60A5FA' }}>4 字节 · ASCII "NTP1"</Text>
+                </Box>
+                <Box style={{ width: 72, background: '#2563EB', borderRadius: 8, padding: '16px 8px', justifyContent: 'center', alignItems: 'center' }}>
+                    <Text style={{ fontSize: 15, fontWeight: 'bold', color: '#FFFFFF' }}>ver</Text>
+                    <Text style={{ fontSize: 12, color: '#FFFFFF' }}>1B</Text>
+                </Box>
+                <Box style={{ width: 72, background: '#EEF2F8', borderRadius: 8, padding: '16px 8px', justifyContent: 'center', alignItems: 'center' }}>
+                    <Text style={{ fontSize: 15, fontWeight: 'bold', color: '#0F172A' }}>type</Text>
+                    <Text style={{ fontSize: 12, color: '#64748B' }}>1B</Text>
+                </Box>
+                <Box style={{ width: 144, background: '#EEF2F8', borderRadius: 8, padding: '16px 10px', justifyContent: 'center', alignItems: 'center' }}>
+                    <Text style={{ fontSize: 15, fontWeight: 'bold', color: '#0F172A' }}>flags</Text>
+                    <Text style={{ fontSize: 12, color: '#64748B' }}>2B · 必须为 0</Text>
+                </Box>
+                <Box style={{ width: 280, background: '#EEF2F8', borderRadius: 8, padding: '16px 14px', justifyContent: 'center' }}>
+                    <Text style={{ fontSize: 16, fontWeight: 'bold', color: '#0F172A', letterSpacing: 1 }}>payloadLength</Text>
+                    <Box style={{ height: 8 }} />
+                    <Text style={{ fontSize: 13, color: '#64748B' }}>4 字节 · 无符号大端 · 不含头</Text>
+                </Box>
+            </Box>
+
+            <Box style={{ height: 148, marginTop: 12 }}>
+                <Box style={{ flexDirection: 'row', gap: 10 }}>
+                    <Box style={{ width: 134, background: '#EEF2F8', borderRadius: 6, padding: '8px 10px' }}>
+                        <Text style={{ fontSize: 13, fontWeight: 'bold', color: '#2563EB' }}>1</Text>
+                        <Text style={{ fontSize: 12, color: '#0F172A' }}>Register</Text>
+                    </Box>
+                    <Box style={{ width: 134, background: '#EEF2F8', borderRadius: 6, padding: '8px 10px' }}>
+                        <Text style={{ fontSize: 13, fontWeight: 'bold', color: '#2563EB' }}>2 / 3</Text>
+                        <Text style={{ fontSize: 12, color: '#0F172A' }}>RegisterAccepted / ConfigAck</Text>
+                    </Box>
+                    <Box style={{ width: 134, background: '#EEF2F8', borderRadius: 6, padding: '8px 10px' }}>
+                        <Text style={{ fontSize: 13, fontWeight: 'bold', color: '#2563EB' }}>4 / 5 / 6</Text>
+                        <Text style={{ fontSize: 12, color: '#0F172A' }}>Ready / Ping / Pong</Text>
+                    </Box>
+                    <Box style={{ width: 134, background: '#EEF2F8', borderRadius: 6, padding: '8px 10px' }}>
+                        <Text style={{ fontSize: 13, fontWeight: 'bold', color: '#2563EB' }}>7 / 8 / 9</Text>
+                        <Text style={{ fontSize: 12, color: '#0F172A' }}>Open / OpenFailed / CancelOpen</Text>
+                    </Box>
+                    <Box style={{ width: 134, background: '#EEF2F8', borderRadius: 6, padding: '8px 10px' }}>
+                        <Text style={{ fontSize: 13, fontWeight: 'bold', color: '#2563EB' }}>10 / 11</Text>
+                        <Text style={{ fontSize: 12, color: '#0F172A' }}>BindData / BindAccepted</Text>
+                    </Box>
+                    <Box style={{ width: 134, background: '#EEF2F8', borderRadius: 6, padding: '8px 10px' }}>
+                        <Text style={{ fontSize: 13, fontWeight: 'bold', color: '#2563EB' }}>{{PAGE}} / {{TOTAL}}</Text>
+                        <Text style={{ fontSize: 12, color: '#0F172A' }}>TargetReady / Start</Text>
+                    </Box>
+                </Box>
+                <Box style={{ height: 10 }} />
+                <Box style={{ flexDirection: 'row', gap: 10 }}>
+                    <Box style={{ width: 134, background: '#FFFFFF', border: '1.5px solid #DCE3ED', borderRadius: 6, padding: '8px 10px' }}>
+                        <Text style={{ fontSize: 13, fontWeight: 'bold', color: '#2563EB' }}>15</Text>
+                        <Text style={{ fontSize: 12, color: '#0F172A' }}>ConfigUpdate（带版本号）</Text>
+                    </Box>
+                    <Box style={{ width: 134, background: '#FFFFFF', border: '1.5px solid #DCE3ED', borderRadius: 6, padding: '8px 10px' }}>
+                        <Text style={{ fontSize: 13, fontWeight: 'bold', color: '#2563EB' }}>16 / 17</Text>
+                        <Text style={{ fontSize: 12, color: '#0F172A' }}>PeerOpenRequest / Granted</Text>
+                    </Box>
+                    <Box style={{ width: 134, background: '#FFFFFF', border: '1.5px solid #DCE3ED', borderRadius: 6, padding: '8px 10px' }}>
+                        <Text style={{ fontSize: 13, fontWeight: 'bold', color: '#2563EB' }}>18 / 19 / 20</Text>
+                        <Text style={{ fontSize: 12, color: '#0F172A' }}>PeerOpen / PeerBindData / Accepted</Text>
+                    </Box>
+                    <Box style={{ width: 134, background: '#FFFFFF', border: '1.5px solid #DCE3ED', borderRadius: 6, padding: '8px 10px' }}>
+                        <Text style={{ fontSize: 13, fontWeight: 'bold', color: '#2563EB' }}>21 / 22</Text>
+                        <Text style={{ fontSize: 12, color: '#0F172A' }}>PeerOpenRejected / MappingStatus</Text>
+                    </Box>
+                    <Box style={{ width: 134, background: '#FFFFFF', border: '1.5px solid #DCE3ED', borderRadius: 6, padding: '8px 10px' }}>
+                        <Text style={{ fontSize: 13, fontWeight: 'bold', color: '#2563EB' }}>32</Text>
+                        <Text style={{ fontSize: 12, color: '#0F172A' }}>Data（仅互访密文中继）</Text>
+                    </Box>
+                    <Box style={{ width: 134, background: '#FFFFFF', border: '1.5px solid #DCE3ED', borderRadius: 6, padding: '8px 10px' }}>
+                        <Text style={{ fontSize: 13, fontWeight: 'bold', color: '#2563EB' }}>{{PAGE}} / {{TOTAL}}</Text>
+                        <Text style={{ fontSize: 12, color: '#0F172A' }}>Fin / Reset</Text>
+                    </Box>
+                </Box>
+            </Box>
+
+            <Box style={{ height: 232, marginTop: 12, background: '#0F172A', borderRadius: 10, padding: '20px 24px', justifyContent: 'space-between' }}>
+                <Box>
+                    <Text style={{ fontSize: 19, fontWeight: 600, color: '#FFFFFF' }}>长度先验证，再申请缓冲</Text>
+                    <Box style={{ height: 12 }} />
+                    <Text style={{ fontSize: 15, color: '#CBD5E1', lineHeight: 1.65 }}>读完帧头先校验长度再分配缓冲：控制 JSON ≤ 256 KiB、首帧 ≤ 8 KiB、DATA 载荷 1–32 KiB、FIN 载荷必须为 0。保留类型、非法 flags、无效状态下的帧、截断帧一律视为协议错误。连接关闭前不足一帧，不会被当成正常 FIN。</Text>
+                    <Box style={{ height: 14 }} />
+                    <Text style={{ fontSize: 15, color: '#CBD5E1', lineHeight: 1.65 }}>sessionId 与 connectionId 使用随机 UUID，令牌是 32 字节随机数的 Base64；注册、确认、绑定、启动这几类消息都只允许出现一次，重复消息不得重复建立连接或重复计数。</Text>
+                </Box>
+                <Box style={{ flexDirection: 'row', gap: 14 }}>
+                    <Box style={{ background: '#1E293B', borderRadius: 6, padding: '7px 12px' }}>
+                        <Text style={{ fontSize: 13, color: '#60A5FA' }}>不依赖 TCP 分包边界</Text>
+                    </Box>
+                    <Box style={{ background: '#1E293B', borderRadius: 6, padding: '7px 12px' }}>
+                        <Text style={{ fontSize: 13, color: '#60A5FA' }}>控制入口拒绝数据首帧</Text>
+                            </Box>
+                    <Box style={{ background: '#1E293B', borderRadius: 6, padding: '7px 12px' }}>
+                        <Text style={{ fontSize: 13, color: '#60A5FA' }}>数据入口拒绝 Register</Text>
+                    </Box>
+                </Box>
+            </Box>
+        </Box>
+    </Box>
+
+    <Box style={{ height: 36, marginTop: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+        <Box style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+            <Box style={{ width: 6, height: 6, background: '#2563EB' }} />
+            <Text style={{ fontSize: 14, color: '#64748B' }}>RelayLink · 开源反向 TCP 代理</Text>
+        </Box>
+        <Text style={{ fontSize: 14, color: '#64748B' }}>{{PAGE}} / {{TOTAL}}</Text>
+    </Box>
+</Slide>

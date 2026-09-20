@@ -24,11 +24,22 @@
     }
   },
   "clientsDirectory": "/etc/relaylink/clients",
+  "securityGroups": [
+    {
+      "id": "office",
+      "name": "办公室",
+      "entries": ["192.0.2.10", "198.51.100.0/24"]
+    }
+  ],
   "history": {
     "enabled": true,
-    "filePath": "/var/lib/relaylink/traffic-history.jsonl",
-    "sampleIntervalSeconds": 60,
-    "retentionDays": 30
+    "filePath": "/var/lib/relaylink/traffic-history.db",
+    "sampleIntervalSeconds": 5,
+    "retentionDays": 90
+  },
+  "audit": {
+    "filePath": "/var/lib/relaylink/traffic-history.db",
+    "retentionDays": 90
   },
   "limits": {
     "maxConnections": 2000,

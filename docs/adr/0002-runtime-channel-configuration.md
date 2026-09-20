@@ -1,6 +1,6 @@
 # ADR-0002：通道配置运行时下发
 
-状态：Accepted\
+状态：Superseded（由 [ADR-0009](0009-revoke-connections-on-channel-change.md) 替代）\
 日期：2026-09-16
 
 ## 背景
@@ -9,7 +9,7 @@
 
 ## 决定
 
-服务端在保存前校验完整配置，原子替换对应客户端 JSON，并在成功绑定新增监听后切换运行时快照。在线 Agent 通过既有 TLS 控制连接接收 `ConfigUpdate` 帧，验证配置哈希后原子替换内存快照并以 `ConfigAck` 确认。新业务连接使用已确认版本；已有业务连接不被该操作主动中断。
+服务端在保存前校验完整配置，原子替换对应客户端 JSON，并在成功绑定新增监听后切换运行时快照。在线 Agent 通过既有 TLS 控制连接接收 `ConfigUpdate` 帧，验证配置哈希后原子替换内存快照并以 `ConfigAck` 确认。新业务连接使用已确认版本；当时决定已有业务连接不被该操作主动中断，现已由 [ADR-0009](0009-revoke-connections-on-channel-change.md) 更改。
 
 ## 后果
 

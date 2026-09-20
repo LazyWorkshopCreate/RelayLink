@@ -13,6 +13,7 @@ coverage/
 .local/
 work/
 artifacts/
+.workbuddy/
 *.log
 .env
 .env.*

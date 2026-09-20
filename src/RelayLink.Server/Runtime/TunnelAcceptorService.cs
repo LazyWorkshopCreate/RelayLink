@@ -14,9 +14,11 @@ namespace RelayLink.Server.Runtime;
 public sealed class TunnelAcceptorService(
     ServerRuntime runtime,
     AuthenticationService authentication,
+    ClientConfigurationEditor clientEditor,
     PendingConnectionRegistry pendingConnections,
     PeerRelayRegistry peerRelays,
     MetricsRegistry metrics,
+    AuditService audit,
     ILogger<TunnelAcceptorService> logger) : BackgroundService
 {
     private readonly SemaphoreSlim unauthenticatedLimit = new(runtime.Configuration.Server.Limits.MaxUnauthenticatedConnections);
@@ -73,6 +75,7 @@ public sealed class TunnelAcceptorService(
                 var first = await reader.ReadAsync(ProtocolConstants.MaxInitialPayloadLength, handshakeTimeout.Token);
                 if (first?.Type != FrameType.Register)
                 {
+                    await RecordRejectionAsync(null, "invalid_first_frame");
                     await TryWriteErrorAsync(writer, ErrorCode.ProtocolError, handshakeTimeout.Token);
                     return;
                 }
@@ -80,13 +83,18 @@ public sealed class TunnelAcceptorService(
                 var register = JsonProtocolSerializer.Deserialize<RegisterMessage>(first.Payload.Span);
                 if (!authentication.TryAuthenticate(register.ClientId, register.Secret, out var clientConfiguration))
                 {
+                    await RecordRejectionAsync(register.ClientId, "authentication_failed");
                     await TryWriteErrorAsync(writer, ErrorCode.AuthFailed, handshakeTimeout.Token);
                     logger.LogWarning("Authentication failed for client {ClientId}.", register.ClientId);
                     return;
                 }
 
-                if (clientConfiguration!.Channels.Any(channel => channel.Enabled && channel.AuthorizedClientsOnly && !string.Equals(channel.E2eCertificateSha256, register.E2eCertificateSha256, StringComparison.OrdinalIgnoreCase)))
+                if (register.E2eCertificateSha256 is null || register.E2eCertificateSha256.Length != 64 ||
+                    !register.E2eCertificateSha256.All(Uri.IsHexDigit) ||
+                    (clientConfiguration!.E2eCertificateSha256 is not null &&
+                    !string.Equals(clientConfiguration.E2eCertificateSha256, register.E2eCertificateSha256, StringComparison.OrdinalIgnoreCase)))
                 {
+                    await RecordRejectionAsync(register.ClientId, "identity_mismatch");
                     await TryWriteErrorAsync(writer, ErrorCode.AuthFailed, handshakeTimeout.Token);
                     logger.LogWarning("E2E certificate identity mismatch for client {ClientId}.", register.ClientId);
                     return;
@@ -94,13 +102,23 @@ public sealed class TunnelAcceptorService(
 
                 if (!runtime.Sessions.TryRegister(clientConfiguration!, out var session))
                 {
+                    await RecordRejectionAsync(register.ClientId, "duplicate_session");
                     await TryWriteErrorAsync(writer, ErrorCode.DuplicateSession, handshakeTimeout.Token);
                     logger.LogWarning("Rejected duplicate session for client {ClientId}.", register.ClientId);
                     return;
                 }
 
+                if (!runtime.Configuration.Clients.TryGetValue(register.ClientId, out var currentClient) || !currentClient.Enabled || session.LifetimeToken.IsCancellationRequested)
+                {
+                    await RecordRejectionAsync(register.ClientId, "client_disabled");
+                    runtime.Sessions.Remove(session.ClientId, session.SessionId);
+                    await TryWriteErrorAsync(writer, ErrorCode.AuthFailed, handshakeTimeout.Token);
+                    return;
+                }
+
                 unauthenticatedLimit.Release();
                 slotReleased = true;
+                var sessionReadyAudited = false;
                 try
                 {
                     using var sessionScope = logger.BeginScope(new Dictionary<string, object?>
@@ -109,7 +127,6 @@ public sealed class TunnelAcceptorService(
                         ["sessionId"] = session.SessionId
                     });
                     session.AgentVersion = register.AgentVersion;
-                    session.E2eCertificateSha256 = register.E2eCertificateSha256;
                     session.AttachControlWriter(writer);
                     var (snapshot, configVersion) = ConfigurationSnapshotFactory.Create(clientConfiguration!);
                     await writer.WriteAsync(new Frame(FrameType.RegisterAccepted, JsonProtocolSerializer.Serialize(new RegisterAcceptedMessage(session.SessionId, configVersion, snapshot, runtime.Configuration.Server.Tunnel.HeartbeatIntervalSeconds, runtime.Configuration.Server.Tunnel.HeartbeatTimeoutSeconds))), serverStoppingToken);
@@ -127,8 +144,18 @@ public sealed class TunnelAcceptorService(
                         return;
                     }
 
+                    try { clientConfiguration = await clientEditor.BindIdentityAsync(clientConfiguration, register.E2eCertificateSha256, serverStoppingToken); }
+                    catch (ClientUpdateException exception)
+                    {
+                        await TryWriteErrorAsync(writer, ErrorCode.AuthFailed, serverStoppingToken);
+                        logger.LogWarning("E2E certificate registration rejected for client {ClientId}: {Reason}", register.ClientId, exception.Message);
+                        return;
+                    }
                     session.SetConfigVersion(configVersion);
 
+                    await audit.RecordAsync(new AuditEvent("agent_session_ready", "success")
+                    { ClientId = session.ClientId, SessionId = session.SessionId, RemoteIp = (client.Client.RemoteEndPoint as IPEndPoint)?.Address.ToString() }, serverStoppingToken);
+                    sessionReadyAudited = true;
                     await writer.WriteAsync(new Frame(FrameType.Ready, JsonProtocolSerializer.Serialize(new ReadyMessage(session.SessionId))), serverStoppingToken);
                     session.MarkReady();
                     logger.LogInformation("Client {ClientId} session {SessionId} is online.", session.ClientId, session.SessionId);
@@ -140,6 +167,12 @@ public sealed class TunnelAcceptorService(
                     runtime.Sessions.Remove(session.ClientId, session.SessionId);
                     metrics.ResetTargets(session.ClientId);
                     logger.LogInformation("Client {ClientId} session {SessionId} is offline.", session.ClientId, session.SessionId);
+                    try
+                    {
+                        await audit.RecordAsync(new AuditEvent(sessionReadyAudited ? "agent_session_closed" : "agent_session_rejected", sessionReadyAudited ? "closed" : "denied")
+                        { ClientId = session.ClientId, SessionId = session.SessionId, RemoteIp = (client.Client.RemoteEndPoint as IPEndPoint)?.Address.ToString(), ReasonCode = sessionReadyAudited ? "session_ended" : "registration_incomplete", DurationMs = (long)(DateTimeOffset.UtcNow - session.ConnectedAtUtc).TotalMilliseconds }, CancellationToken.None);
+                    }
+                    catch (Exception exception) { logger.LogError(exception, "Could not persist Agent session termination audit for {SessionId}.", session.SessionId); }
                 }
             }
         }
@@ -161,11 +194,19 @@ public sealed class TunnelAcceptorService(
                 unauthenticatedLimit.Release();
             }
         }
+
+        async Task RecordRejectionAsync(string? untrustedClientId, string reason)
+        {
+            var safeClientId = new string((untrustedClientId ?? string.Empty).Where(character => !char.IsControl(character)).Take(128).ToArray());
+            try { await audit.RecordAsync(new AuditEvent("agent_session_rejected", "denied")
+                { ClientId = safeClientId, RemoteIp = (client.Client.RemoteEndPoint as IPEndPoint)?.Address.ToString(), ReasonCode = reason }, CancellationToken.None); }
+            catch (Exception exception) { logger.LogError(exception, "Could not persist Agent authentication rejection audit."); }
+        }
     }
 
     private async Task RunControlSessionAsync(FrameReader reader, FrameWriter writer, Session session, CancellationToken stoppingToken)
     {
-        using var sessionCancellation = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+        using var sessionCancellation = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken, session.LifetimeToken);
         var cancellationToken = sessionCancellation.Token;
         var heartbeatTask = RunHeartbeatLoopAsync(writer, session, cancellationToken);
         var readTask = RunControlReadLoopAsync(reader, session, cancellationToken);

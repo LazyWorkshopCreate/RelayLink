@@ -19,6 +19,51 @@ public sealed class PeerConnectionTests
 {
 #if PEER_TLS_TESTS
     [Fact]
+    public async Task Admin_can_list_and_disconnect_one_private_channel_connection()
+    {
+        using var fixture = new Fixture();
+        await fixture.StartAsync();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(40));
+        var token = deadline.Token;
+        await fixture.WaitOnlineAsync(token);
+        using var caller = await fixture.ConnectLocalAsync(token);
+        await caller.GetStream().WriteAsync(new byte[] { 42 }, token);
+        while (fixture.TargetConnections == 0) await Task.Delay(50, token);
+
+        using var http = new HttpClient(new HttpClientHandler { UseCookies = true });
+        var listUrl = $"http://{fixture.DashboardAddress}/api/v1/clients/visited/channels/private/connections";
+        using var listed = await http.GetFromJsonAsync<JsonDocument>(listUrl, token);
+        var connection = Assert.Single(listed!.RootElement.GetProperty("connections").EnumerateArray());
+        Assert.Equal("end-to-end", connection.GetProperty("kind").GetString());
+        Assert.Equal("caller", connection.GetProperty("source").GetString());
+        var id = connection.GetProperty("connectionId").GetGuid();
+
+        using var login = await http.PostAsJsonAsync($"http://{fixture.DashboardAddress}/api/v1/admin/session",
+            new { username = "admin", password = "test-password" }, token);
+        login.EnsureSuccessStatusCode();
+        var csrf = (await login.Content.ReadFromJsonAsync<JsonElement>(cancellationToken: token)).GetProperty("csrfToken").GetString();
+        using var request = new HttpRequestMessage(HttpMethod.Delete,
+            $"http://{fixture.DashboardAddress}/api/v1/admin/clients/visited/channels/private/connections/{id}");
+        request.Headers.Add("X-RelayLink-CSRF", csrf);
+        using var removed = await http.SendAsync(request, token);
+        Assert.Equal(HttpStatusCode.NoContent, removed.StatusCode);
+        await AssertClosedAsync(caller, token);
+        using var after = await http.GetFromJsonAsync<JsonDocument>(listUrl, token);
+        Assert.Empty(after!.RootElement.GetProperty("connections").EnumerateArray());
+        var audited = false;
+        for (var attempt = 0; attempt < 40; attempt++)
+        {
+            using var log = await http.GetFromJsonAsync<JsonDocument>($"http://{fixture.DashboardAddress}/api/v1/admin/audit?clientId=visited", token);
+            var events = log!.RootElement.GetProperty("events").EnumerateArray().ToArray();
+            audited = events.Any(item => item.GetProperty("eventType").GetString() == "peer_connection_opened" && item.GetProperty("connectionId").GetGuid() == id) &&
+                events.Any(item => item.GetProperty("eventType").GetString() == "peer_connection_closed" && item.GetProperty("connectionId").GetGuid() == id && item.GetProperty("reasonCode").GetString() == "admin_disconnected");
+            if (audited) break;
+            await Task.Delay(50, token);
+        }
+        Assert.True(audited, "Peer lifecycle should be recorded with the same connection ID.");
+    }
+
+    [Fact]
 #else
     [Fact(Skip = "Opt in on a TLS-capable host with -p:EnablePeerTlsTests=true.")]
 #endif
@@ -66,9 +111,81 @@ public sealed class PeerConnectionTests
         var response = await http.GetStringAsync($"http://{fixture.DashboardAddress}/api/v1/clients/visited/channels", deadline.Token);
         Assert.DoesNotContain("accessSecret", response, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("authorizedClientsOnly", response, StringComparison.Ordinal);
+        var mappings = await http.GetStringAsync($"http://{fixture.DashboardAddress}/api/v1/clients/caller/mappings", deadline.Token);
+        Assert.DoesNotContain("accessSecret", mappings, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("targetCertificateSha256", mappings, StringComparison.OrdinalIgnoreCase);
+        using var document = JsonDocument.Parse(mappings);
+        Assert.Contains(document.RootElement.GetProperty("mappings").EnumerateArray(), item =>
+            item.GetProperty("mappingId").GetString() == "to-visited" &&
+            item.GetProperty("targetClientId").GetString() == "visited" &&
+            item.GetProperty("targetChannelId").GetString() == "private");
+        using var missing = await http.GetAsync($"http://{fixture.DashboardAddress}/api/v1/clients/missing/mappings", deadline.Token);
+        Assert.Equal(HttpStatusCode.NotFound, missing.StatusCode);
     }
 
 #if PEER_TLS_TESTS
+    [Fact]
+    public async Task Disabling_referenced_client_preserves_configuration_and_revokes_peer_connections()
+    {
+        using var fixture = new Fixture();
+        await fixture.StartAsync();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(45));
+        var token = deadline.Token;
+        await fixture.WaitOnlineAsync(token);
+        var localPort = fixture.LocalPort;
+        using var existing = await fixture.ConnectLocalAsync(localPort, token);
+        await existing.GetStream().WriteAsync(new byte[] { 42 }, token);
+        while (fixture.TargetConnections == 0) await Task.Delay(50, token);
+
+        using var http = new HttpClient(new HttpClientHandler { UseCookies = true });
+        using var login = await http.PostAsJsonAsync($"http://{fixture.DashboardAddress}/api/v1/admin/session",
+            new { username = "admin", password = "test-password" }, token);
+        login.EnsureSuccessStatusCode();
+        var csrf = (await login.Content.ReadFromJsonAsync<JsonElement>(cancellationToken: token)).GetProperty("csrfToken").GetString();
+        var endpoint = $"http://{fixture.DashboardAddress}/api/v1/admin/clients/visited";
+        async Task SaveAsync(bool enabled)
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Put, endpoint)
+            { Content = JsonContent.Create(new { displayName = "Visited", enabled, maxConnections = 30, maxPendingConnections = 20 }) };
+            request.Headers.Add("X-RelayLink-CSRF", csrf);
+            using var response = await http.SendAsync(request, token);
+            response.EnsureSuccessStatusCode();
+        }
+
+        await SaveAsync(false);
+        using (var persisted = JsonDocument.Parse(fixture.ClientConfigurationJson("visited")))
+        {
+            Assert.False(persisted.RootElement.GetProperty("enabled").GetBoolean());
+            Assert.Equal(2, persisted.RootElement.GetProperty("channels").GetArrayLength());
+        }
+        using (var callerConfiguration = JsonDocument.Parse(fixture.ClientConfigurationJson("caller")))
+            Assert.Equal(2, callerConfiguration.RootElement.GetProperty("outboundMappings").GetArrayLength());
+        await AssertClosedAsync(existing, token);
+        await fixture.WaitOnlineAsync(token, expected: 1);
+
+        using var rejected = await fixture.ConnectLocalAsync(localPort, token);
+        await rejected.GetStream().WriteAsync(new byte[] { 42 }, token);
+        await AssertClosedAsync(rejected, token);
+        Assert.Equal(1, fixture.TargetConnections);
+
+        await SaveAsync(true);
+        await fixture.WaitOnlineAsync(token);
+        using var restored = await fixture.ConnectLocalAsync(localPort, token);
+        var restoredStream = restored.GetStream();
+        await restoredStream.WriteAsync(new byte[] { 43 }, token);
+        restored.Client.Shutdown(SocketShutdown.Send);
+        var returned = new byte[1];
+        await restoredStream.ReadExactlyAsync(returned, token);
+        Assert.Equal((byte)43, returned[0]);
+        Assert.Equal(2, fixture.TargetConnections);
+    }
+
+    private static async Task AssertClosedAsync(TcpClient client, CancellationToken token)
+    {
+        try { Assert.Equal(0, await client.GetStream().ReadAsync(new byte[1], token)); }
+        catch (IOException) { }
+    }
+
     [Fact]
     public async Task Two_private_channels_keep_concurrent_large_flows_isolated()
     {
@@ -109,6 +226,97 @@ public sealed class PeerConnectionTests
             Assert.True(channel.GetProperty("peerCiphertextToTarget").GetInt64() >= 8L * 1024 * 1024);
             Assert.True(channel.GetProperty("peerCiphertextToCaller").GetInt64() >= 8L * 1024 * 1024);
         }
+        for (var attempt = 0; attempt < 50; attempt++)
+        {
+            using var history = await http.GetFromJsonAsync<JsonDocument>(
+                $"http://{fixture.DashboardAddress}/api/v1/history?clientId=visited&hours=24", deadline.Token);
+            var samples = history!.RootElement.GetProperty("samples").EnumerateArray().ToArray();
+            if (samples.Length == 2 && samples.All(sample => sample.GetProperty("peerCiphertextToTarget").GetInt64() >= 8L * 1024 * 1024))
+            {
+                Assert.All(samples, sample => Assert.Equal(0, sample.GetProperty("bytesToTarget").GetInt64() - sample.GetProperty("peerCiphertextToTarget").GetInt64()));
+                break;
+            }
+            Assert.True(attempt < 49, "Peer ciphertext was not persisted for both channels.");
+            await Task.Delay(200, deadline.Token);
+        }
+    }
+
+    [Fact]
+    public async Task Changed_private_channel_disconnects_only_its_existing_peer_connection()
+    {
+        using var fixture = new Fixture();
+        await fixture.StartAsync();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        await fixture.WaitOnlineAsync(deadline.Token);
+        using var changed = await fixture.ConnectLocalAsync(deadline.Token);
+        using var unaffected = await fixture.ConnectLocalAsync(fixture.LocalPortB, deadline.Token);
+        var changedStream = changed.GetStream();
+        var unaffectedStream = unaffected.GetStream();
+        await changedStream.WriteAsync(new byte[] { 1 }, deadline.Token);
+        await unaffectedStream.WriteAsync(new byte[] { 2 }, deadline.Token);
+        while (fixture.TargetConnections < 1 || fixture.TargetConnectionsB < 1)
+            await Task.Delay(50, deadline.Token);
+
+        using var http = new HttpClient(new HttpClientHandler { UseCookies = true });
+        using var login = await http.PostAsJsonAsync($"http://{fixture.DashboardAddress}/api/v1/admin/session", new { username = "admin", password = "test-password" }, deadline.Token);
+        login.EnsureSuccessStatusCode();
+        var csrf = (await login.Content.ReadFromJsonAsync<JsonElement>(cancellationToken: deadline.Token)).GetProperty("csrfToken").GetString();
+        var endpoint = $"http://{fixture.DashboardAddress}/api/v1/admin/clients/visited/channels/private";
+        async Task SaveAsync(string displayName)
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Put, endpoint)
+            {
+                Content = JsonContent.Create(new { displayName, enabled = true, listenAddress = "127.0.0.1", listenPort = fixture.ProxyPort,
+                    targetHost = "127.0.0.1", targetPort = fixture.TargetPort, maxConnections = 10, targetConnectTimeoutSeconds = 5,
+                    authorizedClientsOnly = true })
+            };
+            request.Headers.Add("X-RelayLink-CSRF", csrf);
+            using var response = await http.SendAsync(request, deadline.Token);
+            response.EnsureSuccessStatusCode();
+        }
+
+        await SaveAsync("Private");
+        using (var unchanged = new CancellationTokenSource(TimeSpan.FromMilliseconds(300)))
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await changedStream.ReadAtLeastAsync(new byte[1], 1, false, unchanged.Token));
+        await SaveAsync("Private renamed");
+        Assert.Equal(0, await changedStream.ReadAsync(new byte[1], deadline.Token));
+
+        unaffected.Client.Shutdown(SocketShutdown.Send);
+        var echoed = new byte[2];
+        await unaffectedStream.ReadExactlyAsync(echoed, deadline.Token);
+        Assert.Equal(new byte[] { (byte)'B', 2 }, echoed);
+    }
+
+    [Fact]
+    public async Task Deleted_mapping_disconnects_only_its_existing_peer_connection()
+    {
+        using var fixture = new Fixture();
+        await fixture.StartAsync();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        await fixture.WaitOnlineAsync(deadline.Token);
+        using var changed = await fixture.ConnectLocalAsync(deadline.Token);
+        using var unaffected = await fixture.ConnectLocalAsync(fixture.LocalPortB, deadline.Token);
+        var changedStream = changed.GetStream();
+        var unaffectedStream = unaffected.GetStream();
+        await changedStream.WriteAsync(new byte[] { 1 }, deadline.Token);
+        await unaffectedStream.WriteAsync(new byte[] { 2 }, deadline.Token);
+        while (fixture.TargetConnections < 1 || fixture.TargetConnectionsB < 1)
+            await Task.Delay(50, deadline.Token);
+
+        using var http = new HttpClient(new HttpClientHandler { UseCookies = true });
+        using var login = await http.PostAsJsonAsync($"http://{fixture.DashboardAddress}/api/v1/admin/session", new { username = "admin", password = "test-password" }, deadline.Token);
+        login.EnsureSuccessStatusCode();
+        var csrf = (await login.Content.ReadFromJsonAsync<JsonElement>(cancellationToken: deadline.Token)).GetProperty("csrfToken").GetString();
+        var endpoint = $"http://{fixture.DashboardAddress}/api/v1/admin/clients/caller/mappings/to-visited";
+        using var request = new HttpRequestMessage(HttpMethod.Delete, endpoint);
+        request.Headers.Add("X-RelayLink-CSRF", csrf);
+        using var response = await http.SendAsync(request, deadline.Token);
+        response.EnsureSuccessStatusCode();
+        Assert.Equal(0, await changedStream.ReadAsync(new byte[1], deadline.Token));
+        unaffected.Client.Shutdown(SocketShutdown.Send);
+        var echoed = new byte[2];
+        await unaffectedStream.ReadExactlyAsync(echoed, deadline.Token);
+        Assert.Equal(new byte[] { (byte)'B', 2 }, echoed);
     }
 
     [Fact]
@@ -161,7 +369,7 @@ public sealed class PeerConnectionTests
         await outerTls.AuthenticateAsClientAsync(new SslClientAuthenticationOptions { TargetHost = "127.0.0.1", EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13, CertificateRevocationCheckMode = X509RevocationMode.NoCheck }, deadline.Token);
         var reader = new FrameReader(outerTls);
         var writer = new FrameWriter(outerTls);
-        await writer.WriteAsync(new Frame(FrameType.Register, JsonProtocolSerializer.Serialize(new RegisterMessage("intruder", fixture.IntruderSecret, "test"))), deadline.Token);
+        await writer.WriteAsync(new Frame(FrameType.Register, JsonProtocolSerializer.Serialize(new RegisterMessage("intruder", fixture.IntruderSecret, "test", new string('A', 64)))), deadline.Token);
         var accepted = await reader.ReadAsync(ProtocolConstants.MaxControlPayloadLength, deadline.Token);
         Assert.Equal(FrameType.RegisterAccepted, accepted?.Type);
         var registration = JsonProtocolSerializer.Deserialize<RegisterAcceptedMessage>(accepted!.Payload.Span);
@@ -186,7 +394,7 @@ public sealed class PeerConnectionTests
         await fixture.WaitOnlineAsync(deadline.Token);
         using var http = new HttpClient(new HttpClientHandler { UseCookies = true });
         var endpoint = $"http://{fixture.DashboardAddress}/api/v1/admin/clients/caller/mappings";
-        var mapping = new { mappingId = "dynamic", enabled = true, targetClientId = "visited", targetChannelId = "private" };
+        var mapping = new { targetClientId = "visited", targetChannelId = "private" };
 
         using var unauthorized = await http.PostAsJsonAsync(endpoint, mapping, deadline.Token);
         Assert.Equal(HttpStatusCode.Unauthorized, unauthorized.StatusCode);
@@ -194,17 +402,41 @@ public sealed class PeerConnectionTests
         login.EnsureSuccessStatusCode();
         var session = await login.Content.ReadFromJsonAsync<JsonElement>(cancellationToken: deadline.Token);
         var csrf = session.GetProperty("csrfToken").GetString();
+        using (var delete = new HttpRequestMessage(HttpMethod.Delete, $"{endpoint}/to-visited"))
+        {
+            delete.Headers.Add("X-RelayLink-CSRF", csrf);
+            using var deleted = await http.SendAsync(delete, deadline.Token);
+            deleted.EnsureSuccessStatusCode();
+        }
         using var request = new HttpRequestMessage(HttpMethod.Post, endpoint) { Content = JsonContent.Create(mapping) };
         request.Headers.Add("X-RelayLink-CSRF", csrf);
         using var saved = await http.SendAsync(request, deadline.Token);
         Assert.Equal(HttpStatusCode.Created, saved.StatusCode);
-        Assert.DoesNotContain("accessSecret", await saved.Content.ReadAsStringAsync(deadline.Token), StringComparison.OrdinalIgnoreCase);
-        var assigned = await fixture.WaitPortAsync("dynamic", deadline.Token);
+        var savedBody = await saved.Content.ReadAsStringAsync(deadline.Token);
+        Assert.DoesNotContain("accessSecret", savedBody, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal("visited-private", JsonDocument.Parse(savedBody).RootElement.GetProperty("mappingId").GetString());
+        using (var duplicate = new HttpRequestMessage(HttpMethod.Post, endpoint) { Content = JsonContent.Create(mapping) })
+        {
+            duplicate.Headers.Add("X-RelayLink-CSRF", csrf);
+            using var rejected = await http.SendAsync(duplicate, deadline.Token);
+            Assert.Equal(HttpStatusCode.BadRequest, rejected.StatusCode);
+        }
+        using (var edit = new HttpRequestMessage(HttpMethod.Put, $"{endpoint}/visited-private")
+        {
+            Content = JsonContent.Create(new { enabled = false, targetClientId = "visited", targetChannelId = "private-b" })
+        })
+        {
+            edit.Headers.Add("X-RelayLink-CSRF", csrf);
+            using var rejected = await http.SendAsync(edit, deadline.Token);
+            Assert.Equal(HttpStatusCode.MethodNotAllowed, rejected.StatusCode);
+        }
+        var assigned = await fixture.WaitPortAsync("visited-private", deadline.Token);
         for (var attempt = 0; attempt < 50; attempt++)
         {
             using var reported = await http.GetAsync(endpoint, deadline.Token);
             var document = await reported.Content.ReadFromJsonAsync<JsonElement>(cancellationToken: deadline.Token);
-            var current = document.GetProperty("mappings").EnumerateArray().Single(item => item.GetProperty("mappingId").GetString() == "dynamic");
+            var current = document.GetProperty("mappings").EnumerateArray().Single(item => item.GetProperty("mappingId").GetString() == "visited-private");
+            Assert.Equal("private", current.GetProperty("targetChannelId").GetString());
             if (current.GetProperty("available").GetBoolean())
             {
                 Assert.Equal(assigned, current.GetProperty("localPort").GetInt32());
@@ -236,7 +468,7 @@ public sealed class PeerConnectionTests
         await using var outer = await fixture.AuthenticateOuterAsync(controlClient, deadline.Token);
         var reader = new FrameReader(outer);
         var writer = new FrameWriter(outer);
-        await writer.WriteAsync(new Frame(FrameType.Register, JsonProtocolSerializer.Serialize(new RegisterMessage("caller", fixture.CallerSecret, "negative-test"))), deadline.Token);
+        await writer.WriteAsync(new Frame(FrameType.Register, JsonProtocolSerializer.Serialize(new RegisterMessage("caller", fixture.CallerSecret, "negative-test", new string('B', 64)))), deadline.Token);
         var registrationFrame = await reader.ReadAsync(ProtocolConstants.MaxControlPayloadLength, deadline.Token);
         Assert.Equal(FrameType.RegisterAccepted, registrationFrame?.Type);
         var registration = JsonProtocolSerializer.Deserialize<RegisterAcceptedMessage>(registrationFrame!.Payload.Span);
@@ -281,11 +513,13 @@ public sealed class PeerConnectionTests
         public int LocalPortB => ReadPort("to-visited-b");
         public int AgentDashboardPort { get; } = FreePort();
         public int ProxyPort { get; } = FreePort();
+        public int TargetPort { get; private set; }
         public int TunnelPort { get; } = FreePort();
         public int DataPort { get; } = FreePort();
         private int DashboardPort { get; } = FreePort();
         private string caPath = string.Empty;
         public string DashboardAddress => $"127.0.0.1:{DashboardPort}";
+        public string ClientConfigurationJson(string clientId) => File.ReadAllText(Path.Combine(directory, "clients", $"{clientId}.json"));
         public string IntruderSecret { get; } = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
         public string CallerSecret { get; private set; } = string.Empty;
         public string TargetFingerprint { get; private set; } = string.Empty;
@@ -303,6 +537,7 @@ public sealed class PeerConnectionTests
             _ = EchoAsync(target, false);
             _ = EchoAsync(targetB, true);
             var targetPort = ((IPEndPoint)target.LocalEndpoint).Port;
+            TargetPort = targetPort;
             var targetPortB = ((IPEndPoint)targetB.LocalEndpoint).Port;
             var secret = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
             var accessSecret = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
@@ -311,9 +546,9 @@ public sealed class PeerConnectionTests
             TargetFingerprint = fingerprint;
             var visited = new ClientConfiguration(1, "visited", "Visited", true, secret, 30, 20,
             [new ChannelConfiguration("private", "Private", true, "127.0.0.1", ProxyPort, "127.0.0.1", targetPort, 10, 5)
-            { AuthorizedClientsOnly = true, AccessSecret = accessSecret, E2eCertificateSha256 = fingerprint },
+            { AuthorizedClientsOnly = true, AccessSecret = accessSecret },
              new ChannelConfiguration("private-b", "Private B", true, "127.0.0.1", FreePort(), "127.0.0.1", targetPortB, 10, 5)
-            { AuthorizedClientsOnly = true, AccessSecret = accessSecretB, E2eCertificateSha256 = fingerprint }]);
+            { AuthorizedClientsOnly = true, AccessSecret = accessSecretB }]) { E2eCertificateSha256 = fingerprint };
             var callerSecret = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
             CallerSecret = callerSecret;
             var caller = new ClientConfiguration(1, "caller", "Caller", true, callerSecret, 30, 20, [])
@@ -331,7 +566,8 @@ public sealed class PeerConnectionTests
             var serverConfig = new ServerConfiguration(1,
                 new TunnelConfiguration("127.0.0.1", TunnelPort, true, certificatePath, keyPath, 10, 15, 45) { DataPort = DataPort },
                 new DashboardConfiguration("127.0.0.1", DashboardPort, 5, new DashboardAdminConfiguration("admin", PasswordHash(), 60)),
-                clients, new LimitsConfiguration(50, 20, 50, 10, 20, 120, 300), null);
+                clients, new LimitsConfiguration(50, 20, 50, 10, 20, 120, 300),
+                new HistoryConfiguration(true, Path.Combine(directory, "traffic.db")));
             var serverPath = Path.Combine(directory, "server.json");
             await File.WriteAllTextAsync(serverPath, JsonSerializer.Serialize(serverConfig, json));
             StartProcess(typeof(ConfigurationLoader).Assembly.Location, serverPath);
@@ -416,10 +652,15 @@ public sealed class PeerConnectionTests
             port = 0;
             var path = Path.Combine(directory, "caller", "caller.ports.json");
             if (!File.Exists(path)) return false;
-            using var json = JsonDocument.Parse(File.ReadAllText(path));
-            if (!json.RootElement.TryGetProperty(mappingId, out var value)) return false;
-            port = value.GetInt32();
-            return port > 0;
+            try
+            {
+                using var json = JsonDocument.Parse(File.ReadAllText(path));
+                if (!json.RootElement.TryGetProperty(mappingId, out var value)) return false;
+                port = value.GetInt32();
+                return port > 0;
+            }
+            catch (IOException) { return false; } // Agent may be replacing its port-state file.
+            catch (JsonException) { return false; }
         }
 
         public async Task<TcpClient> ConnectLocalAsync(int port, CancellationToken token)

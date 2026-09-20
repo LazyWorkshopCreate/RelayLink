@@ -4,10 +4,22 @@
     <RootNamespace>RelayLink.Server</RootNamespace>
   </PropertyGroup>
   <ItemGroup>
+    <!-- Local test outputs must never become Web SDK publish content. -->
+    <Content Remove="artifacts/**" />
+    <None Remove="artifacts/**" />
     <ProjectReference Include="../RelayLink.Protocol/RelayLink.Protocol.csproj" />
     <ProjectReference Include="../RelayLink.Transport/RelayLink.Transport.csproj" />
     <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.2" />
+    <PackageReference Include="Microsoft.Data.Sqlite.Core" Version="10.0.12" />
+    <PackageReference Include="SQLitePCLRaw.provider.e_sqlite3" Version="2.1.12" />
+    <PackageReference Include="SQLitePCLRaw.provider.sqlite3" Version="2.1.12" />
+    <PackageReference Include="SQLitePCLRaw.lib.e_sqlite3" Version="2.1.12" Condition="'$(RuntimeIdentifier)' != 'linux-x64'" />
   </ItemGroup>
+  <Target Name="RemoveBundledSqliteNativeLibraryForLinux"
+          AfterTargets="Publish"
+          Condition="'$(RuntimeIdentifier)' == 'linux-x64'">
+    <Delete Files="$(PublishDir)libe_sqlite3.so" />
+  </Target>
   <Target Name="BuildAdminWeb" BeforeTargets="Build;Publish">
     <Exec Condition="'$(SkipAdminWebBuild)' != 'true'" Command="pnpm --dir &quot;$(MSBuildProjectDirectory)/../RelayLink.AdminWeb&quot; build" />
   </Target>

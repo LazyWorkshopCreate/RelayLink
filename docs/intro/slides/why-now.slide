@@ -1,0 +1,70 @@
+<Slide style={{ width: '1280px', height: '720px', padding: '20px 64px', background: '#FFFFFF' }}>
+    <Box style={{ height: 88, flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between' }}>
+        <Box>
+            <Text style={{ fontSize: 13, fontWeight: 600, color: '#2563EB', letterSpacing: 2 }}>CHAPTER 01 · 为什么是现在</Text>
+            <Box style={{ height: 8 }} />
+            <Text style={{ fontSize: 34, fontWeight: 'bold', color: '#0F172A', lineHeight: 1.25 }}>中台又成了刚需，第一道坎却是连通性</Text>
+        </Box>
+        <Box style={{ width: 4, height: 44, background: '#2563EB' }} />
+    </Box>
+
+    <Box style={{ height: 524, marginTop: 16 }}>
+        <Box style={{ height: 312, flexDirection: 'row', gap: 12, alignItems: 'stretch' }}>
+            <Box style={{ flex: 1, background: '#EEF2F8', borderRadius: 10, padding: '24px 22px', justifyContent: 'space-between' }}>
+                <Box>
+                    <Text style={{ fontSize: 13, fontWeight: 600, color: '#2563EB', letterSpacing: 1 }}>AI 时代</Text>
+                    <Box style={{ height: 12 }} />
+                    <Text style={{ fontSize: 21, fontWeight: 600, color: '#0F172A', lineHeight: 1.35 }}>数据中台又一次成了刚需</Text>
+                </Box>
+                <Text style={{ fontSize: 14.5, color: '#64748B', lineHeight: 1.65 }}>数据重新变成生产资料。没来得及建的要补，刚被拆掉的要重建——但这一次的窗口更短，容不得再从零规划三年。</Text>
+            </Box>
+
+            <Box style={{ width: 26, alignItems: 'center', justifyContent: 'center' }}>
+                <Text style={{ fontSize: 26, color: '#2563EB' }}>→</Text>
+            </Box>
+
+            <Box style={{ flex: 1, background: '#EEF2F8', borderRadius: 10, padding: '24px 22px', justifyContent: 'space-between' }}>
+                <Box>
+                    <Text style={{ fontSize: 13, fontWeight: 600, color: '#2563EB', letterSpacing: 1 }}>零售与中小企业的现实</Text>
+                    <Box style={{ height: 12 }} />
+                    <Text style={{ fontSize: 21, fontWeight: 600, color: '#0F172A', lineHeight: 1.35 }}>数据在几百个门店的内网里</Text>
+                </Box>
+                <Text style={{ fontSize: 14.5, color: '#64748B', lineHeight: 1.65 }}>每家门店一套 POS 或进销存，库在 192.168 段，出口躲在运营商 NAT 后面。总部手上真正有的，往往只有各店报上来的 Excel。</Text>
+            </Box>
+
+            <Box style={{ width: 26, alignItems: 'center', justifyContent: 'center' }}>
+                <Text style={{ fontSize: 26, color: '#2563EB' }}>→</Text>
+            </Box>
+
+            <Box style={{ flex: 1, background: '#FFFFFF', border: '1.5px solid #2563EB', borderRadius: 10, padding: '24px 22px', justifyContent: 'space-between' }}>
+                <Box>
+                    <Text style={{ fontSize: 13, fontWeight: 600, color: '#2563EB', letterSpacing: 1 }}>第一道坎</Text>
+                    <Box style={{ height: 12 }} />
+                    <Text style={{ fontSize: 21, fontWeight: 600, color: '#0F172A', lineHeight: 1.35 }}>不是建模，是数据出不来</Text>
+                </Box>
+                <Text style={{ fontSize: 14.5, color: '#64748B', lineHeight: 1.65 }}>指标口径、特征工程、模型训练全排在后面。只要数据还留在各个门店的内网里，中台建得多漂亮都是空的。</Text>
+            </Box>
+        </Box>
+
+        <Box style={{ height: 200, marginTop: 12, background: '#0F172A', borderRadius: 10, padding: '22px 28px', justifyContent: 'space-between' }}>
+            <Box>
+                <Text style={{ fontSize: 13, fontWeight: 600, color: '#60A5FA', letterSpacing: 2 }}>RELAYLINK 的位置</Text>
+                <Box style={{ height: 12 }} />
+                <Text style={{ fontSize: 28, fontWeight: 'bold', color: '#FFFFFF', lineHeight: 1.3 }}>它不做中台，它是中台前面那根管子</Text>
+            </Box>
+            <Box>
+                <Text style={{ fontSize: 15, color: '#CBD5E1', lineHeight: 1.65 }}>只解决一件事：把分散在全国的内网数据出口打通，让「汇聚」先成立。汇聚之后怎么建模、怎么做特征、怎么训练，交给你的中台和模型。</Text>
+                <Box style={{ height: 10 }} />
+                <Text style={{ fontSize: 12.5, color: '#64748B', lineHeight: 1.55 }}>也正因为它只做连通，才不碰应用层协议、不做网站托管。</Text>
+            </Box>
+        </Box>
+    </Box>
+
+    <Box style={{ height: 36, marginTop: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+        <Box style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+            <Box style={{ width: 6, height: 6, background: '#2563EB' }} />
+            <Text style={{ fontSize: 14, color: '#64748B' }}>RelayLink · 开源反向 TCP 代理</Text>
+        </Box>
+        <Text style={{ fontSize: 14, color: '#64748B' }}>{{PAGE}} / {{TOTAL}}</Text>
+    </Box>
+</Slide>

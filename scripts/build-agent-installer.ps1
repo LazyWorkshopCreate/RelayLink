@@ -6,7 +6,8 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-$publishDirectory = Join-Path $repositoryRoot 'artifacts\publish\win-x64\RelayLink.Agent'
+$publishRoot = Join-Path $repositoryRoot ('artifacts\installer-publish\' + [guid]::NewGuid().ToString('N'))
+$publishDirectory = Join-Path $publishRoot 'win-x64\RelayLink.Agent'
 $installerScript = Join-Path $repositoryRoot 'deploy\windows\relaylink-agent.iss'
 
 if ([string]::IsNullOrWhiteSpace($InnoCompiler)) {
@@ -23,7 +24,7 @@ if (-not $InnoCompiler -or -not (Test-Path -LiteralPath $InnoCompiler)) {
 }
 if ($Version -notmatch '^\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$') { throw 'Version must be a semantic version.' }
 
-& (Join-Path $PSScriptRoot 'publish.ps1') -RuntimeIdentifier win-x64 -Component Agent
+& (Join-Path $PSScriptRoot 'publish.ps1') -RuntimeIdentifier win-x64 -Component Agent -OutputRoot $publishRoot
 if ($LASTEXITCODE -ne 0) { throw 'Agent publish failed.' }
 if (-not (Test-Path -LiteralPath (Join-Path $publishDirectory 'RelayLink.Agent.exe'))) { throw 'Agent executable is missing from publish output.' }
 

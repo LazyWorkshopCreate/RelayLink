@@ -1,0 +1,145 @@
+<Slide style={{ width: '1280px', height: '720px', padding: '20px 64px', background: '#FFFFFF' }}>
+    <Box style={{ height: 88, flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between' }}>
+        <Box>
+            <Text style={{ fontSize: 13, fontWeight: 600, color: '#2563EB', letterSpacing: 2 }}>CHAPTER 04 · 可观测性</Text>
+            <Box style={{ height: 8 }} />
+            <Text style={{ fontSize: 34, fontWeight: 'bold', color: '#0F172A', lineHeight: 1.25 }}>匿名可读全局状态，登录后才能改</Text>
+        </Box>
+        <Box style={{ width: 4, height: 44, background: '#2563EB' }} />
+    </Box>
+
+    <Box style={{ height: 524, marginTop: 16, flexDirection: 'row', gap: 28 }}>
+        <Box style={{ width: 668, background: '#EEF2F8', borderRadius: 10, padding: '16px 18px' }}>
+            <Box style={{ height: 64, flexDirection: 'row', gap: 10 }}>
+                <Box style={{ flex: 1, background: '#FFFFFF', borderRadius: 6, padding: '10px 12px' }}>
+                    <Text style={{ fontSize: 22, fontWeight: 'bold', color: '#2563EB' }}>80/100</Text>
+                    <Text style={{ fontSize: 12, color: '#64748B' }}>在线客户端</Text>
+                </Box>
+                <Box style={{ flex: 1, background: '#FFFFFF', borderRadius: 6, padding: '10px 12px' }}>
+                    <Text style={{ fontSize: 22, fontWeight: 'bold', color: '#2563EB' }}>400/500</Text>
+                    <Text style={{ fontSize: 12, color: '#64748B' }}>可接入通道</Text>
+                </Box>
+                <Box style={{ flex: 1, background: '#FFFFFF', borderRadius: 6, padding: '10px 12px' }}>
+                    <Text style={{ fontSize: 22, fontWeight: 'bold', color: '#2563EB' }}>650</Text>
+                    <Text style={{ fontSize: 12, color: '#64748B' }}>活动连接</Text>
+                </Box>
+                <Box style={{ flex: 1, background: '#0F172A', borderRadius: 6, padding: '10px 12px' }}>
+                    <Text style={{ fontSize: 22, fontWeight: 'bold', color: '#FFFFFF' }}>5s</Text>
+                    <Text style={{ fontSize: 12, color: '#94A3B8' }}>刷新周期</Text>
+                </Box>
+            </Box>
+
+            <Box style={{ height: 140, marginTop: 12, background: '#FFFFFF', border: '1.5px solid #DCE3ED', borderRadius: 8, padding: '14px 16px', justifyContent: 'space-between' }}>
+                <Box>
+                    <Box style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                        <Text style={{ fontSize: 18, fontWeight: 600, color: '#0F172A' }}>上海节点 01</Text>
+                        <Box style={{ background: '#2563EB', borderRadius: 4, padding: '3px 8px' }}>
+                            <Text style={{ fontSize: 12, color: '#FFFFFF', fontWeight: 600 }}>Online</Text>
+                        </Box>
+                        <Text style={{ fontSize: 13, color: '#64748B' }}>RTT 48ms · 最近心跳 3s 前 · Agent v1.0.3</Text>
+                    </Box>
+                    <Box style={{ height: 12 }} />
+                    <Box style={{ flexDirection: 'row', alignItems: 'center' }}>
+                        <Box style={{ width: 150 }}>
+                            <Text style={{ fontSize: 14, fontWeight: 600, color: '#0F172A' }}>ERP SQL Server</Text>
+                            <Text style={{ fontSize: 12, color: '#64748B' }}>erp-sql</Text>
+                        </Box>
+                        <Box style={{ width: 190 }}>
+                            <Text style={{ fontSize: 13, color: '#0F172A', letterSpacing: 0.5 }}>10.20.0.10:21433</Text>
+                            <Text style={{ fontSize: 12, color: '#64748B' }}>云端端点</Text>
+                        </Box>
+                        <Box style={{ width: 150 }}>
+                            <Text style={{ fontSize: 13, color: '#0F172A', letterSpacing: 0.5 }}>192.168.10.20:1433</Text>
+                            <Text style={{ fontSize: 12, color: '#64748B' }}>目标端点</Text>
+                        </Box>
+                        <Box style={{ flex: 1, alignItems: 'flex-end' }}>
+                            <Text style={{ fontSize: 13, color: '#2563EB', fontWeight: 600 }}>可接入</Text>
+                            <Text style={{ fontSize: 12, color: '#64748B' }}>最近 TCP 成功</Text>
+                        </Box>
+                    </Box>
+                </Box>
+                <Box style={{ flexDirection: 'row', gap: 10 }}>
+                    <Box style={{ background: '#EEF2F8', borderRadius: 4, padding: '5px 9px' }}>
+                        <Text style={{ fontSize: 12, color: '#0F172A' }}>活动 12</Text>
+                    </Box>
+                    <Box style={{ background: '#EEF2F8', borderRadius: 4, padding: '5px 9px' }}>
+                        <Text style={{ fontSize: 12, color: '#0F172A' }}>待建立 1</Text>
+                    </Box>
+                    <Box style={{ background: '#EEF2F8', borderRadius: 4, padding: '5px 9px' }}>
+                        <Text style={{ fontSize: 12, color: '#0F172A' }}>→目标 1.2 MiB/s</Text>
+                    </Box>
+                    <Box style={{ background: '#EEF2F8', borderRadius: 4, padding: '5px 9px' }}>
+                        <Text style={{ fontSize: 12, color: '#0F172A' }}>→访问方 4 MiB/s</Text>
+                    </Box>
+                </Box>
+            </Box>
+
+            <Box style={{ height: 54, marginTop: 12, background: '#FFFFFF', border: '1.5px solid #DCE3ED', borderRadius: 8, padding: '12px 16px', flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                <Text style={{ fontSize: 16, fontWeight: 600, color: '#0F172A', width: 140 }}>成都节点 02</Text>
+                <Box style={{ background: '#EEF2F8', borderRadius: 4, padding: '3px 8px' }}>
+                    <Text style={{ fontSize: 12, color: '#64748B', fontWeight: 600 }}>Offline</Text>
+                </Box>
+                <Text style={{ fontSize: 13, color: '#64748B' }}>最近断线：心跳超时（45s 未响应）· 退避重连中</Text>
+            </Box>
+
+            <Box style={{ height: 198, marginTop: 12, background: '#0F172A', borderRadius: 8, padding: '16px 18px', justifyContent: 'space-between' }}>
+                <Box>
+                    <Text style={{ fontSize: 18, fontWeight: 600, color: '#FFFFFF' }}>流量历史：分钟级增量落到 SQLite</Text>
+                    <Box style={{ height: 10 }} />
+                    <Text style={{ fontSize: 14, color: '#CBD5E1', lineHeight: 1.6 }}>服务端每 5 秒从累计计数求差，按 UTC 分钟做 UPSERT；普通字节与端到端密文字节分列存储，默认保留 90 天。</Text>
+                    <Box style={{ height: 10 }} />
+                    <Text style={{ fontSize: 14, color: '#CBD5E1', lineHeight: 1.6 }}>点通道流量数字可打开聚合历史图；查询超过 24 小时自动按 15 分钟或小时聚合。</Text>
+                </Box>
+                <Box style={{ flexDirection: 'row', gap: 10 }}>
+                    <Box style={{ background: '#1E293B', borderRadius: 5, padding: '6px 10px' }}>
+                        <Text style={{ fontSize: 12, color: '#60A5FA' }}>不存业务载荷</Text>
+                    </Box>
+                    <Box style={{ background: '#1E293B', borderRadius: 5, padding: '6px 10px' }}>
+                        <Text style={{ fontSize: 12, color: '#60A5FA' }}>不存 SQL 文本</Text>
+                    </Box>
+                    <Box style={{ background: '#1E293B', borderRadius: 5, padding: '6px 10px' }}>
+                        <Text style={{ fontSize: 12, color: '#60A5FA' }}>不存凭据</Text>
+                    </Box>
+                    <Box style={{ background: '#1E293B', borderRadius: 5, padding: '6px 10px' }}>
+                        <Text style={{ fontSize: 12, color: '#60A5FA' }}>不作为计费依据</Text>
+                    </Box>
+                </Box>
+            </Box>
+        </Box>
+
+        <Box style={{ width: 456, justifyContent: 'space-between' }}>
+            <Box>
+                <Text style={{ fontSize: 13, fontWeight: 600, color: '#2563EB', letterSpacing: 2 }}>可见性的边界</Text>
+                <Box style={{ height: 14 }} />
+                <Text style={{ fontSize: 24, fontWeight: 'bold', color: '#0F172A', lineHeight: 1.35 }}>看得到状态<br />看不到秘密</Text>
+                <Box style={{ height: 18 }} />
+                <Text style={{ fontSize: 15, color: '#64748B', lineHeight: 1.65 }}>匿名只读接口返回通道、连接、流量与访问入口的元数据，但绝不返回客户端密钥、绑定令牌、访问密钥、证书私钥或管理员密码哈希。</Text>
+            </Box>
+
+            <Box>
+                <Box style={{ flexDirection: 'row', gap: 12, alignItems: 'flex-start' }}>
+                    <Text style={{ fontSize: 15, fontWeight: 'bold', color: '#2563EB', width: 22 }}>1</Text>
+                    <Text style={{ flex: 1, fontSize: 15, color: '#64748B', lineHeight: 1.6 }}>登录使用 PBKDF2-SHA256 密码哈希、短期 HttpOnly 会话 Cookie 与 CSRF 令牌；缺 CSRF 的已登录写请求会被拒绝。</Text>
+                </Box>
+                <Box style={{ height: 14 }} />
+                <Box style={{ flexDirection: 'row', gap: 12, alignItems: 'flex-start' }}>
+                    <Text style={{ fontSize: 15, fontWeight: 'bold', color: '#2563EB', width: 22 }}>2</Text>
+                    <Text style={{ flex: 1, fontSize: 15, color: '#64748B', lineHeight: 1.6 }}>客户端卡片下以表格展示端到端访问入口与 Agent 实际上报的本机地址；删除按钮只在登录后出现。</Text>
+                </Box>
+                <Box style={{ height: 14 }} />
+                <Box style={{ flexDirection: 'row', gap: 12, alignItems: 'flex-start' }}>
+                    <Text style={{ fontSize: 15, fontWeight: 'bold', color: '#2563EB', width: 22 }}>3</Text>
+                    <Text style={{ flex: 1, fontSize: 15, color: '#64748B', lineHeight: 1.6 }}>管理员还能查看实时连接列表并按连接 ID 断开单条连接；断开只释放该连接，不动通道配置。</Text>
+                </Box>
+            </Box>
+        </Box>
+    </Box>
+
+    <Box style={{ height: 36, marginTop: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+        <Box style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+            <Box style={{ width: 6, height: 6, background: '#2563EB' }} />
+            <Text style={{ fontSize: 14, color: '#64748B' }}>RelayLink · 开源反向 TCP 代理</Text>
+        </Box>
+        <Text style={{ fontSize: 14, color: '#64748B' }}>{{PAGE}} / {{TOTAL}}</Text>
+    </Box>
+</Slide>

@@ -17,6 +17,11 @@ public sealed class MetricsRegistry
     }
 
     public ChannelMetrics For(string clientId, string channelId) => channels.GetOrAdd(Key(clientId, channelId), _ => new ChannelMetrics());
+    public IReadOnlyList<(string ClientId, string ChannelId, ChannelMetricsSnapshot Snapshot)> Snapshots() => channels.Select(pair =>
+    {
+        var separator = pair.Key.IndexOf('\0');
+        return (pair.Key[..separator], pair.Key[(separator + 1)..], pair.Value.Snapshot());
+    }).ToArray();
     public void ResetTargets(string clientId)
     {
         foreach (var pair in channels.Where(pair => pair.Key.StartsWith($"{clientId}\0", StringComparison.Ordinal))) pair.Value.ResetTarget();

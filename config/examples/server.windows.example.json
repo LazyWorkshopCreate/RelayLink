@@ -22,11 +22,22 @@
     }
   },
   "clientsDirectory": "C:\\ProgramData\\RelayLink\\clients",
+  "securityGroups": [
+    {
+      "id": "office",
+      "name": "办公室",
+      "entries": ["192.0.2.10", "198.51.100.0/24"]
+    }
+  ],
   "history": {
     "enabled": true,
-    "filePath": "C:\\ProgramData\\RelayLink\\history\\traffic-history.jsonl",
-    "sampleIntervalSeconds": 60,
-    "retentionDays": 30
+    "filePath": "C:\\ProgramData\\RelayLink\\history\\traffic-history.db",
+    "sampleIntervalSeconds": 5,
+    "retentionDays": 90
+  },
+  "audit": {
+    "filePath": "C:\\ProgramData\\RelayLink\\history\\traffic-history.db",
+    "retentionDays": 90
   },
   "limits": {
     "maxConnections": 2000,

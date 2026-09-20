@@ -1,0 +1,67 @@
+<Slide style={{ width: '1280px', height: '720px', padding: '20px 64px', background: '#FFFFFF' }}>
+    <Box style={{ height: 88, flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between' }}>
+        <Box>
+            <Text style={{ fontSize: 13, fontWeight: 600, color: '#2563EB', letterSpacing: 2 }}>CHAPTER 04 · 落地情况</Text>
+            <Box style={{ height: 8 }} />
+            <Text style={{ fontSize: 34, fontWeight: 'bold', color: '#0F172A', lineHeight: 1.25 }}>它不是纸面设计，已经在真实环境跑起来了</Text>
+        </Box>
+        <Box style={{ width: 4, height: 44, background: '#2563EB' }} />
+    </Box>
+
+    <Box style={{ height: 524, marginTop: 16 }}>
+        <Box style={{ height: 300, flexDirection: 'row', gap: 20, alignItems: 'stretch' }}>
+            <Box style={{ flex: 1, background: '#EEF2F8', borderRadius: 10, padding: '26px 26px', justifyContent: 'space-between' }}>
+                <Box>
+                    <Text style={{ fontSize: 13, fontWeight: 600, color: '#2563EB', letterSpacing: 1 }}>跨公网 RDP</Text>
+                    <Box style={{ height: 14 }} />
+                    <Text style={{ fontSize: 40, fontWeight: 'bold', color: '#0F172A', lineHeight: 1.2 }}>连续运行 1 天</Text>
+                    <Box style={{ height: 16 }} />
+                    <Text style={{ fontSize: 14.5, color: '#64748B', lineHeight: 1.7 }}>部署在自有服务器上——也就是仓库验证记录里那台。公网访问端经隧道登录内网 Windows 桌面，按真实使用方式跑满了一整天。</Text>
+                </Box>
+                <Box>
+                    <Box style={{ height: 1, background: '#DCE3ED' }} />
+                    <Box style={{ height: 12 }} />
+                    <Text style={{ fontSize: 13.5, color: '#0F172A', lineHeight: 1.7 }}>· 图形桌面是对时延最敏感的一类场景</Text>
+                    <Text style={{ fontSize: 13.5, color: '#0F172A', lineHeight: 1.7 }}>· 走的是跨公网、跨 NAT 的完整链路，不是本机回环</Text>
+                </Box>
+            </Box>
+
+            <Box style={{ flex: 1, background: '#FFFFFF', border: '1.5px solid #2563EB', borderRadius: 10, padding: '26px 26px', justifyContent: 'space-between' }}>
+                <Box>
+                    <Text style={{ fontSize: 13, fontWeight: 600, color: '#2563EB', letterSpacing: 1 }}>SQL Server 数据通道</Text>
+                    <Box style={{ height: 14 }} />
+                    <Text style={{ fontSize: 40, fontWeight: 'bold', color: '#0F172A', lineHeight: 1.2 }}>已投产</Text>
+                    <Box style={{ height: 16 }} />
+                    <Text style={{ fontSize: 14.5, color: '#64748B', lineHeight: 1.7 }}>在另一个环境中完成部署并投入使用。这正是它最主要的目标场景：云端业务穿过反向隧道访问内网数据库。</Text>
+                </Box>
+                <Box>
+                    <Box style={{ height: 1, background: '#DCE3ED' }} />
+                    <Box style={{ height: 12 }} />
+                    <Text style={{ fontSize: 13.5, color: '#0F172A', lineHeight: 1.7 }}>· 第一章说的"数据出不来"，堵的就是这条链路</Text>
+                    <Text style={{ fontSize: 13.5, color: '#0F172A', lineHeight: 1.7 }}>· 长连接、大回包、突发查询，背压设计在这里才有意义</Text>
+                </Box>
+            </Box>
+        </Box>
+
+        <Box style={{ height: 212, marginTop: 12, background: '#0F172A', borderRadius: 10, padding: '22px 28px', justifyContent: 'space-between' }}>
+            <Box>
+                <Text style={{ fontSize: 13, fontWeight: 600, color: '#60A5FA', letterSpacing: 2 }}>把话说严谨一点</Text>
+                <Box style={{ height: 12 }} />
+                <Text style={{ fontSize: 28, fontWeight: 'bold', color: '#FFFFFF', lineHeight: 1.3 }}>跑起来 ≠ 压测通过</Text>
+            </Box>
+            <Box>
+                <Text style={{ fontSize: 15, color: '#CBD5E1', lineHeight: 1.7 }}>连续运行一天是真实场景下的稳定性观察，不是受控容量验收：它证明的东西是"能用"，不是"能扛多少"。100 客户端 / 500 通道 / 1000 连接 / 100 Mbps 仍然只是拟定基线，24 小时满载多发压力测试尚未执行。</Text>
+                <Box style={{ height: 8 }} />
+                <Text style={{ fontSize: 13, color: '#94A3B8', lineHeight: 1.55 }}>这两者的差别，是写下这段字时不愿意含糊的地方。</Text>
+            </Box>
+        </Box>
+    </Box>
+
+    <Box style={{ height: 36, marginTop: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+        <Box style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+            <Box style={{ width: 6, height: 6, background: '#2563EB' }} />
+            <Text style={{ fontSize: 14, color: '#64748B' }}>RelayLink · 开源反向 TCP 代理</Text>
+        </Box>
+        <Text style={{ fontSize: 14, color: '#64748B' }}>{{PAGE}} / {{TOTAL}}</Text>
+    </Box>
+</Slide>

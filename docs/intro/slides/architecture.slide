@@ -1,0 +1,148 @@
+<Slide style={{ width: '1280px', height: '720px', padding: '20px 64px', background: '#FFFFFF' }}>
+    <Box style={{ height: 88, flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between' }}>
+        <Box>
+            <Text style={{ fontSize: 13, fontWeight: 600, color: '#2563EB', letterSpacing: 2 }}>CHAPTER 01 · 架构总览</Text>
+            <Box style={{ height: 8 }} />
+            <Text style={{ fontSize: 34, fontWeight: 'bold', color: '#0F172A', lineHeight: 1.25 }}>服务端只负责"被连接"，内网侧零入站端口</Text>
+        </Box>
+        <Box style={{ width: 4, height: 44, background: '#2563EB' }} />
+    </Box>
+
+    <Box style={{ height: 524, marginTop: 16 }}>
+        <Box style={{ height: 325, flexDirection: 'row', alignItems: 'stretch', gap: 15 }}>
+            <Box style={{ width: 252, border: '1.5px dashed #CBD5E1', borderRadius: 10, background: '#EEF2F8', padding: '14px 16px' }}>
+                <Text style={{ fontSize: 14, fontWeight: 600, color: '#64748B', letterSpacing: 1 }}>云端内网 / VPC</Text>
+                <Box style={{ height: 12 }} />
+                <Box style={{ background: '#FFFFFF', borderRadius: 8, padding: '12px 14px' }}>
+                    <Text style={{ fontSize: 16, fontWeight: 600, color: '#0F172A' }}>云端业务服务</Text>
+                    <Box style={{ height: 6 }} />
+                    <Text style={{ fontSize: 13, color: '#64748B' }}>tcp:10.20.0.10,21433</Text>
+                </Box>
+                <Box style={{ height: 10 }} />
+                <Box style={{ background: '#FFFFFF', borderRadius: 8, padding: '12px 14px' }}>
+                    <Text style={{ fontSize: 16, fontWeight: 600, color: '#0F172A' }}>管理浏览器</Text>
+                    <Box style={{ height: 6 }} />
+                    <Text style={{ fontSize: 13, color: '#64748B' }}>http://10.20.0.10:18080</Text>
+                </Box>
+                <Box style={{ height: 10 }} />
+                <Text style={{ fontSize: 13, color: '#94A3B8', lineHeight: 1.5 }}>业务端口与管理页由云安全组限制在受信任网络。</Text>
+            </Box>
+
+            <Box style={{ width: 54, justifyContent: 'center', alignItems: 'center' }}>
+                <Text style={{ fontSize: 20, color: '#2563EB', fontWeight: 'bold' }}>→</Text>
+                <Box style={{ width: '100%', height: 2, background: '#2563EB' }} />
+                <Box style={{ height: 8 }} />
+                <Text style={{ fontSize: 12, color: '#64748B', textAlign: 'center', lineHeight: 1.4 }}>业务<br />21433</Text>
+            </Box>
+
+            <Box style={{ width: 210, background: '#0F172A', borderRadius: 10, padding: '16px 16px' }}>
+                <Text style={{ fontSize: 18, fontWeight: 'bold', color: '#FFFFFF' }}>RelayLink Server</Text>
+                <Box style={{ height: 6 }} />
+                <Text style={{ fontSize: 12, color: '#60A5FA' }}>Linux / Windows</Text>
+                <Box style={{ height: 16 }} />
+                <Box style={{ height: 2, background: '#2563EB', width: 40 }} />
+                <Box style={{ height: 14 }} />
+                <Text style={{ fontSize: 13, color: '#FFFFFF', lineHeight: 1.7 }}>控制入口 7443 · TLS</Text>
+                <Text style={{ fontSize: 13, color: '#FFFFFF', lineHeight: 1.7 }}>数据入口 7444 · TCP</Text>
+                <Text style={{ fontSize: 13, color: '#CBD5E1', lineHeight: 1.7 }}>业务监听 21433…</Text>
+                <Text style={{ fontSize: 13, color: '#CBD5E1', lineHeight: 1.7 }}>管理页 18080</Text>
+                <Box style={{ height: 14 }} />
+                <Text style={{ fontSize: 12, color: '#94A3B8', lineHeight: 1.5 }}>通道、密钥、访问映射与安全组全部集中在这里。</Text>
+            </Box>
+
+            <Box style={{ width: 54, justifyContent: 'center', alignItems: 'center' }}>
+                <Text style={{ fontSize: 20, color: '#2563EB', fontWeight: 'bold' }}>←</Text>
+                <Box style={{ width: '100%', height: 2, background: '#2563EB' }} />
+                <Box style={{ height: 8 }} />
+                <Text style={{ fontSize: 12, color: '#64748B', textAlign: 'center', lineHeight: 1.4 }}>Agent<br />主动发起</Text>
+            </Box>
+
+            <Box style={{ width: 520, border: '1.5px solid #DCE3ED', borderRadius: 10, padding: '14px 16px', justifyContent: 'space-between' }}>
+                <Text style={{ fontSize: 14, fontWeight: 600, color: '#64748B', letterSpacing: 1 }}>各地内网 · 无任何公网入站端口</Text>
+                <Box style={{ height: 78, flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                    <Box style={{ width: 150, background: '#EEF2F8', borderRadius: 8, padding: '10px 12px' }}>
+                        <Text style={{ fontSize: 15, fontWeight: 600, color: '#0F172A' }}>上海 Agent</Text>
+                        <Box style={{ height: 4 }} />
+                        <Text style={{ fontSize: 12, color: '#64748B' }}>Windows Service</Text>
+                    </Box>
+                    <Box style={{ width: 46, alignItems: 'center' }}>
+                        <Text style={{ fontSize: 15, color: '#2563EB', fontWeight: 'bold' }}>→</Text>
+                        <Box style={{ width: '100%', height: 2, background: '#2563EB' }} />
+                    </Box>
+                    <Box style={{ flex: 1, background: '#FFFFFF', border: '1.5px solid #DCE3ED', borderRadius: 8, padding: '10px 12px' }}>
+                        <Text style={{ fontSize: 15, fontWeight: 600, color: '#0F172A' }}>SQL Server</Text>
+                        <Box style={{ height: 4 }} />
+                        <Text style={{ fontSize: 12, color: '#64748B' }}>192.168.10.20:1433</Text>
+                    </Box>
+                </Box>
+                <Box style={{ height: 78, flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                    <Box style={{ width: 150, background: '#EEF2F8', borderRadius: 8, padding: '10px 12px' }}>
+                        <Text style={{ fontSize: 15, fontWeight: 600, color: '#0F172A' }}>成都 Agent</Text>
+                        <Box style={{ height: 4 }} />
+                        <Text style={{ fontSize: 12, color: '#64748B' }}>Windows Service</Text>
+                    </Box>
+                    <Box style={{ width: 46, alignItems: 'center' }}>
+                        <Text style={{ fontSize: 15, color: '#2563EB', fontWeight: 'bold' }}>→</Text>
+                        <Box style={{ width: '100%', height: 2, background: '#2563EB' }} />
+                    </Box>
+                    <Box style={{ flex: 1, background: '#FFFFFF', border: '1.5px solid #DCE3ED', borderRadius: 8, padding: '10px 12px' }}>
+                        <Text style={{ fontSize: 15, fontWeight: 600, color: '#0F172A' }}>SQL Server</Text>
+                        <Box style={{ height: 4 }} />
+                        <Text style={{ fontSize: 12, color: '#64748B' }}>192.168.10.20:1433</Text>
+                    </Box>
+                </Box>
+                <Box style={{ height: 78, flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                    <Box style={{ width: 150, background: '#EEF2F8', borderRadius: 8, padding: '10px 12px' }}>
+                        <Text style={{ fontSize: 15, fontWeight: 600, color: '#0F172A' }}>门店 Agent</Text>
+                        <Box style={{ height: 4 }} />
+                        <Text style={{ fontSize: 12, color: '#64748B' }}>Windows Service</Text>
+                    </Box>
+                    <Box style={{ width: 46, alignItems: 'center' }}>
+                        <Text style={{ fontSize: 15, color: '#2563EB', fontWeight: 'bold' }}>→</Text>
+                        <Box style={{ width: '100%', height: 2, background: '#2563EB' }} />
+                    </Box>
+                    <Box style={{ flex: 1, background: '#FFFFFF', border: '1.5px solid #DCE3ED', borderRadius: 8, padding: '10px 12px' }}>
+                        <Text style={{ fontSize: 15, fontWeight: 600, color: '#0F172A' }}>其他 TCP 服务</Text>
+                        <Box style={{ height: 4 }} />
+                        <Text style={{ fontSize: 12, color: '#64748B' }}>内网可达即可</Text>
+                    </Box>
+                </Box>
+            </Box>
+        </Box>
+
+        <Box style={{ height: 185, marginTop: 14, flexDirection: 'row', gap: 26 }}>
+            <Box style={{ width: 420, background: '#FFFFFF', border: '1.5px solid #DCE3ED', borderRadius: 10, padding: '20px 22px', justifyContent: 'space-between' }}>
+                <Box>
+                    <Text style={{ fontSize: 20, fontWeight: 600, color: '#0F172A' }}>出网是唯一前提</Text>
+                    <Box style={{ height: 10 }} />
+                    <Text style={{ fontSize: 15, color: '#64748B', lineHeight: 1.6 }}>只要 Agent 所在网络允许出站 TCP 到控制端口和数据端口，链路就成立。内网不需要任何入站映射、不需要公网 IP、不需要改防火墙放行规则。</Text>
+                </Box>
+                <Text style={{ fontSize: 13, color: '#2563EB', fontWeight: 600 }}>部署前置条件最少化</Text>
+            </Box>
+            <Box style={{ width: 300, background: '#EEF2F8', borderRadius: 10, padding: '20px 22px', justifyContent: 'space-between' }}>
+                <Box>
+                    <Text style={{ fontSize: 20, fontWeight: 600, color: '#0F172A' }}>配置在服务端</Text>
+                    <Box style={{ height: 10 }} />
+                    <Text style={{ fontSize: 15, color: '#64748B', lineHeight: 1.6 }}>每客户端一个 JSON 文件：独立密钥、通道、访问映射。改完立即下发新快照。</Text>
+                </Box>
+                <Text style={{ fontSize: 13, color: '#64748B', fontWeight: 600 }}>集中管理 · 版本化下发</Text>
+            </Box>
+            <Box style={{ width: 380, background: '#FFFFFF', border: '1.5px solid #DCE3ED', borderRadius: 10, padding: '20px 22px', justifyContent: 'space-between' }}>
+                <Box>
+                    <Text style={{ fontSize: 20, fontWeight: 600, color: '#0F172A' }}>Agent 只认下发的快照</Text>
+                    <Box style={{ height: 10 }} />
+                    <Text style={{ fontSize: 15, color: '#64748B', lineHeight: 1.6 }}>本地不落地通道配置，拿不到快照就不启动转发——避免机器重启后拿一份过期缓存继续转发流量。</Text>
+                </Box>
+                <Text style={{ fontSize: 13, color: '#2563EB', fontWeight: 600 }}>fail closed，不是 fail open</Text>
+            </Box>
+        </Box>
+    </Box>
+
+    <Box style={{ height: 36, marginTop: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+        <Box style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+            <Box style={{ width: 6, height: 6, background: '#2563EB' }} />
+            <Text style={{ fontSize: 14, color: '#64748B' }}>RelayLink · 开源反向 TCP 代理</Text>
+        </Box>
+        <Text style={{ fontSize: 14, color: '#64748B' }}>{{PAGE}} / {{TOTAL}}</Text>
+    </Box>
+</Slide>

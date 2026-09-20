@@ -13,6 +13,7 @@
       "displayName": "ERP SQL Server",
       "enabled": true,
       "authorizedClientsOnly": false,
+      "securityGroupId": "office",
       "listenAddress": "0.0.0.0",
       "listenPort": 21433,
       "targetHost": "192.168.10.20",

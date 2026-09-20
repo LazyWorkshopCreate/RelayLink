@@ -1,0 +1,71 @@
+<Slide style={{ width: '1280px', height: '720px', padding: '20px 64px', background: '#FFFFFF' }}>
+    <Box style={{ height: 88, flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between' }}>
+        <Box>
+            <Text style={{ fontSize: 13, fontWeight: 600, color: '#2563EB', letterSpacing: 2 }}>CHAPTER 01 · 现有方案</Text>
+            <Box style={{ height: 8 }} />
+            <Text style={{ fontSize: 34, fontWeight: 'bold', color: '#0F172A', lineHeight: 1.25 }}>能连上是一回事，管得住是另一回事</Text>
+        </Box>
+        <Box style={{ width: 4, height: 44, background: '#2563EB' }} />
+    </Box>
+
+    <Box style={{ height: 524, marginTop: 16, flexDirection: 'row', gap: 28 }}>
+        <Box style={{ width: 300, background: '#0F172A', borderRadius: 10, padding: '28px 26px', justifyContent: 'space-between' }}>
+            <Box>
+                <Text style={{ fontSize: 13, fontWeight: 600, color: '#60A5FA', letterSpacing: 2 }}>判断</Text>
+                <Box style={{ height: 16 }} />
+                <Text style={{ fontSize: 30, fontWeight: 'bold', color: '#FFFFFF', lineHeight: 1.3 }}>缺口不在<br />"能不能连上"<br />在"谁管"</Text>
+            </Box>
+            <Box>
+                <Box style={{ width: 52, height: 3, background: '#2563EB' }} />
+                <Box style={{ height: 18 }} />
+                <Text style={{ fontSize: 15, color: '#CBD5E1', lineHeight: 1.65 }}>RelayLink 把鉴权、配置下发、可观测、撤销做进服务端，而不是留给使用者自己拼。</Text>
+                <Box style={{ height: 12 }} />
+                <Text style={{ fontSize: 15, color: '#FFFFFF', fontWeight: '600', lineHeight: 1.65 }}>对小型机构和个人，价格与上手难度本身就是硬约束——不是"多花点时间就能学会"。</Text>
+            </Box>
+        </Box>
+
+        <Box style={{ flex: 1 }}>
+            <Box style={{ height: 40, flexDirection: 'row', gap: 16, alignItems: 'center', borderBottom: '2px solid #0F172A' }}>
+                <Text style={{ fontSize: 12.5, fontWeight: 600, color: '#64748B', width: 190, letterSpacing: 1 }}>方案</Text>
+                <Text style={{ fontSize: 12.5, fontWeight: 600, color: '#64748B', width: 200, letterSpacing: 1 }}>能做</Text>
+                <Text style={{ fontSize: 12.5, fontWeight: 600, color: '#64748B', flex: 1, letterSpacing: 1 }}>卡在哪</Text>
+            </Box>
+
+            <Box style={{ height: 106, flexDirection: 'row', gap: 16, padding: '14px 0', borderBottom: '1px solid #DCE3ED' }}>
+                <Text style={{ fontSize: 16.5, fontWeight: 600, color: '#0F172A', width: 190, lineHeight: 1.45 }}>VPN / SD-WAN</Text>
+                <Text style={{ fontSize: 13.5, color: '#64748B', width: 200, lineHeight: 1.6 }}>把两地网络拉平，什么协议都能跑。</Text>
+                <Text style={{ fontSize: 14, color: '#0F172A', flex: 1, lineHeight: 1.6 }}>要么在门店侧开入站，要么上专线和硬件；几百个点位的设备、证书、账号生命周期本身就是一份全职工作。</Text>
+            </Box>
+
+            <Box style={{ height: 106, flexDirection: 'row', gap: 16, padding: '14px 0', borderBottom: '1px solid #DCE3ED' }}>
+                <Text style={{ fontSize: 16.5, fontWeight: 600, color: '#0F172A', width: 190, lineHeight: 1.45 }}>frp 一类<br />反向代理</Text>
+                <Text style={{ fontSize: 13.5, color: '#64748B', width: 200, lineHeight: 1.6 }}>反向连接、端口映射，能力上确实够。</Text>
+                <Text style={{ fontSize: 14, color: '#0F172A', flex: 1, lineHeight: 1.6 }}>它给的是能力，不是系统：配置下发、按客户端隔离、撤销存量连接、流量计量都要自己搭。</Text>
+            </Box>
+
+            <Box style={{ height: 106, flexDirection: 'row', gap: 16, padding: '14px 0', borderBottom: '1px solid #DCE3ED' }}>
+                <Text style={{ fontSize: 16.5, fontWeight: 600, color: '#0F172A', width: 190, lineHeight: 1.45 }}>ssh -R /<br />自写脚本</Text>
+                <Text style={{ fontSize: 13.5, color: '#64748B', width: 200, lineHeight: 1.6 }}>零成本，几分钟就能打通一条。</Text>
+                <Text style={{ fontSize: 14, color: '#0F172A', flex: 1, lineHeight: 1.6 }}>没有身份模型，没有重连与半关闭的语义保证，也没有可观测性。一条好用，一百条是事故。</Text>
+            </Box>
+
+            <Box style={{ height: 106, flexDirection: 'row', gap: 16, padding: '14px 0' }}>
+                <Text style={{ fontSize: 16.5, fontWeight: 600, color: '#0F172A', width: 190, lineHeight: 1.45 }}>商业穿透 /<br />远程接入 SaaS</Text>
+                <Text style={{ fontSize: 13.5, color: '#64748B', width: 200, lineHeight: 1.6 }}>开箱即用，有现成控制台。</Text>
+                <Text style={{ fontSize: 14, color: '#0F172A', flex: 1, lineHeight: 1.6 }}>按点位或带宽计费，几百个门店是持续支出；数据要过第三方链路，合规多一道关。</Text>
+            </Box>
+
+            <Box style={{ height: 47, marginTop: 8 }}>
+                <Text style={{ fontSize: 12.5, color: '#64748B', lineHeight: 1.55 }}>公平地说：frp 与 ssh -R 都能靠扩展达到要求，仓库文档里的适配判断只针对本项目需求；VPN 也不是不能用，它只是不在小型机构的预算和人力里。</Text>
+            </Box>
+        </Box>
+    </Box>
+
+    <Box style={{ height: 36, marginTop: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+        <Box style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+            <Box style={{ width: 6, height: 6, background: '#2563EB' }} />
+            <Text style={{ fontSize: 14, color: '#64748B' }}>RelayLink · 开源反向 TCP 代理</Text>
+        </Box>
+        <Text style={{ fontSize: 14, color: '#64748B' }}>{{PAGE}} / {{TOTAL}}</Text>
+    </Box>
+</Slide>
