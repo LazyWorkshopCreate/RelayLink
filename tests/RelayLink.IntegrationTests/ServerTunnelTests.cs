@@ -18,6 +18,35 @@ namespace RelayLink.IntegrationTests;
 public sealed class ServerTunnelTests
 {
     [Fact]
+    public async Task Dashboard_snapshot_batches_clients_channels_and_mappings_without_secrets()
+    {
+        using var fixture = new TunnelFixture();
+        await fixture.StartAsync();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        using var http = new HttpClient();
+        var endpoint = $"http://127.0.0.1:{fixture.DashboardPort}/api/v1/dashboard/snapshot?page=1&pageSize=100";
+
+        using var response = await http.GetAsync(endpoint, deadline.Token);
+        response.EnsureSuccessStatusCode();
+        var text = await response.Content.ReadAsStringAsync(deadline.Token);
+        using var body = JsonDocument.Parse(text);
+        Assert.Equal(1, body.RootElement.GetProperty("page").GetInt32());
+        Assert.Equal(100, body.RootElement.GetProperty("pageSize").GetInt32());
+        Assert.Equal(1, body.RootElement.GetProperty("total").GetInt32());
+        Assert.Equal(1, body.RootElement.GetProperty("overview").GetProperty("clientsTotal").GetInt32());
+        var client = Assert.Single(body.RootElement.GetProperty("clients").EnumerateArray());
+        Assert.Equal("test-agent", client.GetProperty("clientId").GetString());
+        Assert.Equal("echo", Assert.Single(client.GetProperty("channels").EnumerateArray()).GetProperty("channelId").GetString());
+        Assert.Empty(client.GetProperty("mappings").EnumerateArray());
+        Assert.DoesNotContain(fixture.Secret, text, StringComparison.Ordinal);
+        Assert.DoesNotContain("accessSecret", text, StringComparison.OrdinalIgnoreCase);
+
+        using var invalid = await http.GetAsync(
+            $"http://127.0.0.1:{fixture.DashboardPort}/api/v1/dashboard/snapshot?pageSize=101", deadline.Token);
+        Assert.Equal(HttpStatusCode.BadRequest, invalid.StatusCode);
+    }
+
+    [Fact]
     public async Task Audit_write_failure_prevents_successful_admin_login()
     {
         using var fixture = new TunnelFixture();

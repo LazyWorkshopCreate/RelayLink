@@ -55,3 +55,35 @@ jobs:
         run: dotnet test tests/RelayLink.UnitTests/RelayLink.UnitTests.csproj --configuration Release --no-restore -p:SkipAdminWebBuild=true
       - name: Run .NET integration tests (including peer TLS tests)
         run: dotnet test tests/RelayLink.IntegrationTests/RelayLink.IntegrationTests.csproj --configuration Release --no-restore -p:EnablePeerTlsTests=true -p:SkipAdminWebBuild=true
+
+  verify-macos-agent:
+    name: Verify macOS Agent (${{ matrix.architecture }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15-intel
+            runtime_identifier: osx-x64
+            architecture: x86_64
+          - runner: macos-15
+            runtime_identifier: osx-arm64
+            architecture: arm64
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v6
+        id: dotnet
+        with:
+          dotnet-version: 10.0.x
+          dotnet-quality: ga
+      - name: Select stable .NET SDK
+        run: dotnet new globaljson --sdk-version "${{ steps.dotnet.outputs.dotnet-version }}" --roll-forward disable
+      - name: Restore native integration tests
+        run: dotnet restore tests/RelayLink.IntegrationTests/RelayLink.IntegrationTests.csproj --configfile NuGet.Config
+      - name: Run native integration tests (including peer TLS tests)
+        run: dotnet test tests/RelayLink.IntegrationTests/RelayLink.IntegrationTests.csproj --configuration Release --no-restore -p:EnablePeerTlsTests=true -p:SkipAdminWebBuild=true
+      - name: Verify native Agent and launchd lifecycle
+        run: ./scripts/test-macos-agent.sh '${{ matrix.runtime_identifier }}' '${{ matrix.architecture }}'

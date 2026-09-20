@@ -1,0 +1,25 @@
+[Unit]
+Description=RelayLink TCP Tunnel Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+User=relaylink-agent
+Group=relaylink-agent
+WorkingDirectory=/opt/relaylink/agent
+ExecStart=/opt/relaylink/agent/RelayLink.Agent --config /var/lib/relaylink-agent/agent.json
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=40
+LimitNOFILE=16384
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/relaylink-agent
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

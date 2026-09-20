@@ -49,7 +49,7 @@ jobs:
       contents: read
 
   package-linux:
-    name: Package Linux Server
+    name: Package Linux Server and Agent
     needs: [prepare, verify]
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -78,6 +78,8 @@ jobs:
         run: dotnet restore src/RelayLink.Server/RelayLink.Server.csproj --runtime linux-x64 --configfile NuGet.Config
       - name: Publish self-contained Server
         run: dotnet publish src/RelayLink.Server/RelayLink.Server.csproj --configuration Release --runtime linux-x64 --self-contained true --no-restore --output artifacts/publish/linux-x64/RelayLink.Server
+      - name: Publish self-contained Agent
+        run: pwsh ./scripts/publish.ps1 -RuntimeIdentifier linux-x64 -Component Agent
       - name: Archive Server
         env:
           RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
@@ -85,10 +87,20 @@ jobs:
           test -f artifacts/publish/linux-x64/RelayLink.Server/wwwroot/index.html
           mkdir -p artifacts/release
           tar -C artifacts/publish/linux-x64/RelayLink.Server -czf "artifacts/release/RelayLink-Server-linux-x64-${RELEASE_VERSION}.tar.gz" .
+      - name: Archive Agent
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: tar -C artifacts/publish/linux-x64/RelayLink.Agent -czf "artifacts/release/RelayLink-Agent-linux-x64-${RELEASE_VERSION}.tar.gz" .
       - uses: actions/upload-artifact@v7
         with:
           name: release-server-linux-x64
-          path: artifacts/release/*.tar.gz
+          path: artifacts/release/RelayLink-Server-linux-x64-*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-agent-linux-x64
+          path: artifacts/release/RelayLink-Agent-linux-x64-*.tar.gz
           if-no-files-found: error
           retention-days: 7
 
@@ -158,9 +170,49 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  package-macos:
+    name: Package macOS Agents
+    needs: [prepare, verify]
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v6
+        id: dotnet
+        with:
+          dotnet-version: 10.0.x
+          dotnet-quality: ga
+      - name: Select stable .NET SDK
+        run: dotnet new globaljson --sdk-version "${{ steps.dotnet.outputs.dotnet-version }}" --roll-forward disable
+      - name: Publish Intel Agent
+        run: pwsh ./scripts/publish.ps1 -RuntimeIdentifier osx-x64 -Component Agent
+      - name: Publish Apple Silicon Agent
+        run: pwsh ./scripts/publish.ps1 -RuntimeIdentifier osx-arm64 -Component Agent
+      - name: Archive Agents
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          mkdir -p artifacts/release
+          tar -C artifacts/publish/osx-x64/RelayLink.Agent -czf "artifacts/release/RelayLink-Agent-osx-x64-${RELEASE_VERSION}.tar.gz" .
+          tar -C artifacts/publish/osx-arm64/RelayLink.Agent -czf "artifacts/release/RelayLink-Agent-osx-arm64-${RELEASE_VERSION}.tar.gz" .
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-agent-osx-x64
+          path: artifacts/release/RelayLink-Agent-osx-x64-*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-agent-osx-arm64
+          path: artifacts/release/RelayLink-Agent-osx-arm64-*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
   publish:
     name: Publish GitHub Release
-    needs: [prepare, package-linux, package-windows]
+    needs: [prepare, package-linux, package-windows, package-macos]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -181,8 +233,8 @@ jobs:
         run: |
           shopt -s nullglob
           assets=(release-assets/*)
-          if (( ${#assets[@]} != 3 )); then
-            echo "Expected Linux Server, Windows Server and Agent installer assets; found ${#assets[@]}" >&2
+          if (( ${#assets[@]} != 6 )); then
+            echo "Expected Linux Server, Linux Agent, Windows Server, Windows Agent installer, macOS Intel Agent and macOS Apple Silicon Agent assets; found ${#assets[@]}" >&2
             exit 1
           fi
           sha256sum "${assets[@]}" | sed 's#release-assets/##' > release-assets/SHA256SUMS

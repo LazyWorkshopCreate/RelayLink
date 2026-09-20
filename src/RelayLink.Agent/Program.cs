@@ -27,6 +27,7 @@ if (parsed.ShowE2eFingerprint)
 var builder = Host.CreateApplicationBuilder(args);
 builder.Logging.ClearProviders();
 builder.Logging.AddJsonConsole(console => console.IncludeScopes = true);
+builder.Services.AddSystemd();
 builder.Services.AddWindowsService(options => options.ServiceName = "RelayLink Agent");
 builder.Services.AddSingleton(configuration);
 builder.Services.AddSingleton<AgentStatus>();

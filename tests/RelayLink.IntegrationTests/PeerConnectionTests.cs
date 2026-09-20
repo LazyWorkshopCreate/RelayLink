@@ -19,6 +19,22 @@ public sealed class PeerConnectionTests
 {
 #if PEER_TLS_TESTS
     [Fact]
+    public async Task Standard_private_channel_can_reach_server_dashboard_through_target_agent()
+    {
+        using var fixture = new Fixture();
+        await fixture.StartAsync(mapDashboard: true);
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(40));
+        await fixture.WaitOnlineAsync(deadline.Token);
+        var localPort = await fixture.WaitPortAsync("to-server-dashboard", deadline.Token);
+
+        using var http = new HttpClient();
+        using var overview = await http.GetFromJsonAsync<JsonDocument>(
+            $"http://127.0.0.1:{localPort}/api/v1/overview", deadline.Token);
+
+        Assert.Equal(2, overview!.RootElement.GetProperty("clientsOnline").GetInt32());
+    }
+
+    [Fact]
     public async Task Admin_can_list_and_disconnect_one_private_channel_connection()
     {
         using var fixture = new Fixture();
@@ -170,13 +186,25 @@ public sealed class PeerConnectionTests
 
         await SaveAsync(true);
         await fixture.WaitOnlineAsync(token);
-        using var restored = await fixture.ConnectLocalAsync(localPort, token);
-        var restoredStream = restored.GetStream();
-        await restoredStream.WriteAsync(new byte[] { 43 }, token);
-        restored.Client.Shutdown(SocketShutdown.Send);
-        var returned = new byte[1];
-        await restoredStream.ReadExactlyAsync(returned, token);
-        Assert.Equal((byte)43, returned[0]);
+        // A reconnected session is visible before its configuration acknowledgement; require eventual usability.
+        while (true)
+        {
+            using var restored = await fixture.ConnectLocalAsync(localPort, token);
+            try
+            {
+                var restoredStream = restored.GetStream();
+                await restoredStream.WriteAsync(new byte[] { 43 }, token);
+                restored.Client.Shutdown(SocketShutdown.Send);
+                var returned = new byte[1];
+                await restoredStream.ReadExactlyAsync(returned, token);
+                Assert.Equal((byte)43, returned[0]);
+                break;
+            }
+            catch (IOException)
+            {
+                await Task.Delay(100, token);
+            }
+        }
         Assert.Equal(2, fixture.TargetConnections);
     }
 
@@ -524,7 +552,7 @@ public sealed class PeerConnectionTests
         public string CallerSecret { get; private set; } = string.Empty;
         public string TargetFingerprint { get; private set; } = string.Empty;
 
-        public async Task StartAsync(bool startCallerAgent = true)
+        public async Task StartAsync(bool startCallerAgent = true, bool mapDashboard = false)
         {
             var clients = Path.Combine(directory, "clients");
             var visitedDirectory = Path.Combine(directory, "visited");
@@ -542,18 +570,27 @@ public sealed class PeerConnectionTests
             var secret = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
             var accessSecret = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
             var accessSecretB = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
+            var dashboardAccessSecret = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
             var fingerprint = CreateIdentity(Path.Combine(visitedDirectory, "visited.e2e.pfx"));
             TargetFingerprint = fingerprint;
-            var visited = new ClientConfiguration(1, "visited", "Visited", true, secret, 30, 20,
-            [new ChannelConfiguration("private", "Private", true, "127.0.0.1", ProxyPort, "127.0.0.1", targetPort, 10, 5)
+            var visitedChannels = new List<ChannelConfiguration>
+            { new ChannelConfiguration("private", "Private", true, "127.0.0.1", ProxyPort, "127.0.0.1", targetPort, 10, 5)
             { AuthorizedClientsOnly = true, AccessSecret = accessSecret },
              new ChannelConfiguration("private-b", "Private B", true, "127.0.0.1", FreePort(), "127.0.0.1", targetPortB, 10, 5)
-            { AuthorizedClientsOnly = true, AccessSecret = accessSecretB }]) { E2eCertificateSha256 = fingerprint };
+            { AuthorizedClientsOnly = true, AccessSecret = accessSecretB } };
+            if (mapDashboard)
+                visitedChannels.Add(new ChannelConfiguration("server-dashboard", "Server Dashboard", true, "127.0.0.1", FreePort(), "127.0.0.1", DashboardPort, 10, 5)
+                { AuthorizedClientsOnly = true, AccessSecret = dashboardAccessSecret });
+            var visited = new ClientConfiguration(1, "visited", "Visited", true, secret, 30, 20, visitedChannels) { E2eCertificateSha256 = fingerprint };
             var callerSecret = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
             CallerSecret = callerSecret;
+            var callerMappings = new List<OutboundMappingConfiguration>
+            { new OutboundMappingConfiguration("to-visited", true, "127.0.0.1", "visited", "private", accessSecret, fingerprint),
+              new OutboundMappingConfiguration("to-visited-b", true, "127.0.0.1", "visited", "private-b", accessSecretB, fingerprint) };
+            if (mapDashboard)
+                callerMappings.Add(new OutboundMappingConfiguration("to-server-dashboard", true, "127.0.0.1", "visited", "server-dashboard", dashboardAccessSecret, fingerprint));
             var caller = new ClientConfiguration(1, "caller", "Caller", true, callerSecret, 30, 20, [])
-            { OutboundMappings = [new OutboundMappingConfiguration("to-visited", true, "127.0.0.1", "visited", "private", accessSecret, fingerprint),
-                                  new OutboundMappingConfiguration("to-visited-b", true, "127.0.0.1", "visited", "private-b", accessSecretB, fingerprint)] };
+            { OutboundMappings = callerMappings };
             var intruder = new ClientConfiguration(1, "intruder", "Intruder", true, IntruderSecret, 5, 2, []);
             var json = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
             await File.WriteAllTextAsync(Path.Combine(clients, "visited.json"), JsonSerializer.Serialize(visited, json));

@@ -2,8 +2,8 @@
 
 文档 ID：DEV-001\
 状态：Active\
-版本：v1.2.0\
-更新日期：2026-09-17
+版本：v1.4.0\
+更新日期：2026-09-20
 
 ```text
 RelayLink/
@@ -28,13 +28,14 @@ RelayLink/
 │   ├── RelayLink.Transport/  TLS、转发和连接生命周期
 │   ├── RelayLink.AdminWeb/   React/TypeScript 管理端源码和构建配置
 │   ├── RelayLink.Server/     Linux/Windows 服务端、内网仪表盘与管理 API
-│   └── RelayLink.Agent/      Windows 客户端服务
+│   └── RelayLink.Agent/      Windows/Linux/macOS 客户端服务
 ├── tests/
 │   ├── RelayLink.UnitTests/  配置、帧、状态机及令牌测试
 │   └── RelayLink.IntegrationTests/ TCP/TLS、故障和 SQL 集成测试
 ├── tools/                    模拟目标与模拟调用方
 ├── config/examples/          可提交的虚构配置示例
 ├── deploy/linux/             Linux systemd 模板及部署说明
+├── deploy/macos/             macOS launchd 模板及部署说明
 ├── deploy/windows/           Windows Server/Agent Service 脚本及说明
 └── scripts/                  开发、验证和打包脚本
 ```

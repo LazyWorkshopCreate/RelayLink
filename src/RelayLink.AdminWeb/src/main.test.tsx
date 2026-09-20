@@ -132,19 +132,31 @@ function fakeApi(withMapping = false) {
             while (used.has(listenPort)) listenPort++;
             return ok({ listenPort });
         }
-        if (path === '/api/v1/overview')
+        if (path.startsWith('/api/v1/dashboard/snapshot?'))
             return ok({
-                statsSinceUtc: '2026-09-16T10:00:00Z',
                 snapshotTimeUtc: '2026-09-16T10:01:00Z',
-                clientsOnline: 1,
-                clientsTotal: clients.length,
-                channelsAvailable: channelSets['node-a'].length + channelSets['node-b'].length,
-                channelsTotal: channelSets['node-a'].length + channelSets['node-b'].length,
-                activeConnections: 0,
-                bytesToTarget: 4096,
-                bytesToCaller: 4100,
+                page: 1,
+                pageSize: 100,
+                total: clients.length,
+                overview: {
+                    statsSinceUtc: '2026-09-16T10:00:00Z',
+                    snapshotTimeUtc: '2026-09-16T10:01:00Z',
+                    clientsOnline: 1,
+                    clientsTotal: clients.length,
+                    channelsAvailable: channelSets['node-a'].length + channelSets['node-b'].length,
+                    channelsTotal: channelSets['node-a'].length + channelSets['node-b'].length,
+                    activeConnections: 0,
+                    bytesToTarget: 4096,
+                    bytesToCaller: 4100,
+                    peerCiphertextToTarget: 0,
+                    peerCiphertextToCaller: 0,
+                },
+                clients: clients.map((client) => ({
+                    ...client,
+                    channels: channelSets[String(client.clientId)] || [],
+                    mappings: mappingSets[String(client.clientId)] || [],
+                })),
             });
-        if (path.startsWith('/api/v1/clients?page=')) return ok({ clients, total: clients.length });
         if (path.endsWith('/channels') && method === 'GET') {
             const clientId = path.split('/')[4];
             return ok({ channels: channelSets[clientId] || [] });
@@ -288,7 +300,10 @@ describe('管理控制台', () => {
         expect(within(mappingTable).getByText('node-a-echo')).toBeTruthy();
         expect(within(mappingTable).getByText('127.0.0.1:23456')).toBeTruthy();
         expect(within(mappingTable).queryByRole('button', { name: '删除' })).toBeNull();
-        expect(calls.some((call) => call.path === '/api/v1/clients/node-b/mappings')).toBe(true);
+        expect(calls.filter((call) => call.path.startsWith('/api/v1/dashboard/snapshot?'))).toHaveLength(1);
+        expect(calls.some((call) => call.path === '/api/v1/overview')).toBe(false);
+        expect(calls.some((call) => call.path === '/api/v1/clients/node-b/channels')).toBe(false);
+        expect(calls.some((call) => call.path === '/api/v1/clients/node-b/mappings')).toBe(false);
         expect(calls.some((call) => call.path.includes('/admin/clients/node-b/mappings'))).toBe(false);
         await user.click(screen.getByRole('button', { name: /4\.0 KiB \/ 4\.0 KiB/ }));
         expect(await screen.findByRole('img', { name: '目标和访问方每分钟流量折线图' })).toBeTruthy();

@@ -175,6 +175,8 @@ app.MapGet("/api/v1/overview", (ServerRuntime runtime, MetricsRegistry metrics) 
     peerCiphertextToCaller = snapshots.Sum(snapshot => snapshot.PeerCiphertextToCaller)
     });
 });
+app.MapGet("/api/v1/dashboard/snapshot", (HttpRequest request, ServerRuntime runtime, MetricsRegistry metrics) =>
+    GetDashboardSnapshot(request, runtime, metrics));
 app.MapGet("/api/v1/clients", (HttpRequest request, ServerRuntime runtime) =>
 {
     var query = request.Query["query"].ToString();
@@ -328,6 +330,108 @@ static IResult GetMappingStatus(string id, ServerRuntime runtime)
         var address = agentSession?.PeerAddresses.FirstOrDefault(item => item.MappingId == mapping.MappingId);
         return new { mapping.MappingId, mapping.Enabled, localAddress = address?.LocalAddress, localPort = address?.LocalPort, available = mapping.Enabled && address is not null, mapping.TargetClientId, mapping.TargetChannelId };
     }).ToArray() });
+}
+
+static IResult GetDashboardSnapshot(HttpRequest request, ServerRuntime runtime, MetricsRegistry metrics)
+{
+    if (!TryPositiveQuery(request, "page", 1, int.MaxValue, out var page) ||
+        !TryPositiveQuery(request, "pageSize", 100, 100, out var pageSize))
+        return Results.BadRequest(new { error = "Invalid page or pageSize." });
+
+    var snapshotTimeUtc = DateTimeOffset.UtcNow;
+    var allClients = runtime.Configuration.Clients.Values
+        .OrderBy(client => client.ClientId, StringComparer.Ordinal)
+        .ToArray();
+    var offset = (long)(page - 1) * pageSize;
+    var pageClients = (offset >= allClients.Length ? Enumerable.Empty<ClientConfiguration>() : allClients.Skip((int)offset))
+        .Take(pageSize)
+        .Select(client =>
+        {
+            var online = runtime.Sessions.TryGet(client.ClientId, out var session);
+            var channels = client.Channels.Select(channel =>
+            {
+                var metric = metrics.For(client.ClientId, channel.ChannelId).Snapshot();
+                return new
+                {
+                    channelId = channel.ChannelId,
+                    displayName = channel.DisplayName,
+                    listenAddress = channel.ListenAddress,
+                    listenPort = channel.ListenPort,
+                    securityGroupId = channel.SecurityGroupId,
+                    targetHost = channel.TargetHost,
+                    targetPort = channel.TargetPort,
+                    enabled = channel.Enabled,
+                    authorizedClientsOnly = channel.AuthorizedClientsOnly,
+                    maxConnections = channel.MaxConnections,
+                    targetConnectTimeoutSeconds = channel.TargetConnectTimeoutSeconds,
+                    listenerState = channel.AuthorizedClientsOnly ? "peer-only" : channel.Enabled ? "listening" : "stopped",
+                    available = channel.Enabled && !channel.AuthorizedClientsOnly && online,
+                    pendingConnections = channel.AuthorizedClientsOnly ? metric.PeerPendingConnections : metric.PendingConnections,
+                    activeConnections = channel.AuthorizedClientsOnly ? metric.PeerActiveConnections : metric.ActiveConnections,
+                    acceptedTotal = channel.AuthorizedClientsOnly ? metric.PeerAcceptedTotal : metric.AcceptedTotal,
+                    openedTotal = channel.AuthorizedClientsOnly ? metric.PeerOpenedTotal : metric.OpenedTotal,
+                    openFailedTotal = channel.AuthorizedClientsOnly ? metric.PeerOpenFailedTotal : metric.OpenFailedTotal,
+                    metric.NormalClosedTotal,
+                    metric.AbortedTotal,
+                    metric.BytesToTarget,
+                    metric.BytesToCaller,
+                    metric.PeerCiphertextToTarget,
+                    metric.PeerCiphertextToCaller,
+                    targetLastResult = metric.TargetLastResult?.Result,
+                    targetLastResultTimeUtc = metric.TargetLastResult?.TimeUtc
+                };
+            }).ToArray();
+            var mappings = client.OutboundMappings.Select(mapping =>
+            {
+                var address = session?.PeerAddresses.FirstOrDefault(item => item.MappingId == mapping.MappingId);
+                return new
+                {
+                    mapping.MappingId,
+                    mapping.Enabled,
+                    localAddress = address?.LocalAddress,
+                    localPort = address?.LocalPort,
+                    available = mapping.Enabled && address is not null,
+                    mapping.TargetClientId,
+                    mapping.TargetChannelId
+                };
+            }).ToArray();
+            return new
+            {
+                clientId = client.ClientId,
+                displayName = client.DisplayName,
+                enabled = client.Enabled,
+                client.E2eCertificateSha256,
+                client.MaxConnections,
+                client.MaxPendingConnections,
+                online,
+                connectedAtUtc = session?.ConnectedAtUtc,
+                lastHeartbeatUtc = session?.LastHeartbeatUtc,
+                heartbeatRttMs = session?.LastHeartbeatRtt?.TotalMilliseconds,
+                agentVersion = session?.AgentVersion,
+                channels,
+                mappings
+            };
+        }).ToArray();
+    var channelMetrics = allClients
+        .SelectMany(client => client.Channels.Select(channel => metrics.For(client.ClientId, channel.ChannelId).Snapshot()))
+        .ToArray();
+    var overview = new
+    {
+        serverInstanceId = runtime.InstanceId,
+        statsSinceUtc = runtime.StartedAtUtc,
+        snapshotTimeUtc,
+        clientsOnline = runtime.Sessions.Count,
+        clientsTotal = allClients.Length,
+        channelsTotal = allClients.Sum(client => client.Channels.Count),
+        channelsAvailable = allClients.Sum(client => client.Channels.Count(channel =>
+            channel.Enabled && !channel.AuthorizedClientsOnly && runtime.Sessions.TryGet(client.ClientId, out _))),
+        activeConnections = channelMetrics.Sum(snapshot => snapshot.ActiveConnections + snapshot.PeerActiveConnections),
+        bytesToTarget = channelMetrics.Sum(snapshot => snapshot.BytesToTarget),
+        bytesToCaller = channelMetrics.Sum(snapshot => snapshot.BytesToCaller),
+        peerCiphertextToTarget = channelMetrics.Sum(snapshot => snapshot.PeerCiphertextToTarget),
+        peerCiphertextToCaller = channelMetrics.Sum(snapshot => snapshot.PeerCiphertextToCaller)
+    };
+    return Results.Ok(new { snapshotTimeUtc, page, pageSize, total = allClients.Length, overview, clients = pageClients });
 }
 
 static (string ConfigurationPath, bool CheckOnly) ParseArguments(string[] arguments)

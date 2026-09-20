@@ -33,7 +33,11 @@ internal sealed class AgentIdentity : IDisposable
 
     private static AgentIdentity Load(string path)
     {
-        var keyStorage = OperatingSystem.IsWindows() ? X509KeyStorageFlags.UserKeySet : X509KeyStorageFlags.EphemeralKeySet;
+        var keyStorage = OperatingSystem.IsWindows()
+            ? X509KeyStorageFlags.UserKeySet
+            : OperatingSystem.IsMacOS()
+                ? X509KeyStorageFlags.DefaultKeySet
+                : X509KeyStorageFlags.EphemeralKeySet;
         var certificate = X509CertificateLoader.LoadPkcs12FromFile(path, password: null, keyStorage);
         if (!certificate.HasPrivateKey || certificate.NotAfter.ToUniversalTime() <= DateTime.UtcNow)
         {

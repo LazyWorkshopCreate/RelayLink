@@ -2,8 +2,8 @@
 
 文档 ID：DES-001\
 状态：Draft（待评审）\
-版本：v2.4 设计评审稿\
-更新日期：2026-09-18\
+版本：v2.7 设计评审稿\
+更新日期：2026-09-20\
 调研日期：2026-09-15\
 配套文档：[需求文档](../requirements/requirements.md)
 
@@ -12,7 +12,7 @@
 采用 **.NET 10 / C# + Socket + 可选 SslStream + ASP.NET Core** 实现专用反向 TCP 代理。控制连接默认启用 TLS；普通数据连接为独立端口上的原始 TCP，安全取舍见 [ADR-0008](../adr/0008-separated-control-and-raw-data.md)。
 
 - Linux 或 Windows 服务端分别提供控制端口与数据端口；只有已认证控制会话能授权建立数据连接。
-- 每个 Windows Agent 保持一条控制连接；每条业务 TCP 连接按需建立一条独立数据 TCP 连接。
+- 每个 Windows/Linux/macOS Agent 保持一条控制连接；每条业务 TCP 连接按需建立一条独立数据 TCP 连接。
 - 通道及每客户端密钥保存在服务端每客户端一个 JSON 文件中；启动加载、认证后及管理保存后下发快照。
 - Agent 注册时上报本机端到端证书指纹，服务端首次认证并确认配置后固定到对应客户端 JSON；授权通道不保存指纹，访问映射引用目标客户端固定身份。后续变化拒绝自动覆盖；旧通道级字段不兼容，加载时拒绝，见 [ADR-0011](../adr/0011-client-level-e2e-identity.md)。
 - 普通代理在数据连接绑定、目标就绪后直接双向复制 TCP 字节；互访仍使用端到端 TLS 与必要的半关闭封装。不实现多业务连接在同一 TCP 上的复用。
@@ -43,7 +43,7 @@
 flowchart LR
     App[云端内网业务服务] -->|TCP 21433| Proxy[服务端代理监听]
     Browser[内网浏览器] -->|HTTP 18080| Web[匿名只读 / 登录管理仪表盘]
-    Agent[各地 Windows Agent] -->|控制 TLS 7443| Control[控制入口]
+    Agent[各地 Windows/Linux/macOS Agent] -->|控制 TLS 7443| Control[控制入口]
     Agent -->|独立数据 TCP 7444| Data[数据入口]
     Control --> State
     Proxy <-->|关联业务连接| Data
@@ -72,7 +72,7 @@ RelayLink.sln
   src/RelayLink.Protocol/         帧编解码、DTO、错误码、协议版本
   src/RelayLink.Transport/        TLS、帧读写、双向转发、超时和计数
   src/RelayLink.Server/           ASP.NET Core Host、后台监听与仪表盘
-  src/RelayLink.Agent/            Generic Host、Windows Service、目标连接
+  src/RelayLink.Agent/            Generic Host、Windows Service/systemd/launchd、目标连接
   tests/RelayLink.UnitTests/      状态机、配置、令牌及帧边界
   tests/RelayLink.IntegrationTests/ 真实 TCP/TLS、故障及 SQL 接入
 ```
@@ -92,7 +92,7 @@ RelayLink.sln
 
 Agent 由 SessionWorker、ConfigSnapshotStore、OpenConnectionHandler 和 RelayConnection 组成。控制消息读取循环不能等待目标拨号完成；Open 请求交给受限并发任务执行，避免慢 SQL 主机阻塞心跳。
 
-Windows Service 使用 `Microsoft.Extensions.Hosting.WindowsServices`，支持同一程序控制台调试。[微软 Windows Service 文档](https://learn.microsoft.com/en-us/dotnet/core/extensions/windows-service)
+Agent 使用 Generic Host；Windows 通过 `Microsoft.Extensions.Hosting.WindowsServices` 托管，Linux 通过 `Microsoft.Extensions.Hosting.Systemd` 托管，macOS 由 launchd 启动同一前台程序并通过 SIGTERM 停止，同一程序也支持控制台调试。[微软 Windows Service 文档](https://learn.microsoft.com/en-us/dotnet/core/extensions/windows-service)
 
 ## 5. 配置模型
 
@@ -430,7 +430,7 @@ Agent：Disconnected → Connecting → Authenticating → Configuring → Onlin
 ▶ 成都节点 02  [Offline] 最近断线 ...
 ```
 
-采用 ASP.NET Core Minimal API + `src/RelayLink.AdminWeb` 独立 React/TypeScript/Vite 项目。构建输出复制到 Server 的 `wwwroot/` 由同源静态文件中间件托管，不依赖外部 CDN；生产发布物不依赖 Node.js。React 默认转义配置展示名称，目标地址属于内网运维信息，不向公网提供。页面不设左侧侧栏；匿名只读，客户端卡片下的端到端访问入口以表格展示入口 ID、当前 Agent 上报的本机地址、目标和状态；仅登录后显示删除操作。登录入口点击后以弹窗呈现；管理表单打开时暂停轮询。架构决定见 [ADR-0004](../adr/0004-standalone-admin-web.md)。
+采用 ASP.NET Core Minimal API + `src/RelayLink.AdminWeb` 独立 React/TypeScript/Vite 项目。构建输出复制到 Server 的 `wwwroot/` 由同源静态文件中间件托管，不依赖外部 CDN；生产发布物不依赖 Node.js。React 默认转义配置展示名称，目标地址属于内网运维信息，不向公网提供。页面不设左侧侧栏；匿名只读，客户端卡片下的端到端访问入口以表格展示入口 ID、当前 Agent 上报的本机地址、目标和状态；仅登录后显示删除操作。登录入口点击后以弹窗呈现；管理表单打开时暂停轮询。常规轮询使用分页的管理台聚合快照，一页同时返回客户端、通道、入口和总览，避免按客户端分别请求通道与入口形成 N+1 请求；后续分页按顺序读取，且同一浏览器页面只允许一个刷新任务在途，避免慢请求与定时器叠加形成请求风暴。架构决定见 [ADR-0004](../adr/0004-standalone-admin-web.md)。
 
 点击通道的“建连中 / 转发中”数字打开实时连接弹窗；普通代理与端到端转发分别从运行时连接注册表读取，使用同一连接 ID 关联协议和管理操作。列表含来源（普通代理为远端 IP:端口，端到端为访问方客户端 ID）、阶段、建立时间与两个方向的已转发字节；端到端字节为服务端可见的密文 DATA 载荷，不表示业务明文。弹窗每 5 秒刷新，也可手动刷新；匿名可读，已登录管理员可在二次确认后断开单条连接。断开通过取消连接生命周期令牌释放数据通道与配额，不删除通道配置；ID 必须同时匹配目标客户端及通道，已结束连接返回 404。运行时快照与汇总计数由不同并发结构读取，瞬时竞争下可能短暂不一致。
 
@@ -439,6 +439,7 @@ Agent：Disconnected → Connecting → Authenticating → Configuring → Onlin
 | 方法与路径 | 响应 |
 |---|---|
 | GET `/api/v1/overview` | 总览计数、实例与采样时间 |
+| GET `/api/v1/dashboard/snapshot` | 匿名只读；分页返回管理台总览及每个客户端的摘要、通道状态和入口状态，pageSize ≤ 100，不含客户端密钥或通道访问密钥 |
 | GET `/api/v1/clients` | 客户端列表，支持 query/status/page/pageSize，pageSize ≤ 100 |
 | GET `/api/v1/clients/{id}/channels` | 所属通道状态、配置和计数，响应封装采样时间 |
 | GET `/api/v1/clients/{id}/channels/{channelId}/connections` | 匿名只读；当前普通/端到端连接的 ID、来源、阶段、建立时间及方向字节，不含令牌或业务载荷 |
@@ -460,7 +461,7 @@ Agent：Disconnected → Connecting → Authenticating → Configuring → Onlin
 | GET `/health/live` | 进程存活，200 |
 | GET `/health/ready` | 配置与必要监听完成为 200，否则 503 |
 
-未找到客户端返回 404；非法分页 400。除受会话和 CSRF 保护的客户端、通道管理接口外，不提供其他业务写接口或 HTTP 重启接口。`Cache-Control: no-store`，不启用跨域访问，敏感字段使用独立响应 DTO 排除。仪表盘默认每 5 秒拉取一次；编辑弹窗打开时暂停自动刷新，数据超过两个刷新周期未更新时提示过期。
+未找到客户端返回 404；非法分页 400。除受会话和 CSRF 保护的客户端、通道管理接口外，不提供其他业务写接口或 HTTP 重启接口。`Cache-Control: no-store`，不启用跨域访问，敏感字段使用独立响应 DTO 排除。仪表盘默认每 5 秒拉取一次聚合快照；编辑弹窗打开时暂停自动刷新，上一轮尚未完成时不启动重叠刷新，数据超过两个刷新周期未更新时提示过期。原有客户端、通道和入口只读接口继续保留给细粒度查询，不用于管理台全量轮询。
 
 审计默认与流量历史共用 SQLite 数据库，也可配置 `audit.filePath`；无历史配置时默认在服务端配置文件目录创建 `audit.db`。起始审计落库后才允许成功登录、Agent Ready 或业务数据开始转发；存储不可写时拒绝新连接。默认保留 90 天，管理员可从管理页顶部的审计弹窗查询。故障取舍与运维边界见[审计与流量设计](audit-and-traffic.md)及 [ADR-0013](../adr/0013-sqlite-audit-gate.md)。
 
@@ -553,7 +554,19 @@ Linux 对应 systemd 模板见 [deploy/linux/relaylink-server.service](../../dep
 
 发布 win-x64 自包含包，使用 [Windows Agent 安装包](../../deploy/windows/README.md) 选择并校验配置；首次安装及重新配置无 JSON 不得继续。程序位于 Program Files，配置和 TLS 信任 CA 复制到受限的 ProgramData 目录，Agent 生成的身份及端口状态也存于该目录。服务以 LocalService 运行，开机自动启动并配置失败恢复；安装成功后按 `dashboardPort` 在公共桌面创建指向本机状态页的 Internet Shortcut，由系统默认浏览器打开，状态页关闭时不创建。安装和卸载需要本机管理员权限。已有安装须显式选择仅更新或重新配置，且校验服务确属当前安装：仅更新停止服务、替换程序并重启，不触碰 ProgramData；重新配置在校验新 JSON 后清理 ProgramData 中 Agent 管理的配置、CA、身份、端口状态和诊断日志，写入新配置再重启，并更新快捷方式。不清理未知文件、Windows 事件日志或其他应用目录。卸载移除安装程序生成的快捷方式，但保留敏感配置与身份文件供管理员处理。实际架构不同则另行构建；生产连接和 Windows Service 生命周期仍需目标机验收。
 
-### 13.3 运维步骤
+### 13.3 Linux Agent
+
+发布 `linux-x64` 自包含包，并使用 [Linux systemd 模板](../../deploy/linux/relaylink-agent.service) 以独立无登录账号托管。程序安装在 root 管理的 `/opt/relaylink/agent`；配置、端到端身份、端口状态和诊断日志放在仅服务账号可读写的 `/var/lib/relaylink-agent`。该目录与 Server 的 `/var/lib/relaylink` 分离，避免父目录权限阻止 Agent 遍历。Linux 与 Windows Agent 使用相同的配置和协议，不维护平台专用通道。服务升级仅替换程序目录，保留状态目录。
+
+服务端同机 Linux Agent 访问 `127.0.0.1:18080` 时仍使用标准授权互访：管理页只绑定 loopback；同机 Agent 的目标通道指向该地址并启用 `authorizedClientsOnly`；指定访问方持有服务端下发的映射，在其本机 loopback 端口访问。远程段由 Agent 间内层 TLS 保护，目标段限制为同机 loopback，不增加管理页专用协议或绕过既有授权。具体步骤见 [Linux 部署说明](../../deploy/linux/README.md#通过互访通道访问服务端管理页)，决定见 [ADR-0014](../adr/0014-linux-agent.md)。
+
+### 13.4 macOS Agent
+
+发布 `osx-x64`（Intel）和 `osx-arm64`（Apple Silicon）两个自包含包，使用 [launchd 模板](../../deploy/macos/relaylink-agent.plist)以系统 daemon 方式托管。程序安装到 root 管理的 `/Library/RelayLink/Agent`；配置、端到端身份、端口状态和诊断日志放在仅 `_relaylink-agent` 服务账号可读写的 `/Library/Application Support/RelayLink/Agent`。macOS 与其他 Agent 使用相同配置、协议和通道，不维护平台专用路径；升级只替换程序目录并保留状态。完整部署步骤见 [macOS Agent 部署](../../deploy/macos/README.md)，决定见 [ADR-0015](../adr/0015-macos-agent.md)。
+
+两个架构包独立发布，不合并 Universal 2。初始包未签名、未公证；生产分发需补齐 Developer ID 签名、公证和 stapling。交叉发布成功不能替代对应架构 macOS 上的 launchd、Gatekeeper、权限、睡眠/唤醒与真实转发验收。
+
+### 13.5 运维步骤
 
 1. 分配唯一 clientId、独立随机密钥及未占用代理端口。
 2. 写入对应 JSON，运行配置检查；确认安全组允许规定路径。
@@ -584,7 +597,7 @@ Linux 对应 systemd 模板见 [deploy/linux/relaylink-server.service](../../dep
 |---|---|---|
 | P0 协议原型 | TLS、注册配置、单连接 DATA/FIN、SQL 固定端口 | Linux↔Windows 实机双向字节和半关闭正确 |
 | P1 核心服务 | 多客户端/通道、配额、一次性令牌、超时重连 | 并发与故障竞争测试通过 |
-| P2 可运维交付 | 匿名只读/登录管理仪表盘、配置检查、systemd/Windows Service | 操作流程和需求验收逐项通过 |
+| P2 可运维交付 | 匿名只读/登录管理仪表盘、配置检查、systemd/Windows Service/launchd | 操作流程和需求验收逐项通过 |
 | P3 稳定性 | WAN 模拟、SQL 场景、24 小时压测 | 提交基线报告、缺陷修复和部署参数 |
 
 性能测试记录运行时补丁、CPU、内存、NIC、真实链路 RTT/丢包、SQL 版本与驱动、测试块大小和连接模型。先在无 WAN 限制下确认 CPU/资源瓶颈，再加入 20/80/150 ms RTT 与丢包注入。需求文档中的规模为拟定测试目标，当前没有实测结论。

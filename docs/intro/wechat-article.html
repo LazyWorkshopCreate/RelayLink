@@ -56,7 +56,7 @@
 <p>这里先划一条边界，免得后面读歪：<strong>RelayLink 是一个网络组件，不是网站托管方案。</strong> 它只负责把传输层字节从一端搬到另一端，不提供 HTTP 这类应用层协议的单独支持——没有域名路由、没有虚拟主机、没有证书托管。你可以拿它把 443 端口的流量送进内网，但那之后的 Web 服务器该怎么部署，是另一件事，得交给 nginx、Caddy 或者你自己的网关。</p>
 <p>这个边界也决定了它后续的演进方向：<strong>会继续变宽的是传输层</strong>——UDP 等其他传输层协议、更多连接方式都在规划内；<strong>明确止步的是应用层</strong>——它永远不去理解跑在上面的协议是什么。</p>
 <figure><img alt="RelayLink 整体架构" src="assets/p07-architecture.png"></figure>
-<p>架构就这么几块：服务端跑在有公网 IP 的云主机上，内网的 Windows Agent 主动拨号连上来，云端业务服务连服务端的代理端口，字节流经服务端路由到对应 Agent，再由 Agent 送到本机可达的目标。</p>
+<p>架构就这么几块：服务端跑在有公网 IP 的云主机上，内网的 Windows、Linux 或 macOS Agent 主动拨号连上来，云端业务服务连服务端的代理端口，字节流经服务端路由到对应 Agent，再由 Agent 送到本机可达的目标。</p>
 <p>注意图里左边那条虚线框——业务端口和管理页面都只在内网可达，云安全组负责挡。<strong>内网侧一个入站端口都不需要开</strong>，只需要允许出站 TCP 到控制端口和数据端口。</p>
 <p>还有一条容易被忽略的设计：Agent 不在本地维护通道配置。服务端下发快照，Agent 在内存里用；拿不到快照就不启动转发。宁可 fail closed，也不要机器重启后拿一份过期缓存继续转发流量。</p>
 <h2>控制口和数据口：为什么要分家</h2>
@@ -123,7 +123,7 @@
 <p>注意这份清单里<strong>没有 UDP</strong>。UDP 以及更多传输层协议、更多连接方式属于后续会补的能力，只是首期没做——补的是"能搬的字节种类"，不是"开始理解应用协议"。</p>
 <p>一句话概括它的边界：<strong>传输层上会继续变宽，应用层上明确止步。</strong> 这些不是"待优化"，是首期就决定不进范围。边界写在明面上，比让人踩坑之后自己试出来强。</p>
 <p>运维侧倒是做得比较实在：管理页面匿名即可只读查看状态、通道、连接和流量历史；登录后才能改配置，用的是 PBKDF2-SHA256 密码哈希 + HttpOnly 会话 Cookie + CSRF 令牌。流量按 UTC 分钟聚合落到 SQLite，默认保留 90 天，普通字节和端到端密文字节分列存储——<strong>只存字节增量，不存业务载荷、SQL 文本或凭据</strong>。</p>
-<p>交付形态是三种：Linux 服务端（systemd）、Windows 服务端（Windows Service）、Windows Agent 安装包（Inno Setup，向导必须选择 Agent 配置，没有配置不允许安装，装完在桌面创建本机状态页的快捷方式）。CI 用 GitHub Actions，推 main 或 PR 只跑校验，只有 <code>v1.2.3</code> 形式的版本 tag 才触发发行并附 SHA-256 清单。</p>
+<p>交付形态包括 Linux/Windows 服务端、Linux Agent 自包含包（systemd）、Windows Agent 安装包（Inno Setup，向导必须选择 Agent 配置，没有配置不允许安装，装完在桌面创建本机状态页的快捷方式），以及 Intel/Apple Silicon 两种 macOS Agent 自包含包（launchd）。CI 用 GitHub Actions，推 main 或 PR 只跑校验，只有 <code>v1.2.3</code> 形式的版本 tag 才触发发行并附 SHA-256 清单。macOS 压缩包当前未做 Developer ID 签名和 Apple 公证，正式分发前仍需补齐软件信任链。</p>
 <p><strong>流水线通过不等于环境验收通过</strong>，这两件事在文档里是分开记的。</p>
 <h2>想看代码的话</h2>
 <p>仓库里除了代码，还有 12 篇 ADR，把每一个取舍都记下来了：为什么要做独立数据隧道、为什么管理前端要独立成项目、为什么客户端级指纹要取代通道级指纹、为什么配置变更要撤销存量连接、为什么流量历史从 JSONL 换成 SQLite 分钟聚合……如果你对某个设计有不同意见，从 ADR 开始读最省事。</p>

@@ -19,6 +19,8 @@
 | [控制和原始数据分离](adr/0008-separated-control-and-raw-data.md) | ADR-0008 | Accepted | 独立数据端口、单次绑定、普通 TCP 流复制及安全取舍 |
 | [通道变更撤销连接](adr/0009-revoke-connections-on-channel-change.md) | ADR-0009 | Accepted | 实际变更后按通道或映射撤销待建立和已建立连接 |
 | [应用层安全组](adr/0012-application-security-groups.md) | ADR-0012 | Accepted | 普通通道按来源 IP/CIDR 限制访问及规则变更撤销连接 |
+| [Linux Agent](adr/0014-linux-agent.md) | ADR-0014 | Accepted | Linux 自包含发布、systemd 托管及复用既有互访访问服务端管理页 |
+| [macOS Agent](adr/0015-macos-agent.md) | ADR-0015 | Accepted | Intel/Apple Silicon 自包含发布与 launchd 托管 |
 | [目录规划](development/repository-layout.md) | DEV-001 | Active | 文件归属及项目职责 |
 | [文档管理规则](development/documentation-policy.md) | DEV-002 | Active | 命名、状态、更新和引用规则 |
 | [GitHub Actions 流水线](development/ci.md) | DEV-003 | Active | CI 检查、构建产物和安全边界 |

@@ -125,6 +125,14 @@ const auditLabels: Record<string, string> = {
     peer_connection_rejected: '端到端连接拒绝',
 };
 type ViewClient = Client & { channels: Channel[]; mappings: Mapping[] };
+type DashboardSnapshot = {
+    snapshotTimeUtc: string;
+    page: number;
+    pageSize: number;
+    total: number;
+    overview: Overview;
+    clients: ViewClient[];
+};
 type ClientForm = {
     clientId: string;
     displayName: string;
@@ -370,40 +378,40 @@ export function App() {
         securityGroupToDelete,
     );
     const editingRef = useRef(editing);
+    const refreshInFlightRef = useRef<Promise<void> | null>(null);
     editingRef.current = editing;
 
-    const refresh = useCallback(async () => {
-        try {
-            const [nextSession, nextOverview, firstPage] = await Promise.all([
-                api<Session>('/api/v1/admin/session'),
-                api<Overview>('/api/v1/overview'),
-                api<{ clients: Client[]; total: number }>('/api/v1/clients?page=1&pageSize=100'),
-            ]);
-            const pages = await Promise.all(
-                Array.from({ length: Math.ceil(firstPage.total / 100) - 1 }, (_, i) =>
-                    api<{ clients: Client[] }>(`/api/v1/clients?page=${i + 2}&pageSize=100`),
-                ),
-            );
-            const allClients = [...firstPage.clients, ...pages.flatMap((page) => page.clients)];
-            const detailed = await Promise.all(
-                allClients.map(async (client) => {
-                    const [channels, mappings] = await Promise.all([
-                        api<{ channels: Channel[] }>(`/api/v1/clients/${enc(client.clientId)}/channels`),
-                        api<{ mappings: Mapping[] }>(`/api/v1/clients/${enc(client.clientId)}/mappings`),
-                    ]);
-                    return { ...client, channels: channels.channels, mappings: mappings.mappings };
-                }),
-            );
-            setSession(nextSession);
-            setOverview(nextOverview);
-            setClients(detailed);
-            setUpdatedAt(Date.now());
-            setError('');
-        } catch (e) {
-            setError((e as Error).message);
-        } finally {
-            setBusy(false);
-        }
+    const refresh = useCallback(() => {
+        if (refreshInFlightRef.current) return refreshInFlightRef.current;
+        const pending = (async () => {
+            try {
+                const [nextSession, firstPage] = await Promise.all([
+                    api<Session>('/api/v1/admin/session'),
+                    api<DashboardSnapshot>('/api/v1/dashboard/snapshot?page=1&pageSize=100'),
+                ]);
+                const allClients = [...firstPage.clients];
+                const pageCount = Math.ceil(firstPage.total / firstPage.pageSize);
+                for (let page = 2; page <= pageCount; page++) {
+                    const nextPage = await api<DashboardSnapshot>(
+                        `/api/v1/dashboard/snapshot?page=${page}&pageSize=${firstPage.pageSize}`,
+                    );
+                    allClients.push(...nextPage.clients);
+                }
+                setSession(nextSession);
+                setOverview(firstPage.overview);
+                setClients(allClients);
+                setUpdatedAt(Date.now());
+                setError('');
+            } catch (e) {
+                setError((e as Error).message);
+            } finally {
+                setBusy(false);
+            }
+        })().finally(() => {
+            refreshInFlightRef.current = null;
+        });
+        refreshInFlightRef.current = pending;
+        return pending;
     }, []);
 
     useEffect(() => {

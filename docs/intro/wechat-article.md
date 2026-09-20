@@ -55,7 +55,7 @@
 
 ![RelayLink 整体架构](assets/p07-architecture.png)
 
-架构就这么几块：服务端跑在有公网 IP 的云主机上，内网的 Windows Agent 主动拨号连上来，云端业务服务连服务端的代理端口，字节流经服务端路由到对应 Agent，再由 Agent 送到本机可达的目标。
+架构就这么几块：服务端跑在有公网 IP 的云主机上，内网的 Windows、Linux 或 macOS Agent 主动拨号连上来，云端业务服务连服务端的代理端口，字节流经服务端路由到对应 Agent，再由 Agent 送到本机可达的目标。
 
 注意图里左边那条虚线框——业务端口和管理页面都只在内网可达，云安全组负责挡。**内网侧一个入站端口都不需要开**，只需要允许出站 TCP 到控制端口和数据端口。
 
@@ -177,7 +177,7 @@ RelayLink 把它们拆成两个端口：
 
 运维侧倒是做得比较实在：管理页面匿名即可只读查看状态、通道、连接和流量历史；登录后才能改配置，用的是 PBKDF2-SHA256 密码哈希 + HttpOnly 会话 Cookie + CSRF 令牌。流量按 UTC 分钟聚合落到 SQLite，默认保留 90 天，普通字节和端到端密文字节分列存储——**只存字节增量，不存业务载荷、SQL 文本或凭据**。
 
-交付形态是三种：Linux 服务端（systemd）、Windows 服务端（Windows Service）、Windows Agent 安装包（Inno Setup，向导必须选择 Agent 配置，没有配置不允许安装，装完在桌面创建本机状态页的快捷方式）。CI 用 GitHub Actions，推 main 或 PR 只跑校验，只有 `v1.2.3` 形式的版本 tag 才触发发行并附 SHA-256 清单。
+交付形态包括 Linux/Windows 服务端、Linux Agent 自包含包（systemd）、Windows Agent 安装包（Inno Setup，向导必须选择 Agent 配置，没有配置不允许安装，装完在桌面创建本机状态页的快捷方式），以及 Intel/Apple Silicon 两种 macOS Agent 自包含包（launchd）。CI 用 GitHub Actions，推 main 或 PR 只跑校验，只有 `v1.2.3` 形式的版本 tag 才触发发行并附 SHA-256 清单。macOS 压缩包当前未做 Developer ID 签名和 Apple 公证，正式分发前仍需补齐软件信任链。
 
 **流水线通过不等于环境验收通过**，这两件事在文档里是分开记的。
 
