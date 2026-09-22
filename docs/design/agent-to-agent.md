@@ -2,15 +2,15 @@
 
 文档 ID：DES-002\
 状态：Draft\
-版本：v1.2.0\
-更新日期：2026-09-20\
+版本：v1.4.0\
+更新日期：2026-09-22\
 调研日期：2026-09-17
 
 ## 1. 范围与调研结论
 
-`Register`/`ConfigUpdate` 通过独立控制入口下发配置；普通 `Open`/`BindData` 路径在数据入口完成绑定后直接复制明文 TCP 字节，服务端可见业务数据。这一路径不满足互访的访问方身份与端到端加密要求。
+`Register`/`ConfigUpdate` 通过独立控制入口下发配置；普通 `Open`/`BindData` 路径在数据入口完成绑定后直接复制明文 TCP 字节，服务端可见业务数据。互访路径必须额外验证访问方身份，并按目标通道选择是否提供业务流端到端加密。
 
-[TLS 1.3 RFC 8446](https://www.rfc-editor.org/rfc/rfc8446.html) 定义认证密钥交换和应用数据保密/完整性；[.NET SslStream 文档](https://learn.microsoft.com/en-us/dotnet/api/system.net.security.sslstream?view=net-10.0) 确认它可包裹任意可读写 Stream。因此在两端 Agent 间的服务端帧中继之上运行内层 `SslStream`，避免自行设计密码协议。证书验证不能返回恒真；访问方对目标证书做固定 SHA-256 指纹校验。访问密钥经控制快照下发，互访配置仍强制开启 Agent↔Server **控制连接** TLS；数据端口不叠加外层 TLS，绑定令牌和元数据需要受信网络保护，业务载荷由内层 TLS 保护。详见 [ADR-0008](../adr/0008-separated-control-and-raw-data.md)。
+[TLS 1.3 RFC 8446](https://www.rfc-editor.org/rfc/rfc8446.html) 定义认证密钥交换和应用数据保密/完整性；[.NET SslStream 文档](https://learn.microsoft.com/en-us/dotnet/api/system.net.security.sslstream?view=net-10.0) 确认它可包裹任意可读写 Stream。因此默认在两端 Agent 间的服务端帧中继之上运行内层 `SslStream`，避免自行设计加密协议。证书验证不能返回恒真；访问方对目标证书做固定 SHA-256 指纹校验。管理员也可按通道明确关闭内层 TLS；此时仍执行访问密钥证明，但业务流直接复制，服务端和数据链路观察者可以看到明文。访问密钥经控制快照下发，互访配置始终强制开启 Agent↔Server **控制连接** TLS；数据端口不叠加外层 TLS，绑定令牌和元数据需要受信网络保护。详见 [ADR-0008](../adr/0008-separated-control-and-raw-data.md)和 [ADR-0016](../adr/0016-optional-peer-traffic-encryption.md)。
 
 ## 2. 配置模型
 
@@ -20,6 +20,7 @@
 
 ```text
 channels[].authorizedClientsOnly : bool（默认 false）
+channels[].endToEndEncryptionEnabled : bool（默认 true；仅授权模式生效）
 channels[].accessSecret          : Base64 恰好 32 字节，仅授权模式必填
 e2eCertificateSha256             : 客户端级 64 位十六进制指纹，由 Agent 首次认证注册后固定
 outboundMappings[]:
@@ -42,38 +43,44 @@ Windows Schannel 在运行时需把文件私钥加载到当前用户密钥提供
 
 ## 3. 协议与状态
 
-沿用 `NTP1` magic，线协议版本升级为 `2`；互访必须两端运行支持这些类型的 Agent，旧 Agent 与新 Server 不兼容。已实现帧：
+沿用 `NTP1` magic，线协议版本升级为 `3`；版本 3 在互访打开消息中加入 `endToEndEncryptionEnabled`，两端必须按同一模式处理。旧 Agent 与新 Server 不兼容，版本不一致在首帧阶段明确拒绝。已实现帧：
 
 | 帧 | 发送方向 | 作用 |
 |---|---|---|
 | `PeerOpenRequest` | 访问 Agent→Server 控制连接 | `requestId`、`mappingId`；**不含业务字节或明文密钥** |
-| `PeerOpen` | Server→被访问 Agent 控制连接 | 一次性 `connectionId`、调用方 `clientId`、目标通道及被访问方绑定令牌 |
-| `PeerOpenGranted` | Server→访问 Agent 控制连接 | 本次连接 ID、访问方绑定令牌 |
+| `PeerOpen` | Server→被访问 Agent 控制连接 | 一次性 `connectionId`、调用方 `clientId`、目标通道、加密模式及被访问方绑定令牌 |
+| `PeerOpenGranted` | Server→访问 Agent 控制连接 | 本次连接 ID、加密模式及访问方绑定令牌 |
 | `PeerOpenRejected` | Server→访问 Agent 控制连接 | 拒绝原因 |
 | `PeerBindData` | 两端 Agent→Server 数据连接 | 当前会话、连接、角色及一次性随机令牌，恰好消费一次 |
-| `PeerBindAccepted` | Server→两端 Agent | 两条数据连接配对成功，进入只转发密文状态 |
+| `PeerBindAccepted` | Server→两端 Agent | 两条数据连接配对成功，进入帧中继状态 |
 | `PeerMappingStatus` | 访问 Agent→Server 控制连接 | 当前会话与配置版本、实际成功绑定的映射 ID 和 loopback 端口；不含密钥 |
-| `Data/Fin/Reset` | 两端 Agent↔Server 数据连接 | 原样转发内层 TLS 记录及结束信号 |
+| `Data/Fin/Reset` | 两端 Agent↔Server 数据连接 | 原样转发加密记录或明文业务字节及结束信号 |
 
-访问方 Agent 已通过现有独立客户端密钥注册；Server 从会话中取得调用方 ID，只按 Server 自己的已确认映射解析目标，不能相信请求自带目标 ID、目标端口或访问密钥。Server 不把访问密钥塞进 `PeerOpen`；被访问 Agent 使用自己的已确认通道快照取密钥。访问方在内层 TLS 握手时验证目标证书指纹；随后被访问方发出每连接 32 字节随机挑战，访问方在 TLS 内返回带域分隔的 HMAC-SHA256 证明，输入包含调用方 ID、目标通道 ID、连接 ID 和挑战。证书固定将挑战交换绑定到目标 Agent 的 TLS 会话；被访问方使用固定时间比较验证证明，验证之前不连接业务目标；双方不得在错误时降级为明文。
+访问方 Agent 已通过现有独立客户端密钥注册；Server 从会话中取得调用方 ID，只按 Server 自己的已确认映射解析目标，不能相信请求自带目标 ID、目标端口或访问密钥。Server 不把访问密钥塞进 `PeerOpen`；被访问 Agent 使用自己的已确认通道快照取密钥，并拒绝 Server 通知模式与快照不一致的连接。
 
-内层 TLS Stream 写入到有界帧化适配器，Server 只验证帧类型、长度、配对关系与资源限额，将 DATA/FIN/RESET 原样送给另一个 Agent，不解码内层记录。每个方向只允许一个 reader 和一个 writer；32 KiB DATA 上限、写超时和取消机制沿用现有传输限制。应用 TCP 半关闭不能提前丢弃另一方向回包；本机 Windows 与 Linux 双 Agent 随机字节、半关闭和并发实验已通过，但不能据此声称 RDP 等所有应用均兼容。
+加密模式先完成内层 TLS 握手并验证目标证书指纹，再在 TLS 内交换访问证明。明文模式跳过 TLS，直接在帧化流上交换访问证明。两种模式下，被访问方都发出每连接 32 字节随机挑战；访问方返回带域分隔的 HMAC-SHA256，输入包含调用方 ID、目标通道 ID、连接 ID、`tls`/`plain` 模式和挑战。被访问方固定时间比较成功前不得连接业务目标。加密模式不允许握手失败后自动降级；明文模式只能来自服务端已确认的目标通道配置。
 
-业务 TCP 半关闭在内层 TLS 应用数据中表示：每段采用 4 字节大端长度加最多 32 KiB 载荷，长度 0 为单向 EOF；另一方向仍能返回数据。不能通过提前发送 TLS `close_notify` 来表示业务 EOF，因为 Windows Schannel 会过早终止回包。两方向都结束后才关闭帧化隧道。
+Server 只验证帧类型、长度、配对关系与资源限额，将 `Data/Fin/Reset` 原样送给另一个 Agent。加密模式的 `Data` 是内层 TLS 记录；明文模式在访问证明后直接承载业务字节。每个方向只允许一个 reader 和一个 writer；32 KiB `Data` 上限、写超时和取消机制沿用现有传输限制。应用 TCP 半关闭不能提前丢弃另一方向回包。
+
+加密模式的业务 TCP 半关闭在内层 TLS 应用数据中表示：每段采用 4 字节大端长度加最多 32 KiB 载荷，长度 0 为单向 EOF；不能通过提前发送 TLS `close_notify` 表示业务 EOF，因为 Windows Schannel 会过早终止回包。明文模式直接把本机 socket 读取结果写为 `Data`，读取 EOF 时发送 `Fin`；收到对端 `Fin` 时只关闭本机 socket 的发送方向。两种模式都允许另一方向继续返回数据。
 
 ## 4. 顺序与失效
 
-Agent 每次应用服务端快照后，先绑定本机端口并保存端口状态，再在认证控制连接上上报 `PeerMappingStatus`。服务端校验会话、已确认的配置版本、映射归属、端口范围与同一报告内不重复，然后仅在该会话在线时展示上报地址。配置更新时先确认新版本，再上报新地址；断线时服务端清除会话状态。本机网页默认在 `http://127.0.0.1:18081/`，可用 `dashboardPort` 调整，设为 0 关闭；只读显示当前通道、访问目标及已监听地址，不展示任何密钥。服务端匿名状态页也按客户端以表格展示访问入口和当前上报地址；公开映射查询不返回访问密钥或目标证书指纹，写入仍受管理员会话及 CSRF 保护。
+Agent 每次应用服务端快照后，先绑定本机端口并保存端口状态，再在认证控制连接上上报 `PeerMappingStatus`。服务端校验会话、已确认的配置版本、映射归属、端口范围与同一报告内不重复，然后仅在该会话在线时展示上报地址。配置更新时先确认新版本，再上报新地址；断线时服务端清除会话状态。本机网页默认在 `http://127.0.0.1:18081/`，可用 `dashboardPort` 调整，设为 0 时网页和本机 API 一并关闭；二者由同一个 Kestrel 实例绑定 IPv4 loopback，不额外开放端口。
+
+供第三方本机软件读取的稳定接口为 `GET /api/v1/status`、`GET /api/v1/channels` 和 `GET /api/v1/mappings`；旧 `GET /api/status` 保留兼容。聚合接口字段为 `clientId`、`online`、`updatedAtUtc`、`channels` 与 `outboundMappings`；两个资源接口保留相同的客户端状态元数据，并分别返回 `channels` 或 `mappings`。数据直接取自不可变的 `AgentStatusSnapshot`：在线时来自已确认的控制快照及实际端口绑定，离线时返回空列表，避免把旧地址表示为仍可用。接口只注册 GET 路由，写方法由框架返回 405；全部响应禁止缓存，不启用 CORS。视图模型只包含页面已经允许展示的字段，不包含客户端密钥、通道访问密钥、目标证书指纹、私钥或令牌。本机网页只读显示当前通道、访问目标及已监听地址。服务端匿名状态页也按客户端以表格展示访问入口和当前上报地址；公开映射查询不返回访问密钥或目标证书指纹，写入仍受管理员会话及 CSRF 保护。
 
 ```text
 本机应用 → 访问 Agent loopback Accept → Server 验证已认证会话及 mappingId
         → 目标 Agent 确认目标通道及容量 → 双 Agent 各自主动 BindData
-        → Server 配对密文管道 → 内层 TLS + 固定证书 → 密钥证明
-        → 目标 Agent 才拨号业务目标 → 双向密文流转发
+        → Server 按目标通道通知 tls/plain 模式并配对帧管道
+        → tls: 内层 TLS + 固定证书；plain: 跳过 TLS
+        → 两种模式都完成带模式绑定的密钥证明 → 目标 Agent 才拨号业务目标
+        → 双向 TLS 记录或明文业务字节转发
 ```
 
-服务端 Bind 建立时限由 `openTimeoutSeconds` 控制；Agent 内层 TLS、授权证明和目标 Connect 各受独立超时与取消约束。两端会话、映射或目标通道禁用时拒绝新请求；目标通道或访问方映射实际变化、删除时，服务端按连接归属主动撤销该通道/映射的待建立及已建立互访连接，相同内容保存不撤销，其他通道保持运行。数据隧道断开或超时也会清理连接，详见 [ADR-0009](../adr/0009-revoke-connections-on-channel-change.md)。每次请求生成新的随机连接 ID 和双侧独立随机 Bind token；重放 token、跨会话 token、角色错置都拒绝。服务端监控只累计互访密文字节，不把它冒充业务有效载荷，也不写入普通通道流量历史。
+服务端 Bind 建立时限由 `openTimeoutSeconds` 控制；Agent 的可选内层 TLS、授权证明和目标 Connect 各受独立超时与取消约束。两端会话、映射或目标通道禁用时拒绝新请求；目标通道的加密模式或其他运行配置变化、访问方映射变化/删除时，服务端按连接归属主动撤销相关待建立及已建立互访连接，相同内容保存不撤销，其他通道保持运行。数据隧道断开或超时也会清理连接，详见 [ADR-0009](../adr/0009-revoke-connections-on-channel-change.md)。每次请求生成新的随机连接 ID 和双侧独立随机 Bind token；重放 token、跨会话 token、角色错置都拒绝。服务端监控累计互访帧载荷字节：加密通道包含 TLS 开销，明文通道包含访问证明和业务字节。历史 API 为兼容保留 `peerCiphertext*` 字段名，但界面统一称“互访转发字节”。
 
 ## 5. 验收矩阵
 
-以 [A18–A22](../requirements/requirements.md#新增验收) 为准：双 Agent/多映射/多通道流量隔离、非授权和错误密钥拒绝且目标零 Connect、TLS 指纹错误与篡改拒绝、内层密文抓取、半关闭、大流和并发、配额/取消/重连、动态保存下发、既有云端端口不回归。单机模拟只能验证逻辑；真实跨主机 NAT 与 24 小时容量仍需专项环境，不标为通过。
+以 [A18–A22](../requirements/2026-09-17-agent-capabilities.md#新增验收) 和 [A51–A53](../requirements/2026-09-22-optional-peer-encryption.md#验收标准) 为准：双 Agent/多映射/多通道流量隔离、两种模式的错误密钥拒绝且目标零 Connect、加密模式的证书固定与密文、明文模式无 TLS 记录和原始字节复制、半关闭、大流和并发、模式切换撤销、配额/取消/重连、动态保存下发、既有云端端口不回归。单机模拟只能验证逻辑；真实跨主机 NAT 与 24 小时容量仍需专项环境，不标为通过。

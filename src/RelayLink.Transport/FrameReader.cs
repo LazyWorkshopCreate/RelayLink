@@ -40,7 +40,7 @@ public sealed class FrameReader(Stream stream, TimeSpan? partialFrameTimeout = n
         var flags = BinaryPrimitives.ReadUInt16BigEndian(header.AsSpan(6, 2));
         if (flags != 0)
         {
-            throw new ProtocolException("Frame flags must be zero for protocol v2.");
+            throw new ProtocolException("Frame flags must be zero for protocol v3.");
         }
 
         var payloadLength = BinaryPrimitives.ReadUInt32BigEndian(header.AsSpan(8, 4));

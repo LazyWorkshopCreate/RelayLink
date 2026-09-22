@@ -8,13 +8,13 @@
 
 ## 1. 现状与调研
 
-当前服务端的控制会话、普通代理和端到端中继分别管理连接生命周期；管理员登录由 `AdminSessionService` 处理。`ILogger` 主要用于运行诊断，缺少统一的结构化审计事件，也没有可查询的审计持久化。原历史服务将普通代理累计快照写入 JSONL，逐次清理时重写全文件；端到端中继虽在 `MetricsRegistry` 记录双向密文字节，却被历史采样排除。
+当前服务端的控制会话、普通代理和互访中继分别管理连接生命周期；管理员登录由 `AdminSessionService` 处理。`ILogger` 主要用于运行诊断，缺少统一的结构化审计事件，也没有可查询的审计持久化。原历史服务将普通代理累计快照写入 JSONL，逐次清理时重写全文件；互访中继虽在 `MetricsRegistry` 记录双向转发帧载荷字节，却被历史采样排除。
 
 SQLite 的 WAL 模式允许读者与写者并发，但同一时刻仍只有一个写事务；长期读事务会妨碍 checkpoint，不能把它当作无限并发的日志服务器。`Microsoft.Data.Sqlite` 连接对象不宜跨线程共享；按操作打开连接并利用连接池，设置有限 busy timeout。批量事务适于分钟汇总和有界事件写入。[SQLite WAL 文档](https://sqlite.org/wal.html)、[Microsoft.Data.Sqlite 锁与重试](https://learn.microsoft.com/en-us/dotnet/standard/data/sqlite/database-errors)、[事务说明](https://learn.microsoft.com/en-us/dotnet/standard/data/sqlite/transactions)、[连接字符串说明](https://learn.microsoft.com/en-us/dotnet/standard/data/sqlite/connection-strings)。
 
 ## 2. 已实现的分钟流量存储
 
-服务端使用本地 SQLite 的 `traffic_minute` 表，主键为 `(minute_utc, client_id, channel_id)`。UTC 整分钟存储该窗口增量；无流量、无连接状态变化的分钟不写空行。字段包括普通代理双向业务载荷字节、端到端双向**密文 DATA 载荷**字节、连接接受/成功/失败数。普通与端到端字节分列，历史 API 的 `bytesToTarget`、`bytesToCaller` 返回两者合计，并额外给出端到端密文字节供调用方区分；不声称服务端知道端到端明文大小。管理页折线图展示分钟增量及所选时段合计，不再称为重启后归零的累计值。
+服务端使用本地 SQLite 的 `traffic_minute` 表，主键为 `(minute_utc, client_id, channel_id)`。UTC 整分钟存储该窗口增量；无流量、无连接状态变化的分钟不写空行。字段包括普通代理双向业务载荷字节、互访双向 `Data` 载荷字节、连接接受/成功/失败数。普通与互访字节分列，历史 API 的 `bytesToTarget`、`bytesToCaller` 返回两者合计。兼容字段 `peerCiphertextToTarget`、`peerCiphertextToCaller` 在加密通道表示 TLS 记录字节，在明文通道表示访问证明和业务明文字节；调用方须结合通道的 `endToEndEncryptionEnabled` 解释。管理页折线图展示分钟增量及所选时段合计，不再称为重启后归零的累计值。
 
 采样最多每 5 秒刷新一次同一分钟的记录，按运行时单调累计计数的差值写入；相同计数不重复入账。每次写入以事务提交，提交成功后才推进内存基线。进程重启从零基线继续累加数据库记录；计数器重置按新计数计算。分钟归属是**采样时刻**，边界可能偏差一个采样间隔，异常退出可能损失尚未采样的字节，所以不作为计费或法务精确证据。查询 24 小时以内返回分钟点，7 天以内按 15 分钟聚合，更长范围按小时聚合，以限制图表点数。默认保留 90 天，每天清理过期窗口；需要备份 `.db` 以及 WAL/SHM 文件，备份宜使用 SQLite 在线备份机制或停服后复制，不能只拷贝主数据库文件。
 

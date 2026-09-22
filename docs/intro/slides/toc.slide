@@ -50,7 +50,7 @@
                 <Box style={{ flex: 1, paddingRight: 20 }}>
                     <Text style={{ fontSize: 22, fontWeight: 600, color: '#0F172A' }}>安全模型：谁被允许连，服务端能看到什么</Text>
                     <Box style={{ height: 8 }} />
-                    <Text style={{ fontSize: 15, color: '#64748B', lineHeight: 1.5 }}>三层凭据各管一段，两台内网机器互访时服务端只中继密文。</Text>
+                    <Text style={{ fontSize: 15, color: '#64748B', lineHeight: 1.5 }}>三层凭据各管一段；互访默认加密，也可按通道选择明文直传。</Text>
                 </Box>
                 <Text style={{ fontSize: 14, color: '#64748B', width: 74, textAlign: 'right' }}>页 13–16</Text>
             </Box>

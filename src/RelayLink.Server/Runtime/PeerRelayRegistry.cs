@@ -74,8 +74,8 @@ public sealed class PeerRelayRegistry(ServerRuntime runtime, MetricsRegistry met
         }
         try
         {
-            await targetSession.SendAsync(new Frame(FrameType.PeerOpen, JsonProtocolSerializer.Serialize(new PeerOpenMessage(relay.ConnectionId, targetSession.SessionId, caller.ClientId, targetChannel.ChannelId, relay.TargetToken))), cancellationToken);
-            await caller.SendAsync(new Frame(FrameType.PeerOpenGranted, JsonProtocolSerializer.Serialize(new PeerOpenGrantedMessage(request.RequestId, relay.ConnectionId, caller.SessionId, relay.CallerToken))), cancellationToken);
+            await targetSession.SendAsync(new Frame(FrameType.PeerOpen, JsonProtocolSerializer.Serialize(new PeerOpenMessage(relay.ConnectionId, targetSession.SessionId, caller.ClientId, targetChannel.ChannelId, relay.TargetToken, targetChannel.EndToEndEncryptionEnabled))), cancellationToken);
+            await caller.SendAsync(new Frame(FrameType.PeerOpenGranted, JsonProtocolSerializer.Serialize(new PeerOpenGrantedMessage(request.RequestId, relay.ConnectionId, caller.SessionId, relay.CallerToken, targetChannel.EndToEndEncryptionEnabled))), cancellationToken);
             _ = RunAsync(relay);
         }
         catch
@@ -122,7 +122,7 @@ public sealed class PeerRelayRegistry(ServerRuntime runtime, MetricsRegistry met
             {
                 var before = previous.Channels.SingleOrDefault(channel => channel.ChannelId == relay.ChannelId);
                 var after = updated.Channels.SingleOrDefault(channel => channel.ChannelId == relay.ChannelId);
-                if (before != after) { Cleanup(relay); continue; }
+                if (before is null || !before.HasSameRuntimeSettings(after)) { Cleanup(relay); continue; }
             }
             if (relay.Caller.ClientId == previous.ClientId)
             {

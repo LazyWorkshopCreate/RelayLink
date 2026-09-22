@@ -17,5 +17,5 @@
 
 ## 关联
 
-- [需求文档](../requirements/requirements.md)
+- [核心需求](../requirements/2026-09-15-core-requirements.md)
 - [技术设计](../design/technical-design.md)

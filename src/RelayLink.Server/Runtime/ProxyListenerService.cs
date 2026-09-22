@@ -133,7 +133,7 @@ public sealed class ProxyListenerService(ServerRuntime runtime, PendingConnectio
         {
             if (connection.ClientId != previous.ClientId) continue;
             var current = updated.Channels.SingleOrDefault(channel => channel.ChannelId == connection.Channel.ChannelId);
-            if (current != connection.Channel) connection.Revoke();
+            if (!connection.Channel.HasSameRuntimeSettings(current)) connection.Revoke();
         }
     }
 

@@ -2,10 +2,14 @@
 
 文档 ID：TST-001\
 状态：Active\
-版本：v1.23.1\
-更新日期：2026-09-20
+版本：v1.25.0\
+更新日期：2026-09-22
 
-本文记录当前仓库可重复执行的验证证据，不替代 [需求文档](../requirements/requirements.md) 的验收标准，也不把未在目标环境运行的项目标记为通过。
+本文记录当前仓库可重复执行的验证证据，不替代 [需求文档](../requirements/README.md) 的验收标准，也不把未在目标环境运行的项目标记为通过。
+
+2026-09-22 完成互访业务流按通道可选加密。配置字段 `endToEndEncryptionEnabled` 缺失和新建均默认 `true`；管理页面仅在“仅允许授权客户端互访”模式显示加密勾选，并明确标识加密/明文。协议版本升为 3，服务端把模式同时通知两端；加密路径保留内层 TLS，明文路径仍执行绑定到模式的 HMAC 访问证明，成功后直接复制 `Data/Fin/Reset`。真实双 Agent 进程测试验证 4096 字节随机流、目标标记回包与半关闭；服务端明文转发计数精确为业务载荷加 32 字节证明（反向另含 32 字节挑战和 1 字节状态），排除 TLS 握手记录。加密和明文错误证明均在目标 TCP Connect 前拒绝；在线切换模式只撤销对应通道连接。Release 配置下单元测试 40/40、启用完整互访测试的集成测试 29/29、前端组件测试 8/8、TypeScript/Vite 构建、Prettier 和 `git diff --check` 全部通过。构建机使用 .NET SDK 10.0.200 preview，尚未在跨主机或正式稳定版运行时复验。
+
+2026-09-21 增加客户端删除，以及客户端/通道多 tag 配置、展示和列表筛选。单元测试验证 tag 数量、长度、大小写去重规则，以及 tag 不改变 Agent 配置摘要和通道运行设置；真实 Server 进程集成测试验证管理员带 CSRF 保存客户端 tag、匿名聚合快照返回 tag、删除未被引用的客户端后配置文件和运行时条目均消失；前端组件测试覆盖一个或多个客户端/通道 tag 的全匹配筛选、tag 去重提交与客户端二次确认删除。Windows .NET 10 预览 SDK 下 Debug 解决方案构建通过，单元测试 38/38、默认集成测试 16/16（另 1 项按配置跳过）、前端组件测试 8/8、TypeScript/Vite 构建、Prettier 和 `git diff --check` 通过。尚未部署到运行实例，也未执行真实浏览器目视验收。
 
 2026-09-20 增加 macOS Agent 双架构交付：发布脚本可生成 `osx-x64`（Intel）和 `osx-arm64`（Apple Silicon）自包含 Agent，tag 发行流水线新增两个压缩包并将资产完整性检查从四项调整为六项；新增独立低权限账号运行的 launchd 模板、部署说明和 ADR-0015。[GitHub Actions 运行 35501952662](https://github.com/DeronQi/RelayLink/actions/runs/35501952662)在 `macos-15-intel` 与 Apple Silicon `macos-15` 托管虚拟机上分别完成原生验收：两边启用端到端 TLS 的集成测试均为 26/26；两个自包含程序的 Mach-O 架构、配置检查、专用服务账号、程序/状态/配置/plist 权限、launchd 启动、异常退出恢复、本机只读状态页和端到端身份复用均通过。验收过程中实际发现并修复 macOS 不支持 `EphemeralKeySet` 加载 PKCS#12 身份，以及 PowerShell 发布脚本反斜杠路径导致 macOS 输出目录嵌套的问题；同时收紧客户端重新启用用例，使其等待配置确认后的真实可用性。该轮 Ubuntu、Windows 和前端既有检查也全部通过。GitHub 托管虚拟机无法覆盖系统重启后的开机自启、真实睡眠/唤醒、浏览器下载 quarantine、Developer ID 签名和 Apple 公证，因此 A44–A45 仍保留这些实机/正式发行验收项。
 
@@ -90,6 +94,8 @@ Agent 安装包新增桌面监控快捷方式后，使用 Windows PowerShell 5.1
 
 ## 需求验收状态
 
+2026-09-21 完成 Agent 本机只读 HTTP API：状态页现有 Kestrel loopback 监听器新增 `/api/v1/status`、`/api/v1/channels` 和 `/api/v1/mappings`，旧 `/api/status` 保持兼容。新增测试以真实 `127.0.0.1` HTTP 监听验证通道、入口和聚合 JSON，确认入口实际地址、`Cache-Control: no-store`、敏感字段不泄漏以及 POST 返回 405。Release 配置下单元测试 39/39、默认集成测试 16/16（另 1 项按配置跳过）、启用端到端 TLS 的完整集成测试 27/27 通过；`dotnet build RelayLink.slnx -c Release --no-restore` 与 `git diff --check` 通过。构建机使用 .NET SDK 10.0.200 preview，仍应在正式发布环境使用稳定版 SDK 重跑。
+
 | 验收项 | 当前状态 | 所需后续证据 |
 |---|---|---|
 | A01–A06（认证、会话、配置） | 部分由单元测试覆盖 | 在真实 TLS 环境执行正/负配置与同 ID 会话测试 |
@@ -105,6 +111,8 @@ Agent 安装包新增桌面监控快捷方式后，使用 Windows PowerShell 5.1
 | A28–A29（独立控制/数据与原始流） | 本机错误入口/无授权令牌拒绝、正确绑定后原始字节、32 路每路 1 MiB 半关闭模拟通过；互访端到端实验 9/9 通过；云端与本机 Agent 已部署；跨公网 RDP 已在自有服务器连续运行一天（生产使用），登录后数十秒才出画面的现象根因未确认 | 访问端关闭 UDP 后 A/B 复测延迟与图形交互；SQL TLS、受信网络或网络层加密、持续大流量和资源压测 |
 | A42–A43（Linux Agent 与管理页互访） | `linux-x64` 自包含发布、WSL 配置检查及真实进程集成测试通过；测试服务器已按最小文件权限安装 systemd 服务，重启后复用身份并自动上线；指定 Windows 客户端经标准授权互访入口访问 Server loopback 管理页，API 与内置浏览器实测通过 | 未授权真实客户端负向访问、断网/停止时连接与资源释放、长时压力及正式稳定版运行时复验 |
 | A44–A45（macOS Agent 双架构） | GitHub 托管 Intel 与 Apple Silicon macOS 使用稳定版 .NET 10 原生运行：两边集成测试 26/26，双 RID 自包含架构、配置检查、低权限 launchd 启动与异常恢复、文件权限、状态页和身份复用通过 | 系统重启后的开机自启、真实睡眠/唤醒、浏览器下载 quarantine、物理 Mac 长时运行；Developer ID 签名、公证和 stapling |
+| A49–A50（Agent 本机只读 HTTP API） | 已完成：真实 loopback HTTP 测试覆盖三个 v1 GET 接口、当前通道与入口地址、禁止缓存、敏感字段过滤和写请求 405；监听器与状态页共用端口并显式绑定 `IPAddress.Loopback` | 无 |
+| A51–A53（互访可选加密） | 已完成：旧配置和新建默认加密；前端可关闭并标识明文；真实双 Agent 的加密/明文随机字节和半关闭、两种模式错误证明、明文无 TLS 记录计数及在线切换撤销均通过 | 跨主机受信网络及正式稳定版运行时复验不阻塞本需求完成，可作为部署验证补充 |
 | SQL Server / PostgreSQL 数据库代理验收 | 本机普通代理与双 Agent 端到端加密互访的常见 SQL、事务回滚通过；另有用户报告的另一环境 SQL Server 通道已投产 | 固定端口与 SQL 协议自身 TLS、跨公网、事务中断、大结果集及连接池场景 |
 
 ## 执行前置条件

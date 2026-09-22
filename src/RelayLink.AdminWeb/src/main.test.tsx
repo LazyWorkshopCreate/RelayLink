@@ -12,6 +12,7 @@ function fakeApi(withMapping = false) {
         {
             clientId: 'node-a',
             displayName: '测试节点',
+            tags: ['生产', '上海'],
             enabled: true,
             online: true,
             e2eCertificateSha256: 'A'.repeat(64),
@@ -24,6 +25,7 @@ function fakeApi(withMapping = false) {
             {
                 channelId: 'echo',
                 displayName: '回显',
+                tags: ['数据库', '生产'],
                 enabled: true,
                 available: true,
                 listenAddress: '127.0.0.1',
@@ -57,6 +59,7 @@ function fakeApi(withMapping = false) {
         clients.push({
             clientId: 'node-b',
             displayName: '访问节点',
+            tags: ['测试'],
             enabled: true,
             online: true,
             maxConnections: 10,
@@ -189,6 +192,16 @@ function fakeApi(withMapping = false) {
             Object.assign(client!, body);
             return ok(client);
         }
+        if (/^\/api\/v1\/admin\/clients\/[^/]+$/.test(path) && method === 'DELETE') {
+            const clientId = path.split('/')[5];
+            clients.splice(
+                clients.findIndex((client) => client.clientId === clientId),
+                1,
+            );
+            delete channelSets[clientId];
+            delete mappingSets[clientId];
+            return new Response(null, { status: 204 });
+        }
         if (path.endsWith('/channels') && method === 'POST') {
             const clientId = path.split('/')[5];
             (channelSets[clientId] ||= []).push({
@@ -238,6 +251,52 @@ afterEach(() => {
 });
 
 describe('管理控制台', () => {
+    it('支持按一个或多个客户端和通道 tag 筛选', async () => {
+        fakeApi(true);
+        const user = userEvent.setup();
+        render(<App />);
+        await screen.findByText('测试节点');
+        expect(screen.getAllByText('生产')).toHaveLength(2);
+        expect(screen.getByText('数据库')).toBeTruthy();
+
+        await user.type(screen.getByRole('textbox', { name: '客户端 tag 筛选' }), '生产, 上海');
+        expect(screen.getByText('测试节点')).toBeTruthy();
+        expect(screen.queryByText('访问节点')).toBeNull();
+        await user.clear(screen.getByRole('textbox', { name: '客户端 tag 筛选' }));
+        await user.type(screen.getByRole('textbox', { name: '通道 tag 筛选' }), '数据库, 生产');
+        expect(screen.getByText('回显')).toBeTruthy();
+        expect(screen.queryByText('访问节点')).toBeNull();
+        await user.clear(screen.getByRole('textbox', { name: '通道 tag 筛选' }));
+        await user.type(screen.getByRole('textbox', { name: '通道 tag 筛选' }), '不存在');
+        expect(screen.getByText('没有匹配的客户端')).toBeTruthy();
+    });
+
+    it('管理员可编辑 tag 并删除客户端', async () => {
+        const calls = fakeApi();
+        const user = userEvent.setup();
+        render(<App />);
+        await screen.findByText('测试节点');
+        await user.click(screen.getByRole('button', { name: /未登录/ }));
+        await user.type(screen.getByRole('textbox', { name: '用户名' }), 'admin');
+        await user.type(screen.getByLabelText('密码'), 'test-password');
+        await user.click(screen.getByRole('button', { name: '登录' }));
+
+        await user.click(await screen.findByRole('button', { name: '编辑客户端' }));
+        await user.clear(screen.getByRole('textbox', { name: '客户端 Tags' }));
+        await user.type(screen.getByRole('textbox', { name: '客户端 Tags' }), '生产, 上海, 生产');
+        await user.click(screen.getByRole('button', { name: '保存客户端' }));
+        expect(
+            calls.find((call) => call.path.endsWith('/clients/node-a') && call.method === 'PUT')?.body,
+        ).toHaveProperty('tags', ['生产', '上海']);
+
+        await user.click(await screen.findByRole('button', { name: '删除客户端' }));
+        await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: '删除客户端' }));
+        await waitFor(() => expect(screen.queryByText('测试节点')).toBeNull());
+        expect(
+            calls.find((call) => call.path.endsWith('/clients/node-a') && call.method === 'DELETE')?.csrf,
+        ).toBe('test-csrf');
+    });
+
     it('审计日志仅登录后可查看并支持筛选查询', async () => {
         const calls = fakeApi();
         const user = userEvent.setup();
@@ -389,6 +448,7 @@ describe('管理控制台', () => {
         expect(screen.getByRole('spinbutton', { name: '云端监听端口' })).toHaveProperty('value', '19001');
         await user.type(screen.getByRole('textbox', { name: '通道 ID' }), 'new-channel');
         await user.type(screen.getByRole('textbox', { name: '显示名称' }), '新通道');
+        await user.type(screen.getByRole('textbox', { name: '通道 Tags' }), '数据库, 生产');
         await user.click(screen.getByRole('button', { name: '保存并下发' }));
         await screen.findByText('新通道');
         expect(calls.find((c) => c.path.endsWith('/channels') && c.method === 'POST')?.csrf).toBe(
@@ -401,6 +461,10 @@ describe('管理控制台', () => {
         expect(calls.find((c) => c.path.endsWith('/channels') && c.method === 'POST')?.body).toHaveProperty(
             'listenPort',
             19001,
+        );
+        expect(calls.find((c) => c.path.endsWith('/channels') && c.method === 'POST')?.body).toHaveProperty(
+            'tags',
+            ['数据库', '生产'],
         );
         await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
 
@@ -465,11 +529,16 @@ describe('管理控制台', () => {
         await user.click(screen.getByRole('checkbox', { name: /仅允许授权客户端互访/ }));
         expect(screen.queryByRole('textbox', { name: '云端监听地址' })).toBeNull();
         expect(screen.queryByRole('spinbutton', { name: '云端监听端口' })).toBeNull();
+        expect(screen.getByRole('checkbox', { name: /启用 Agent 间端到端加密/ })).toHaveProperty(
+            'checked',
+            true,
+        );
         await user.click(screen.getByRole('checkbox', { name: /仅允许授权客户端互访/ }));
         expect(screen.getByRole('textbox', { name: '云端监听地址' })).toHaveProperty('value', '0.0.0.0');
         expect(screen.getByRole('spinbutton', { name: '云端监听端口' })).toHaveProperty('value', '19001');
         await user.click(screen.getByRole('checkbox', { name: /仅允许授权客户端互访/ }));
         expect(screen.queryByRole('textbox', { name: /端到端证书 SHA-256 指纹/ })).toBeNull();
+        await user.click(screen.getByRole('checkbox', { name: /启用 Agent 间端到端加密/ }));
         await user.click(screen.getByRole('button', { name: '保存并下发' }));
         await screen.findByText('私有通道');
         expect(calls.find((c) => c.path.endsWith('/channels') && c.method === 'POST')?.csrf).toBe(
@@ -478,6 +547,11 @@ describe('管理控制台', () => {
         expect(
             calls.find((c) => c.path.endsWith('/channels') && c.method === 'POST')?.body,
         ).not.toHaveProperty('e2eCertificateSha256');
+        expect(calls.find((c) => c.path.endsWith('/channels') && c.method === 'POST')?.body).toHaveProperty(
+            'endToEndEncryptionEnabled',
+            false,
+        );
+        expect(within(screen.getByText('私有通道').closest('tr')!).getByText(/明文/)).toBeTruthy();
 
         const callerCard = screen.getByText('新节点').closest('article')!;
         await user.click(within(callerCard).getByRole('button', { name: '添加端到端访问入口' }));

@@ -66,6 +66,7 @@ public sealed record ClientConfiguration(
     int MaxPendingConnections,
     IReadOnlyList<ChannelConfiguration> Channels)
 {
+    public IReadOnlyList<string> Tags { get; init; } = [];
     public string? AgentServerHost { get; init; }
     public string? TrustedCaPemPath { get; init; }
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
@@ -98,11 +99,29 @@ public sealed record ChannelConfiguration(
     int MaxConnections,
     int TargetConnectTimeoutSeconds)
 {
+    public IReadOnlyList<string> Tags { get; init; } = [];
     public bool AuthorizedClientsOnly { get; init; }
+    public bool EndToEndEncryptionEnabled { get; init; } = true;
     public string? SecurityGroupId { get; init; }
     public string? AccessSecret { get; init; }
     [JsonIgnore]
     public IPEndPoint ListenEndPoint => new(IPAddress.Parse(ListenAddress), ListenPort);
+
+    public bool HasSameRuntimeSettings(ChannelConfiguration? other) =>
+        other is not null &&
+        ChannelId == other.ChannelId &&
+        DisplayName == other.DisplayName &&
+        Enabled == other.Enabled &&
+        ListenAddress == other.ListenAddress &&
+        ListenPort == other.ListenPort &&
+        TargetHost == other.TargetHost &&
+        TargetPort == other.TargetPort &&
+        MaxConnections == other.MaxConnections &&
+        TargetConnectTimeoutSeconds == other.TargetConnectTimeoutSeconds &&
+        AuthorizedClientsOnly == other.AuthorizedClientsOnly &&
+        EndToEndEncryptionEnabled == other.EndToEndEncryptionEnabled &&
+        SecurityGroupId == other.SecurityGroupId &&
+        AccessSecret == other.AccessSecret;
 }
 
 public sealed record LoadedConfiguration(ServerConfiguration Server, IReadOnlyDictionary<string, ClientConfiguration> Clients);

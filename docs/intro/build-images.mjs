@@ -311,7 +311,7 @@ ${foot('credentials')}
 
 /* ---------- 13 互访端到端加密 ---------- */
 const peerTls = page(`<div class="pad">
-${head('CHAPTER 03 · 客户端安全互访', '两台内网机器互访，服务端全程只见密文')}
+${head('CHAPTER 03 · 客户端授权互访', '默认端到端加密，也可按通道明确关闭')}
 <div class="bd">
 <div class="row">
   <div style="width:680px;background:#EEF2F8;border-radius:10px;padding:18px 20px">
@@ -356,7 +356,7 @@ ${head('CHAPTER 03 · 客户端安全互访', '两台内网机器互访，服务
       <div style="height:14px"></div>
       <div style="font-size:28px;font-weight:700;line-height:1.3">服务端是中继者<br>不是解密者</div>
       <div style="height:18px"></div>
-      <div class="pd">普通内网穿透通常是"服务端解密再转发"，业务数据对服务端完全可见。RelayLink 的互访路径把 TLS 建在两端 Agent 之间，服务端只配对并转发密文帧。</div>
+      <div class="pd">默认模式把 TLS 建在两端 Agent 之间，服务端只配对并转发密文帧。关闭通道加密后仍保留访问证明，但业务内容会以明文经过服务端。</div>
     </div>
     <div style="margin-top:16px">
       ${['入口只监听访问方本机 loopback，被访问通道不再开放云端代理端口。', '映射与目标授权全在服务端下发，Agent 本地不落地访问密钥，状态页也不展示密钥。', '两端都只主动出网；任一控制会话断开，相关互访连接立即释放。'].map((x, i) => `<div style="display:flex;gap:12px;align-items:flex-start"><span style="font-size:15px;font-weight:700;color:#2563EB;width:22px">${i + 1}</span><span style="flex:1;font-size:15px;color:#64748B;line-height:1.6">${x}</span></div><div style="height:14px"></div>`).join('')}

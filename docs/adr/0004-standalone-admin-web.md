@@ -22,6 +22,7 @@
 
 ## 关联
 
-- [需求文档](../requirements/requirements.md)
+- [核心需求](../requirements/2026-09-15-core-requirements.md)
+- [客户端删除与标签需求](../requirements/2026-09-21-client-management.md)
 - [技术设计](../design/technical-design.md)
 - [目录规划](../development/repository-layout.md)

@@ -2,10 +2,10 @@
 
 文档 ID：DES-001\
 状态：Draft（待评审）\
-版本：v2.7 设计评审稿\
-更新日期：2026-09-20\
+版本：v2.9 设计评审稿\
+更新日期：2026-09-22\
 调研日期：2026-09-15\
-配套文档：[需求文档](../requirements/requirements.md)
+配套文档：[需求文档索引](../requirements/README.md)
 
 ## 1. 技术结论
 
@@ -15,7 +15,7 @@
 - 每个 Windows/Linux/macOS Agent 保持一条控制连接；每条业务 TCP 连接按需建立一条独立数据 TCP 连接。
 - 通道及每客户端密钥保存在服务端每客户端一个 JSON 文件中；启动加载、认证后及管理保存后下发快照。
 - Agent 注册时上报本机端到端证书指纹，服务端首次认证并确认配置后固定到对应客户端 JSON；授权通道不保存指纹，访问映射引用目标客户端固定身份。后续变化拒绝自动覆盖；旧通道级字段不兼容，加载时拒绝，见 [ADR-0011](../adr/0011-client-level-e2e-identity.md)。
-- 普通代理在数据连接绑定、目标就绪后直接双向复制 TCP 字节；互访仍使用端到端 TLS 与必要的半关闭封装。不实现多业务连接在同一 TCP 上的复用。
+- 普通代理在数据连接绑定、目标就绪后直接双向复制 TCP 字节；互访默认使用端到端 TLS，也可按目标通道关闭后在访问证明成功时直接复制，并分别保留半关闭语义。不实现多业务连接在同一 TCP 上的复用。
 - ASP.NET Core 提供内网只读页面和 JSON API；运行状态和计数保存在内存。
 
 这是本项目设计决策，不是声称存在一个原样满足所有要求的现成 .NET 产品。
@@ -63,7 +63,7 @@ flowchart LR
 
 公网 IP 若为云平台 NAT 映射地址，不要求它出现在服务器网卡上。接入端口绑定本机地址，由云平台映射。管理端新增普通通道默认以 `0.0.0.0` 监听全部 IPv4 网卡，避免误用 `127.0.0.1` 导致其他主机无法连接；需要仅监听 VPC 网卡时可显式填具体内网 IPv4 地址。新增表单从受保护的 `GET /api/v1/admin/next-channel-port` 获取建议端口：从 19000 递增，跳过控制、数据、仪表盘端口以及所有已配置的普通通道端口（包括禁用通道），并在服务端尝试独占绑定 `0.0.0.0:端口`。仅授权客户端的通道没有云端业务监听，不占用建议端口。接口只给出瞬时建议、不预留；管理员可修改，保存时仍按现有配置冲突及 OS 绑定流程复验。`0.0.0.0` 只是绑定地址，不是调用方连接地址；业务端口仍须由云安全组或防火墙限制在受信任网络，应用层安全组仅作为普通通道的补充来源限制。目标主机名可由 Agent 解析，但必须在连接总超时内完成。
 
-控制和数据连接访问不同服务端端口。控制入口运行可选 TLS 上的自定义协议；数据入口先完成短时绑定帧握手，再转为普通代理原始字节流或互访密文中继。普通代理的目标就绪和开始转发信号始终在控制连接上交换。两者均不能放在仅支持 HTTP 的七层代理后面；如需负载入口须使用四层 TCP 透传，首期直接访问 VM。
+控制和数据连接访问不同服务端端口。控制入口运行可选 TLS 上的自定义协议；数据入口先完成短时绑定帧握手，再转为普通代理原始字节流，或互访的加密/明文帧中继。普通代理的目标就绪和开始转发信号始终在控制连接上交换。两者均不能放在仅支持 HTTP 的七层代理后面；如需负载入口须使用四层 TCP 透传，首期直接访问 VM。
 
 ## 4. 工程结构与职责
 
@@ -144,6 +144,7 @@ Agent 使用 Generic Host；Windows 通过 `Microsoft.Extensions.Hosting.Windows
   "schemaVersion": 1,
   "clientId": "shanghai-01",
   "displayName": "上海节点 01",
+  "tags": ["生产", "上海"],
   "enabled": true,
   "secret": "REPLACE_WITH_UNIQUE_32_RANDOM_BYTES_BASE64",
   "maxConnections": 100,
@@ -152,6 +153,7 @@ Agent 使用 Generic Host；Windows 通过 `Microsoft.Extensions.Hosting.Windows
     {
       "channelId": "erp-sql",
       "displayName": "ERP SQL Server",
+      "tags": ["数据库", "ERP"],
       "enabled": true,
       "listenAddress": "0.0.0.0",
       "listenPort": 21433,
@@ -165,6 +167,8 @@ Agent 使用 Generic Host；Windows 通过 `Microsoft.Extensions.Hosting.Windows
 ```
 
 密钥字段满足“每客户端一个密钥、服务端配置维护”。示例占位值不可用于运行：检查命令拒绝占位值及解码后不足 32 字节的密钥，并拒绝不同客户端复用同一密钥。使用密码学随机数生成至少 32 字节后 Base64 编码；不是人工口令。客户端与服务端仅比较解码后的固定长度字节，使用 `CryptographicOperations.FixedTimeEquals`。文件权限限制为服务账户及管理员可读；不把实际配置提交到代码仓库。
+
+客户端和通道的 `tags` 可省略，管理端将手工输入的逗号分隔值规范化为数组；每层最多 32 个不区分大小写的唯一 tag，每个 1～64 字符。tag 仅进入匿名管理查询和页面筛选，不进入 Agent 下发快照、配置摘要、认证、授权或转发判断；仅修改 tag 不撤销连接，也不向 Agent 发送配置更新。
 
 服务端 `tunnel.agentServerHost` 是 Agent 实际连接的 DNS 名称或 IP，不是隧道监听地址或管理页地址。管理端创建客户端时从此字段预填 `agentServerHost`，允许按客户端覆盖；若未配置且 `listenAddress` 为具体地址，则以监听地址预填。监听 `0.0.0.0` 或 `::` 时无法自动推断公网地址，必须显式配置或在创建时填写，不能从浏览器地址推断（管理页可能经 SSH 转发）。服务端创建接口在客户端未提交该值时同样使用上述默认值。TLS 启用时，所用地址必须匹配服务端证书 SAN。服务端 `tunnel.trustedCaPemPath` 指向仅含 CA 公钥证书的 PEM 文件，管理端不要求填写 Agent 本机 CA 路径；下载 Agent 配置时读取该文件并以 `trustedCaPemBase64` 内嵌。服务端不允许将私钥放入此字段。完整脱敏示例以 [客户端配置示例](../../config/examples/client.example.json) 为准。
 
@@ -207,6 +211,8 @@ Agent 使用 Generic Host；Windows 通过 `Microsoft.Extensions.Hosting.Windows
 
 `--check-config` 只做解析与静态校验，不监听网络；正常启动才检查实际端口占用。仪表盘保存先校验完整配置、启动新增监听、原子写入客户端 JSON，再切换运行时快照；按客户端及通道/访问映射比较更新前后的记录，仅真实变化时撤销受影响的待建立与已建立连接，然后向在线 Agent 下发快照。相同内容保存仍沿用持久化和下发流程，但不撤销连接；其他通道连接不受影响。若旧、新监听地址在同一端口重叠（例如 `127.0.0.1` 改为 `0.0.0.0`），须先短暂停止旧监听再绑定新监听；绑定失败时恢复旧监听并返回明确错误，不写入新配置或撤销旧连接。该切换可能短暂影响新连接的接入。详情见 [ADR-0009](../adr/0009-revoke-connections-on-channel-change.md)。直接改文件、密钥或基础服务端配置仍须在维护窗口重启。
 
+删除客户端时先确认没有其他客户端的端到端访问入口引用它，再停止监听、删除该客户端配置文件、切换运行时快照，并撤销该客户端作为访问方或目标方的连接及控制会话。仍有引用时返回明确错误，管理员须先删除相应入口；流量历史和审计记录作为历史证据保留。
+
 客户端禁用是独立于单条通道变更的安全操作：被其他客户端端到端入口引用不妨碍保存，因为入口元数据及授权材料保持不变；运行时目标是否启用仍在每次建立连接时检查。配置原子写入并切换后，停止该客户端的云端监听，撤销其普通连接与以其为访问方或目标方的端到端连接，关闭控制会话；新认证、业务接入及入口请求均拒绝。重新启用只恢复原配置，不复活旧连接。
 
 管理端创建端到端访问入口时只提交目标客户端 ID 与目标通道 ID；服务端生成 `<目标客户端 ID>-<目标通道 ID>` 作为入口 ID，默认启用，重复 ID 返回错误。入口无 PUT 修改路由；管理端只提供创建和删除。删除后重建会触发旧连接撤销和新配置下发，旧配置中的自定义入口 ID 保持可读、可删。
@@ -215,7 +221,7 @@ Agent 使用 Generic Host；Windows 通过 `Microsoft.Extensions.Hosting.Windows
 
 ## 6. TLS 与认证
 
-控制端口接受 TCP 后在启用 TLS 时先完成 TLS，再解析注册协议。服务端加载带私钥的证书和完整链，Agent 验证信任链、有效期、服务端名称，禁止无条件通过证书校验。数据端口当前不使用外层 TLS；普通代理内容及绑定元数据在该链路上不保密。互访业务另由两端 Agent 的内层 TLS 保护。
+控制端口接受 TCP 后在启用 TLS 时先完成 TLS，再解析注册协议。服务端加载带私钥的证书和完整链，Agent 验证信任链、有效期、服务端名称，禁止无条件通过证书校验。数据端口当前不使用外层 TLS；普通代理内容及绑定元数据在该链路上不保密。互访业务默认由两端 Agent 的内层 TLS 保护；通道显式关闭 `endToEndEncryptionEnabled` 后，访问证明仍保留，但业务内容在该链路上同样不保密。
 
 采用 OS 的 TLS 协议/密码套件策略，部署基线要求至少 TLS 1.2，支持时使用 TLS 1.3；不为旧设备开启过期协议。服务端复用 `SslStreamCertificateContext`，避免每连接重复构建证书上下文。[SslStream 最佳实践](https://learn.microsoft.com/en-us/dotnet/core/extensions/sslstream-best-practices)
 
@@ -232,7 +238,7 @@ Agent 使用 Generic Host；Windows 通过 `Microsoft.Extensions.Hosting.Windows
 | 偏移 | 长度 | 字段 |
 |---|---|---|
 | 0 | 4 字节 | ASCII magic：`NTP1` |
-| 4 | 1 字节 | version，固定 2；旧版共享入口协议被拒绝 |
+| 4 | 1 字节 | version，固定 3；版本 3 增加互访加密模式协商，旧版本被拒绝 |
 | 5 | 1 字节 | type |
 | 6 | 2 字节 | flags，v2 必须为 0，大端 |
 | 8 | 4 字节 | payloadLength，无符号大端，不含头 |
@@ -259,7 +265,7 @@ Agent 使用 Generic Host；Windows 通过 `Microsoft.Extensions.Hosting.Windows
 | 12 | TargetReady | Agent→Server，控制连接；connectionId、targetConnectDurationMs |
 | 13 | Start | Server→Agent，控制连接；connectionId |
 | 14 | Error | 任一端→对端；code，不含异常堆栈或秘密 |
-| 32 | Data | 仅互访数据中继；内层 TLS 密文块 |
+| 32 | Data | 仅互访数据中继；按通道模式承载内层 TLS 记录或明文业务块 |
 | 33 | Fin | 仅互访数据中继；该发送方向结束 |
 | 34 | Reset | 仅互访数据中继；异常终止 |
 
@@ -336,7 +342,7 @@ Pending 项绑定 `{sessionId, connectionId, channelId, tokenHash, deadline, sta
 1. 本地 TCP `ReceiveAsync` → 数据 TCP `SendAsync`。
 2. 数据 TCP `ReceiveAsync` → 本地 TCP `SendAsync`。
 
-普通代理在 `Start` 后只复制字节，不对业务数据加帧或叠加 TLS。每个方向只保留一个有界缓冲，写完已读内容才继续读；发送异常时取消另一个方向并关闭两端 socket。互访使用内层 TLS 与已有帧化适配器，其半关闭规则见[安全互访设计](agent-to-agent.md)。
+普通代理在 `Start` 后只复制字节，不对业务数据加帧或叠加 TLS。每个方向只保留一个有界缓冲，写完已读内容才继续读；发送异常时取消另一个方向并关闭两端 socket。互访复用已有帧化适配器，加密模式在其上运行内层 TLS，明文模式在访问证明后直接复制，其半关闭规则见[安全互访设计](agent-to-agent.md)。
 
 数据绑定握手使用 `ReadExactlyAsync` 读取帧；目标就绪与 Start 在控制连接上传递，进入业务阶段后数据连接不再调用帧读取器。`SendAsync` 循环处理部分发送；不能假定一次调用写完。参见 [Socket.Shutdown API](https://learn.microsoft.com/en-us/dotnet/api/system.net.sockets.socket.shutdown?view=net-10.0)。
 
@@ -439,9 +445,9 @@ Agent：Disconnected → Connecting → Authenticating → Configuring → Onlin
 | 方法与路径 | 响应 |
 |---|---|
 | GET `/api/v1/overview` | 总览计数、实例与采样时间 |
-| GET `/api/v1/dashboard/snapshot` | 匿名只读；分页返回管理台总览及每个客户端的摘要、通道状态和入口状态，pageSize ≤ 100，不含客户端密钥或通道访问密钥 |
-| GET `/api/v1/clients` | 客户端列表，支持 query/status/page/pageSize，pageSize ≤ 100 |
-| GET `/api/v1/clients/{id}/channels` | 所属通道状态、配置和计数，响应封装采样时间 |
+| GET `/api/v1/dashboard/snapshot` | 匿名只读；分页返回管理台总览及每个客户端的摘要、tag、通道状态和入口状态，pageSize ≤ 100，不含客户端密钥或通道访问密钥 |
+| GET `/api/v1/clients` | 客户端列表及 tag，支持 query/status/page/pageSize，pageSize ≤ 100 |
+| GET `/api/v1/clients/{id}/channels` | 所属通道状态、tag、配置和计数，响应封装采样时间 |
 | GET `/api/v1/clients/{id}/channels/{channelId}/connections` | 匿名只读；当前普通/端到端连接的 ID、来源、阶段、建立时间及方向字节，不含令牌或业务载荷 |
 | GET `/api/v1/clients/{id}/mappings` | 匿名只读；入口 ID、启用及上报状态、本机地址、目标客户端/通道，不含访问密钥和目标证书指纹 |
 | GET `/api/v1/history` | 历史通道分钟增量，支持 clientId、channelId 与 hours（最长 365 天）；查询超过 24 小时按 15 分钟或小时聚合 |
@@ -450,7 +456,8 @@ Agent：Disconnected → Connecting → Authenticating → Configuring → Onlin
 | GET `/api/v1/admin/audit` | 需管理员会话；按 hours（1–2160）、eventType、clientId、page、pageSize（≤100）查询 SQLite 审计事件，不返回凭据或业务载荷 |
 | DELETE `/api/v1/admin/session` | 注销当前管理会话 |
 | POST `/api/v1/admin/clients` | 需会话与 CSRF 令牌；创建独立密钥客户端配置 |
-| PUT `/api/v1/admin/clients/{id}` | 需会话与 CSRF 令牌；编辑显示名、启用状态与连接上限；禁用时立即撤销该客户端相关连接并停止监听 |
+| PUT `/api/v1/admin/clients/{id}` | 需会话与 CSRF 令牌；编辑显示名、tag、启用状态与连接上限；禁用时立即撤销该客户端相关连接并停止监听 |
+| DELETE `/api/v1/admin/clients/{id}` | 需会话与 CSRF 令牌；无其他入口引用时删除客户端文件，停止监听并撤销相关连接与会话 |
 | GET `/api/v1/admin/clients/{id}/agent-config` | 需会话；下载包含独立密钥的 Agent JSON 配置，响应不得缓存或写日志 |
 | GET/POST `/api/v1/admin/security-groups` | 需管理员会话；写入另需 CSRF；列出或新增安全组 |
 | PUT/DELETE `/api/v1/admin/security-groups/{id}` | 需管理员会话及 CSRF；修改或删除安全组；被通道引用时不可删除 |
@@ -558,7 +565,7 @@ Linux 对应 systemd 模板见 [deploy/linux/relaylink-server.service](../../dep
 
 发布 `linux-x64` 自包含包，并使用 [Linux systemd 模板](../../deploy/linux/relaylink-agent.service) 以独立无登录账号托管。程序安装在 root 管理的 `/opt/relaylink/agent`；配置、端到端身份、端口状态和诊断日志放在仅服务账号可读写的 `/var/lib/relaylink-agent`。该目录与 Server 的 `/var/lib/relaylink` 分离，避免父目录权限阻止 Agent 遍历。Linux 与 Windows Agent 使用相同的配置和协议，不维护平台专用通道。服务升级仅替换程序目录，保留状态目录。
 
-服务端同机 Linux Agent 访问 `127.0.0.1:18080` 时仍使用标准授权互访：管理页只绑定 loopback；同机 Agent 的目标通道指向该地址并启用 `authorizedClientsOnly`；指定访问方持有服务端下发的映射，在其本机 loopback 端口访问。远程段由 Agent 间内层 TLS 保护，目标段限制为同机 loopback，不增加管理页专用协议或绕过既有授权。具体步骤见 [Linux 部署说明](../../deploy/linux/README.md#通过互访通道访问服务端管理页)，决定见 [ADR-0014](../adr/0014-linux-agent.md)。
+服务端同机 Linux Agent 访问 `127.0.0.1:18080` 时仍使用标准授权互访：管理页只绑定 loopback；同机 Agent 的目标通道指向该地址并启用 `authorizedClientsOnly`；指定访问方持有服务端下发的映射，在其本机 loopback 端口访问。该管理通道应保留默认的 `endToEndEncryptionEnabled=true`，使远程段由 Agent 间内层 TLS 保护；目标段限制为同机 loopback，不增加管理页专用协议或绕过既有授权。具体步骤见 [Linux 部署说明](../../deploy/linux/README.md#通过互访通道访问服务端管理页)，决定见 [ADR-0014](../adr/0014-linux-agent.md)。
 
 ### 13.4 macOS Agent
 

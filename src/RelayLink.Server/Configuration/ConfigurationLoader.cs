@@ -237,6 +237,8 @@ public sealed class ConfigurationLoader
         if (client.E2eCertificateSha256 is not null)
             ValidateFingerprint(client.E2eCertificateSha256, client.ClientId);
 
+        ValidateTags(client.Tags, $"client {client.ClientId}");
+
         var ids = new HashSet<string>(StringComparer.Ordinal);
         foreach (var channel in client.Channels)
         {
@@ -258,6 +260,7 @@ public sealed class ConfigurationLoader
             if (channel.SecurityGroupId is not null &&
                 (channel.AuthorizedClientsOnly || !server.SecurityGroups.Any(group => group.Id == channel.SecurityGroupId)))
                 throw new ConfigurationException($"Invalid security group for {client.ClientId}/{channel.ChannelId}.");
+            ValidateTags(channel.Tags, $"channel {client.ClientId}/{channel.ChannelId}");
         }
 
         var mappingIds = new HashSet<string>(StringComparer.Ordinal);
@@ -268,6 +271,13 @@ public sealed class ConfigurationLoader
             ValidateAccessSecret(mapping.AccessSecret, $"{client.ClientId}/{mapping.MappingId}");
             ValidateFingerprint(mapping.TargetCertificateSha256, $"{client.ClientId}/{mapping.MappingId}");
         }
+    }
+
+    private static void ValidateTags(IReadOnlyList<string>? tags, string owner)
+    {
+        if (tags is null || tags.Count > 32 || tags.Any(tag => string.IsNullOrWhiteSpace(tag) || tag.Length > 64 || tag != tag.Trim() || tag.Any(char.IsControl)) ||
+            tags.Distinct(StringComparer.OrdinalIgnoreCase).Count() != tags.Count)
+            throw new ConfigurationException($"Invalid tags for {owner}; use at most 32 distinct tags of 1-64 characters.");
     }
 
     private static void ValidateGlobalConflicts(ServerConfiguration server, IEnumerable<ClientConfiguration> clients)

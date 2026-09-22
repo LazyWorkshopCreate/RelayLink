@@ -25,4 +25,4 @@
 
 单个 JSON 即可完成 Agent 安装，但配置内含独立客户端密钥和 CA 公钥证书，仍须按敏感配置保护。旧安装包不认识新字段，使用新下载配置时必须升级 Agent/安装包。服务端必须保护其 CA 文件，且不得把私钥置于该路径。
 
-关联：[需求](../requirements/requirements.md)、[技术设计](../design/technical-design.md)、[安装与使用](../operations/installation-and-usage.md)。
+关联：[Agent 能力需求](../requirements/2026-09-17-agent-capabilities.md)、[技术设计](../design/technical-design.md)、[安装与使用](../operations/installation-and-usage.md)。

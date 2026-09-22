@@ -3,7 +3,7 @@ namespace RelayLink.Protocol;
 public static class ProtocolConstants
 {
     public const string Magic = "NTP1";
-    public const byte Version = 2;
+    public const byte Version = 3;
     public const int HeaderLength = 12;
     public const int MaxInitialPayloadLength = 8 * 1024;
     public const int MaxControlPayloadLength = 256 * 1024;

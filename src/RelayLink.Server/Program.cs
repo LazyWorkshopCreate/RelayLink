@@ -191,7 +191,7 @@ app.MapGet("/api/v1/clients", (HttpRequest request, ServerRuntime runtime) =>
     var offset = (long)(page - 1) * pageSize;
     var clients = (offset >= matches.Length ? Enumerable.Empty<ClientConfiguration>() : matches.Skip((int)offset))
         .Take(pageSize)
-        .Select(client => new { clientId = client.ClientId, displayName = client.DisplayName, enabled = client.Enabled, client.E2eCertificateSha256, client.MaxConnections, client.MaxPendingConnections, online = runtime.Sessions.TryGet(client.ClientId, out var session), connectedAtUtc = session?.ConnectedAtUtc, lastHeartbeatUtc = session?.LastHeartbeatUtc, heartbeatRttMs = session?.LastHeartbeatRtt?.TotalMilliseconds, agentVersion = session?.AgentVersion })
+        .Select(client => new { clientId = client.ClientId, displayName = client.DisplayName, tags = client.Tags, enabled = client.Enabled, client.E2eCertificateSha256, client.MaxConnections, client.MaxPendingConnections, online = runtime.Sessions.TryGet(client.ClientId, out var session), connectedAtUtc = session?.ConnectedAtUtc, lastHeartbeatUtc = session?.LastHeartbeatUtc, heartbeatRttMs = session?.LastHeartbeatRtt?.TotalMilliseconds, agentVersion = session?.AgentVersion })
         .ToArray();
     return Results.Ok(new { snapshotTimeUtc = DateTimeOffset.UtcNow, page, pageSize, total = matches.Length, clients });
 });
@@ -205,7 +205,7 @@ app.MapGet("/api/v1/clients/{id}/channels", (string id, ServerRuntime runtime, M
         channels = client.Channels.Select(channel =>
         {
             var metric = metrics.For(client.ClientId, channel.ChannelId).Snapshot();
-            return new { channelId = channel.ChannelId, displayName = channel.DisplayName, listenAddress = channel.ListenAddress, listenPort = channel.ListenPort, securityGroupId = channel.SecurityGroupId, targetHost = channel.TargetHost, targetPort = channel.TargetPort, enabled = channel.Enabled, authorizedClientsOnly = channel.AuthorizedClientsOnly, maxConnections = channel.MaxConnections, targetConnectTimeoutSeconds = channel.TargetConnectTimeoutSeconds, listenerState = channel.AuthorizedClientsOnly ? "peer-only" : channel.Enabled ? "listening" : "stopped", available = channel.Enabled && !channel.AuthorizedClientsOnly && online, pendingConnections = channel.AuthorizedClientsOnly ? metric.PeerPendingConnections : metric.PendingConnections, activeConnections = channel.AuthorizedClientsOnly ? metric.PeerActiveConnections : metric.ActiveConnections, acceptedTotal = channel.AuthorizedClientsOnly ? metric.PeerAcceptedTotal : metric.AcceptedTotal, openedTotal = channel.AuthorizedClientsOnly ? metric.PeerOpenedTotal : metric.OpenedTotal, openFailedTotal = channel.AuthorizedClientsOnly ? metric.PeerOpenFailedTotal : metric.OpenFailedTotal, metric.NormalClosedTotal, metric.AbortedTotal, metric.BytesToTarget, metric.BytesToCaller, metric.PeerCiphertextToTarget, metric.PeerCiphertextToCaller, targetLastResult = metric.TargetLastResult?.Result, targetLastResultTimeUtc = metric.TargetLastResult?.TimeUtc };
+            return new { channelId = channel.ChannelId, displayName = channel.DisplayName, tags = channel.Tags, listenAddress = channel.ListenAddress, listenPort = channel.ListenPort, securityGroupId = channel.SecurityGroupId, targetHost = channel.TargetHost, targetPort = channel.TargetPort, enabled = channel.Enabled, authorizedClientsOnly = channel.AuthorizedClientsOnly, endToEndEncryptionEnabled = channel.EndToEndEncryptionEnabled, maxConnections = channel.MaxConnections, targetConnectTimeoutSeconds = channel.TargetConnectTimeoutSeconds, listenerState = channel.AuthorizedClientsOnly ? "peer-only" : channel.Enabled ? "listening" : "stopped", available = channel.Enabled && !channel.AuthorizedClientsOnly && online, pendingConnections = channel.AuthorizedClientsOnly ? metric.PeerPendingConnections : metric.PendingConnections, activeConnections = channel.AuthorizedClientsOnly ? metric.PeerActiveConnections : metric.ActiveConnections, acceptedTotal = channel.AuthorizedClientsOnly ? metric.PeerAcceptedTotal : metric.AcceptedTotal, openedTotal = channel.AuthorizedClientsOnly ? metric.PeerOpenedTotal : metric.OpenedTotal, openFailedTotal = channel.AuthorizedClientsOnly ? metric.PeerOpenFailedTotal : metric.OpenFailedTotal, metric.NormalClosedTotal, metric.AbortedTotal, metric.BytesToTarget, metric.BytesToCaller, metric.PeerCiphertextToTarget, metric.PeerCiphertextToCaller, targetLastResult = metric.TargetLastResult?.Result, targetLastResultTimeUtc = metric.TargetLastResult?.TimeUtc };
         }).ToArray()
     });
 });
@@ -239,14 +239,20 @@ app.MapPost("/api/v1/admin/clients", async (ClientCreateRequest create, HttpRequ
     try
     {
         var client = await editor.CreateAsync(create with { AgentServerHost = agentServerHost }, cancellationToken);
-        return Results.Created($"/api/v1/clients/{client.ClientId}", new { clientId = client.ClientId, client.DisplayName, client.Enabled, client.MaxConnections, client.MaxPendingConnections, message = "客户端已创建；请下载并安全部署 Agent 配置文件。" });
+        return Results.Created($"/api/v1/clients/{client.ClientId}", new { clientId = client.ClientId, client.DisplayName, tags = client.Tags, client.Enabled, client.MaxConnections, client.MaxPendingConnections, message = "客户端已创建；请下载并安全部署 Agent 配置文件。" });
     }
     catch (ClientUpdateException exception) { return Results.BadRequest(new { error = exception.Message }); }
 });
 app.MapPut("/api/v1/admin/clients/{id}", async (string id, ClientUpdateRequest update, HttpRequest request, AdminSessionService sessions, ClientConfigurationEditor editor, CancellationToken cancellationToken) =>
 {
     if (!sessions.TryAuthorize(request, requireCsrf: true, out _)) return Results.Unauthorized();
-    try { var client = await editor.UpdateAsync(id, update, cancellationToken); return Results.Ok(new { clientId = client.ClientId, client.DisplayName, client.Enabled, client.MaxConnections, client.MaxPendingConnections }); }
+    try { var client = await editor.UpdateAsync(id, update, cancellationToken); return Results.Ok(new { clientId = client.ClientId, client.DisplayName, tags = client.Tags, client.Enabled, client.MaxConnections, client.MaxPendingConnections }); }
+    catch (ClientUpdateException exception) { return Results.BadRequest(new { error = exception.Message }); }
+});
+app.MapDelete("/api/v1/admin/clients/{id}", async (string id, HttpRequest request, AdminSessionService sessions, ClientConfigurationEditor editor, CancellationToken cancellationToken) =>
+{
+    if (!sessions.TryAuthorize(request, requireCsrf: true, out _)) return Results.Unauthorized();
+    try { await editor.DeleteAsync(id, cancellationToken); return Results.NoContent(); }
     catch (ClientUpdateException exception) { return Results.BadRequest(new { error = exception.Message }); }
 });
 app.MapGet("/api/v1/admin/clients/{id}/agent-config", (string id, HttpRequest request, AdminSessionService sessions, ServerRuntime runtime) =>
@@ -291,7 +297,7 @@ app.MapPut("/api/v1/admin/clients/{id}/channels/{channelId}", async (string id, 
     {
         var saved = await editor.UpdateAsync(id, channelId, update, cancellationToken);
         var pushed = runtime.Sessions.TryGet(id, out _);
-        return Results.Ok(new { channel = new { saved.ChannelId, saved.DisplayName, saved.Enabled, saved.ListenAddress, saved.ListenPort, saved.TargetHost, saved.TargetPort, saved.MaxConnections, saved.TargetConnectTimeoutSeconds, saved.AuthorizedClientsOnly }, pushedToAgent = pushed, message = pushed ? "已保存并下发；若通道配置发生变化，该通道原有连接已断开。" : "已保存；若通道配置发生变化，该通道原有连接已断开，客户端将在下次连接时获取配置。" });
+        return Results.Ok(new { channel = new { saved.ChannelId, saved.DisplayName, tags = saved.Tags, saved.Enabled, saved.ListenAddress, saved.ListenPort, saved.TargetHost, saved.TargetPort, saved.MaxConnections, saved.TargetConnectTimeoutSeconds, saved.AuthorizedClientsOnly, saved.EndToEndEncryptionEnabled }, pushedToAgent = pushed, message = pushed ? "已保存；运行配置变化已下发，tag 变更仅用于列表筛选。" : "已保存；客户端离线时将在下次连接获取运行配置，tag 仅用于列表筛选。" });
     }
     catch (ChannelUpdateException exception) { return Results.BadRequest(new { error = exception.Message }); }
 });
@@ -302,7 +308,7 @@ app.MapPost("/api/v1/admin/clients/{id}/channels", async (string id, ChannelCrea
     {
         var saved = await editor.CreateAsync(id, create, cancellationToken);
         var pushed = runtime.Sessions.TryGet(id, out _);
-        return Results.Created($"/api/v1/clients/{id}/channels", new { channel = new { saved.ChannelId, saved.DisplayName, saved.Enabled, saved.ListenAddress, saved.ListenPort, saved.TargetHost, saved.TargetPort, saved.MaxConnections, saved.TargetConnectTimeoutSeconds, saved.AuthorizedClientsOnly }, pushedToAgent = pushed, message = pushed ? "已新增并下发给在线客户端；服务端监听已更新。" : "已新增并更新服务端监听；客户端离线，将在下次连接时下发。" });
+        return Results.Created($"/api/v1/clients/{id}/channels", new { channel = new { saved.ChannelId, saved.DisplayName, tags = saved.Tags, saved.Enabled, saved.ListenAddress, saved.ListenPort, saved.TargetHost, saved.TargetPort, saved.MaxConnections, saved.TargetConnectTimeoutSeconds, saved.AuthorizedClientsOnly, saved.EndToEndEncryptionEnabled }, pushedToAgent = pushed, message = pushed ? "已新增并下发给在线客户端；服务端监听已更新。" : "已新增并更新服务端监听；客户端离线，将在下次连接时下发。" });
     }
     catch (ChannelUpdateException exception) { return Results.BadRequest(new { error = exception.Message }); }
 });
@@ -355,6 +361,7 @@ static IResult GetDashboardSnapshot(HttpRequest request, ServerRuntime runtime, 
                 {
                     channelId = channel.ChannelId,
                     displayName = channel.DisplayName,
+                    tags = channel.Tags,
                     listenAddress = channel.ListenAddress,
                     listenPort = channel.ListenPort,
                     securityGroupId = channel.SecurityGroupId,
@@ -362,6 +369,7 @@ static IResult GetDashboardSnapshot(HttpRequest request, ServerRuntime runtime, 
                     targetPort = channel.TargetPort,
                     enabled = channel.Enabled,
                     authorizedClientsOnly = channel.AuthorizedClientsOnly,
+                    endToEndEncryptionEnabled = channel.EndToEndEncryptionEnabled,
                     maxConnections = channel.MaxConnections,
                     targetConnectTimeoutSeconds = channel.TargetConnectTimeoutSeconds,
                     listenerState = channel.AuthorizedClientsOnly ? "peer-only" : channel.Enabled ? "listening" : "stopped",
@@ -399,6 +407,7 @@ static IResult GetDashboardSnapshot(HttpRequest request, ServerRuntime runtime, 
             {
                 clientId = client.ClientId,
                 displayName = client.DisplayName,
+                tags = client.Tags,
                 enabled = client.Enabled,
                 client.E2eCertificateSha256,
                 client.MaxConnections,

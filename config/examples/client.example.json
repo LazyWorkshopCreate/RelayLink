@@ -2,6 +2,7 @@
   "schemaVersion": 1,
   "clientId": "shanghai-01",
   "displayName": "上海节点 01",
+  "tags": ["生产", "上海"],
   "enabled": true,
   "secret": "REPLACE_WITH_UNIQUE_32_RANDOM_BYTES_BASE64",
   "maxConnections": 100,
@@ -11,8 +12,10 @@
     {
       "channelId": "erp-sql",
       "displayName": "ERP SQL Server",
+      "tags": ["数据库", "ERP"],
       "enabled": true,
       "authorizedClientsOnly": false,
+      "endToEndEncryptionEnabled": true,
       "securityGroupId": "office",
       "listenAddress": "0.0.0.0",
       "listenPort": 21433,

@@ -13,7 +13,7 @@
             <Box>
                 <Text style={{ fontSize: 30, fontWeight: 'bold', color: '#FFFFFF', letterSpacing: 1 }}>NTP1</Text>
                 <Box style={{ height: 10 }} />
-                <Text style={{ fontSize: 15, color: '#60A5FA', letterSpacing: 1 }}>version = 2</Text>
+                <Text style={{ fontSize: 15, color: '#60A5FA', letterSpacing: 1 }}>version = 3</Text>
                 <Box style={{ height: 18 }} />
                 <Box style={{ width: 44, height: 3, background: '#2563EB' }} />
             </Box>
@@ -97,7 +97,7 @@
                     </Box>
                     <Box style={{ width: 134, background: '#FFFFFF', border: '1.5px solid #DCE3ED', borderRadius: 6, padding: '8px 10px' }}>
                         <Text style={{ fontSize: 13, fontWeight: 'bold', color: '#2563EB' }}>32</Text>
-                        <Text style={{ fontSize: 12, color: '#0F172A' }}>Data（仅互访密文中继）</Text>
+                        <Text style={{ fontSize: 12, color: '#0F172A' }}>Data（互访加密或明文中继）</Text>
                     </Box>
                     <Box style={{ width: 134, background: '#FFFFFF', border: '1.5px solid #DCE3ED', borderRadius: 6, padding: '8px 10px' }}>
                         <Text style={{ fontSize: 13, fontWeight: 'bold', color: '#2563EB' }}>{{PAGE}} / {{TOTAL}}</Text>

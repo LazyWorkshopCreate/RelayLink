@@ -86,7 +86,7 @@
                 <Box>
                     <Text style={{ fontSize: 18, fontWeight: 600, color: '#FFFFFF' }}>流量历史：分钟级增量落到 SQLite</Text>
                     <Box style={{ height: 10 }} />
-                    <Text style={{ fontSize: 14, color: '#CBD5E1', lineHeight: 1.6 }}>服务端每 5 秒从累计计数求差，按 UTC 分钟做 UPSERT；普通字节与端到端密文字节分列存储，默认保留 90 天。</Text>
+                    <Text style={{ fontSize: 14, color: '#CBD5E1', lineHeight: 1.6 }}>服务端每 5 秒从累计计数求差，按 UTC 分钟做 UPSERT；普通字节与互访转发字节分列存储，默认保留 90 天。</Text>
                     <Box style={{ height: 10 }} />
                     <Text style={{ fontSize: 14, color: '#CBD5E1', lineHeight: 1.6 }}>点通道流量数字可打开聚合历史图；查询超过 24 小时自动按 15 分钟或小时聚合。</Text>
                 </Box>

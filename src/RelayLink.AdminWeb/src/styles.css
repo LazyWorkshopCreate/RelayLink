@@ -234,9 +234,29 @@ button:disabled {
 }
 .filters {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 12px;
     margin: 23px 0 17px;
+}
+.tag-filter {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: 41px;
+    padding: 0 12px;
+    color: #8a98a9;
+    background: #fff;
+    border: 1px solid #e3e9f1;
+    border-radius: 9px;
+    font-size: 12px;
+}
+.tag-filter input {
+    width: 145px;
+    border: 0;
+    outline: 0;
+    color: #3e4c63;
+    font-size: 13px;
 }
 .search {
     display: flex;
@@ -405,6 +425,22 @@ button:disabled {
     color: #8993a2;
     background: #f0f2f5;
 }
+.tag-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 6px;
+}
+.tag {
+    display: inline-flex;
+    padding: 2px 7px;
+    color: #536987;
+    background: #edf2f8;
+    border-radius: 10px;
+    font-family: inherit;
+    font-size: 10px;
+    line-height: 16px;
+}
 .primary.subtle {
     background: #edf2ff;
     color: #305bce;
@@ -499,6 +535,9 @@ td.channel-col small {
 .text-button.danger {
     color: #db6570;
 }
+.danger-action {
+    color: #c94f5b;
+}
 .empty-row {
     text-align: center;
     color: #99a6b7;
@@ -565,7 +604,7 @@ footer {
     box-shadow: 0 28px 80px #09182b55;
 }
 .modal.audit-modal {
-    width: min(1120px, calc(100vw - 32px));
+    width: min(1440px, calc(100vw - 64px));
 }
 .audit-filters {
     display: flex;
@@ -602,11 +641,42 @@ footer {
     justify-content: flex-end;
 }
 .audit-table {
-    min-width: 980px;
+    min-width: 1160px;
 }
 .audit-table th,
 .audit-table td {
-    overflow-wrap: anywhere;
+    padding-right: 14px;
+    padding-left: 14px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.audit-table th:nth-child(1),
+.audit-table td:nth-child(1) {
+    width: 145px;
+}
+.audit-table th:nth-child(2),
+.audit-table td:nth-child(2) {
+    width: 150px;
+}
+.audit-table th:nth-child(3),
+.audit-table td:nth-child(3) {
+    width: 190px;
+}
+.audit-table th:nth-child(4),
+.audit-table td:nth-child(4) {
+    width: 240px;
+}
+.audit-table th:nth-child(5),
+.audit-table td:nth-child(5) {
+    width: 140px;
+}
+.audit-table th:nth-child(6),
+.audit-table td:nth-child(6) {
+    width: 115px;
+}
+.audit-table th:nth-child(7),
+.audit-table td:nth-child(7) {
+    width: 180px;
 }
 .modal-heading {
     display: flex;
@@ -644,6 +714,9 @@ footer {
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 14px;
+}
+.full-width {
+    grid-column: 1 / -1;
 }
 .field {
     display: grid;

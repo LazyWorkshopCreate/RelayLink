@@ -64,7 +64,7 @@
                 <Box style={{ height: 18 }} />
                 <Text style={{ fontSize: 15, color: '#64748B', lineHeight: 1.65 }}>普通代理在这段链路上是明文 TCP，绑定元数据同样不保密。因此它只适用于受信隔离链路，或者业务自身已启用端到端 TLS 的场景。</Text>
                 <Box style={{ height: 16 }} />
-                <Text style={{ fontSize: 15, color: '#64748B', lineHeight: 1.65 }}>互访模式不受此限：业务载荷由两端 Agent 之间的内层 TLS 保护，服务端只中继密文。</Text>
+                <Text style={{ fontSize: 15, color: '#64748B', lineHeight: 1.65 }}>互访通道默认由两端 Agent 的内层 TLS 保护；管理员显式关闭后则以明文中继，必须依赖受信网络或业务自身加密。</Text>
             </Box>
             <Box>
                 <Box style={{ width: 44, height: 3, background: '#2563EB' }} />

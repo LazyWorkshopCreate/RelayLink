@@ -10,7 +10,7 @@ RelayLink Agent 的 Generic Host、配置、控制连接、数据隧道和本机
 ## 决定
 
 - Agent 正式增加 `osx-x64`（Intel）和 `osx-arm64`（Apple Silicon）两个自包含发布包；不增加 macOS Server 发布。
-- macOS 与 Windows、Linux Agent 使用同一配置 schema、线协议、身份、通道、互访内层 TLS、端口状态和本机只读状态页，不增加平台专用通道逻辑。
+- macOS 与 Windows、Linux Agent 使用同一配置 schema、线协议、身份、通道、互访加密开关、端口状态和本机只读状态页，不增加平台专用通道逻辑。
 - 使用系统级 launchd daemon 托管，以独立低权限账号运行。程序目录由 root 管理；配置、客户端密钥、端到端身份和端口状态放入仅服务账号可读写的 Application Support 目录。
 - tag 发行流水线在 macOS runner 上交叉生成两个架构的压缩包。仓库提供 launchd plist 和人工部署说明，不在第一期实现图形安装器或通用二进制文件。
 - 初始发布包未做 Developer ID 签名和 Apple 公证。正式分发到受 Gatekeeper 管理的设备前，发布方必须补齐签名、公证与 stapling；仓库不指导全局关闭 Gatekeeper。
@@ -26,4 +26,4 @@ RelayLink Agent 的 Generic Host、配置、控制连接、数据隧道和本机
 
 发行资产由四个增加到六个。macOS 设备需按 CPU 架构选择正确包，并由管理员预置服务账号、目录权限和 launchd 配置。非 macOS 构建机能够验证双 RID 发布，但 launchd、Gatekeeper、文件权限、睡眠/唤醒和真实 TCP 行为必须分别在 Intel 与 Apple Silicon macOS 环境验收。
 
-相关部署步骤见 [macOS Agent 部署](../../deploy/macos/README.md)，需求和验收见 [REQ-001 FR-13](../requirements/requirements.md)。
+相关部署步骤见 [macOS Agent 部署](../../deploy/macos/README.md)，需求和验收见 [REQ-001D FR-13](../requirements/2026-09-20-cross-platform-agents.md#fr-13-macos-agent2026-09-20)。

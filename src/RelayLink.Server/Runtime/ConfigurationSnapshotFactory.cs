@@ -16,6 +16,7 @@ public static class ConfigurationSnapshotFactory
                 .Select(channel => new ChannelSnapshot(channel.ChannelId, channel.DisplayName, channel.Enabled, channel.TargetHost, channel.TargetPort, channel.MaxConnections, channel.TargetConnectTimeoutSeconds)
                 {
                     AuthorizedClientsOnly = channel.AuthorizedClientsOnly,
+                    EndToEndEncryptionEnabled = channel.EndToEndEncryptionEnabled,
                     AccessSecret = channel.AuthorizedClientsOnly ? channel.AccessSecret : null
                 }).ToArray())
         {

@@ -24,6 +24,6 @@
 
 ## 关联
 
-- [需求文档](../requirements/requirements.md)
+- [传输、管理与审计需求](../requirements/2026-09-18-runtime-and-audit.md)
 - [审计与流量设计](../design/audit-and-traffic.md)
 - [技术实现文档](../design/technical-design.md)

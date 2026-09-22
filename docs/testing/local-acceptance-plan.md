@@ -5,7 +5,7 @@
 版本：v1.0.0\
 更新日期：2026-09-18
 
-本方案用于在开发机上重复验证控制/数据分离、两个 Agent 和多个普通通道的 TCP 通信，并结合真实进程集成测试覆盖授权互访、管理、安全组及审计。它不替代跨主机部署、Windows Service 安装升级或 24 小时容量验收。验收依据见[需求文档](../requirements/requirements.md)、[技术设计](../design/technical-design.md)和[当前验证状态](verification-status.md)。
+本方案用于在开发机上重复验证控制/数据分离、两个 Agent 和多个普通通道的 TCP 通信，并结合真实进程集成测试覆盖授权互访、管理、安全组及审计。它不替代跨主机部署、Windows Service 安装升级或 24 小时容量验收。验收依据见[需求文档](../requirements/README.md)、[技术设计](../design/technical-design.md)和[当前验证状态](verification-status.md)。
 
 ## 1. 隔离与前置条件
 
@@ -36,7 +36,7 @@ git diff --check
 | L04 | 三个调用进程同时运行，每通道默认 8 条连接、每条 1 MiB | 24 条连接全部通过，三个通道标记不串流，两个方向计数非零，最终活动连接归零 |
 | L05 | 查询 `/api/v1/history` 与本次 SQLite 文件 | `accept-a/alpha`、`accept-a/beta`、`accept-b/gamma` 都出现分钟样本，彼此按客户端与通道分开 |
 | I01 | `ServerTunnelTests` | 控制/数据隔离、认证、原始流、管理写入与 CSRF、安全组、通道变更撤销、连接定向断开、审计持久化与写入故障拒绝均通过 |
-| I02 | `PeerConnectionTests`（显式 `EnablePeerTlsTests=true`） | 双 Agent 外层/内层 TLS、错误访问证明拒绝、双通道并发大流量、在线下发、禁用撤销、端口冲突轮换均通过 |
+| I02 | `PeerConnectionTests`（显式 `EnablePeerTlsTests=true`） | 双 Agent 控制 TLS、互访加密/明文模式、两种模式错误访问证明拒绝、半关闭、双通道并发大流量、在线下发、模式切换/禁用撤销、端口冲突轮换均通过 |
 | U01 | 单元测试和前端组件测试 | 两套测试全部通过，不以编译成功代替测试通过 |
 
 脚本完成后可再做只读现场确认：浏览器访问输出的 `dashboardUrl`，或执行 `Invoke-RestMethod <dashboardUrl>api/v1/overview`；匿名访问 `<dashboardUrl>api/v1/admin/audit` 应返回 401。需核对审计事件时，应在本次隔离实例上配置有效测试管理员密码并登录，或查看 I01 的自动化断言；当前脚本的占位密码哈希不能用于登录。

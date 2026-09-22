@@ -25,6 +25,6 @@ Agent 需要有权在配置目录写入端口状态文件，并能绑定所设�
 
 ## 关联
 
-- [需求文档](../requirements/requirements.md)
+- [Agent 能力需求](../requirements/2026-09-17-agent-capabilities.md)
 - [互访技术设计](../design/agent-to-agent.md)
 - [原互访决策](0005-agent-to-agent-tls.md)

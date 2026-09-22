@@ -25,10 +25,13 @@ public sealed class ChannelConfigurationEditor(
             var updated = ToChannel(channelId, request) with
             {
                 AuthorizedClientsOnly = request.AuthorizedClientsOnly ?? existing.AuthorizedClientsOnly,
+                EndToEndEncryptionEnabled = request.EndToEndEncryptionEnabled ?? existing.EndToEndEncryptionEnabled,
                 AccessSecret = request.AccessSecret ?? existing.AccessSecret,
-                SecurityGroupId = request.SecurityGroupId is null ? existing.SecurityGroupId : string.IsNullOrWhiteSpace(request.SecurityGroupId) ? null : request.SecurityGroupId
+                SecurityGroupId = request.SecurityGroupId is null ? existing.SecurityGroupId : string.IsNullOrWhiteSpace(request.SecurityGroupId) ? null : request.SecurityGroupId,
+                Tags = NormalizeTags(request.Tags)
             };
             if (updated.AuthorizedClientsOnly) updated = updated with { SecurityGroupId = null };
+            else updated = updated with { EndToEndEncryptionEnabled = true };
             if (updated.AuthorizedClientsOnly && string.IsNullOrWhiteSpace(updated.AccessSecret)) updated = updated with { AccessSecret = NewAccessSecret() };
             return (client with { Channels = client.Channels.Select(channel => channel.ChannelId == existing.ChannelId ? updated : channel).ToArray() }, updated);
         }, cancellationToken) ?? throw new ChannelUpdateException("Channel update did not produce a channel.");
@@ -42,8 +45,10 @@ public sealed class ChannelConfigurationEditor(
             var created = new ChannelConfiguration(request.ChannelId, request.DisplayName, request.Enabled, request.ListenAddress, request.ListenPort, request.TargetHost, request.TargetPort, request.MaxConnections, request.TargetConnectTimeoutSeconds)
             {
                 AuthorizedClientsOnly = request.AuthorizedClientsOnly ?? false,
+                EndToEndEncryptionEnabled = request.AuthorizedClientsOnly == true ? request.EndToEndEncryptionEnabled ?? true : true,
                 AccessSecret = (request.AuthorizedClientsOnly ?? false) && string.IsNullOrWhiteSpace(request.AccessSecret) ? NewAccessSecret() : request.AccessSecret,
-                SecurityGroupId = request.AuthorizedClientsOnly == true || string.IsNullOrWhiteSpace(request.SecurityGroupId) ? null : request.SecurityGroupId
+                SecurityGroupId = request.AuthorizedClientsOnly == true || string.IsNullOrWhiteSpace(request.SecurityGroupId) ? null : request.SecurityGroupId,
+                Tags = NormalizeTags(request.Tags)
             };
             return (client with { Channels = client.Channels.Append(created).ToArray() }, created);
         }, cancellationToken) ?? throw new ChannelUpdateException("Channel creation did not produce a channel.");
@@ -101,9 +106,14 @@ public sealed class ChannelConfigurationEditor(
             runtime.ReplaceConfiguration(updatedConfiguration);
             proxyListeners.RevokeChangedConnections(client, updatedClient);
             peerRelays.RevokeChangedConnections(client, updatedClient);
-            if (sessions.TryGet(clientId, out var session) && session is not null)
+            var onlyTagsChanged = client.Channels.Count == updatedClient.Channels.Count &&
+                client.Channels.Zip(updatedClient.Channels).All(pair =>
+                    pair.First.HasSameRuntimeSettings(pair.Second)) &&
+                client.Channels.Zip(updatedClient.Channels).Any(pair =>
+                    !pair.First.Tags.SequenceEqual(pair.Second.Tags, StringComparer.Ordinal));
+            var (snapshot, version) = ConfigurationSnapshotFactory.Create(updatedClient);
+            if (!onlyTagsChanged && sessions.TryGet(clientId, out var session) && session is not null)
             {
-                var (snapshot, version) = ConfigurationSnapshotFactory.Create(updatedClient);
                 await session.SendConfigurationUpdateAsync(snapshot, version, cancellationToken);
             }
             return result;
@@ -129,19 +139,28 @@ public sealed class ChannelConfigurationEditor(
     }
 
     private static string NewAccessSecret() => Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
+    private static string[] NormalizeTags(IReadOnlyList<string>? tags) => (tags ?? [])
+        .Select(tag => tag.Trim())
+        .Where(tag => tag.Length > 0)
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .ToArray();
 }
 
 public sealed record ChannelUpdateRequest(string DisplayName, bool Enabled, string ListenAddress, int ListenPort, string TargetHost, int TargetPort, int MaxConnections, int TargetConnectTimeoutSeconds)
 {
     public bool? AuthorizedClientsOnly { get; init; }
+    public bool? EndToEndEncryptionEnabled { get; init; }
     public string? AccessSecret { get; init; }
     public string? SecurityGroupId { get; init; }
+    public IReadOnlyList<string> Tags { get; init; } = [];
 }
 public sealed record ChannelCreateRequest(string ChannelId, string DisplayName, bool Enabled, string ListenAddress, int ListenPort, string TargetHost, int TargetPort, int MaxConnections, int TargetConnectTimeoutSeconds)
 {
     public bool? AuthorizedClientsOnly { get; init; }
+    public bool? EndToEndEncryptionEnabled { get; init; }
     public string? AccessSecret { get; init; }
     public string? SecurityGroupId { get; init; }
+    public IReadOnlyList<string> Tags { get; init; } = [];
 }
 public sealed class ChannelUpdateException(string message) : Exception(message);
 public sealed record MappingCreateRequest(string TargetClientId, string TargetChannelId);

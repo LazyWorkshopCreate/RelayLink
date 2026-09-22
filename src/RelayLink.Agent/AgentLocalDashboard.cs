@@ -15,7 +15,7 @@ public sealed class AgentStatus(AgentConfiguration configuration)
         var byId = addresses.ToDictionary(address => address.MappingId, StringComparer.Ordinal);
         var channels = configurationSnapshot.Channels.Select(channel => new AgentChannelView(
             channel.ChannelId, channel.DisplayName, channel.Enabled, channel.AuthorizedClientsOnly,
-            channel.TargetHost, channel.TargetPort)).ToArray();
+            channel.EndToEndEncryptionEnabled, channel.TargetHost, channel.TargetPort)).ToArray();
         var mappings = configurationSnapshot.OutboundMappings.Select(mapping => new AgentMappingView(
             mapping.MappingId, mapping.Enabled, mapping.TargetClientId, mapping.TargetChannelId,
             byId.TryGetValue(mapping.MappingId, out var address) ? $"127.0.0.1:{address.LocalPort}" : null)).ToArray();
@@ -26,7 +26,7 @@ public sealed class AgentStatus(AgentConfiguration configuration)
 }
 
 public sealed record AgentStatusSnapshot(string ClientId, bool Online, DateTimeOffset? UpdatedAtUtc, IReadOnlyList<AgentChannelView> Channels, IReadOnlyList<AgentMappingView> OutboundMappings);
-public sealed record AgentChannelView(string ChannelId, string DisplayName, bool Enabled, bool AuthorizedClientsOnly, string TargetHost, int TargetPort);
+public sealed record AgentChannelView(string ChannelId, string DisplayName, bool Enabled, bool AuthorizedClientsOnly, bool EndToEndEncryptionEnabled, string TargetHost, int TargetPort);
 public sealed record AgentMappingView(string MappingId, bool Enabled, string TargetClientId, string TargetChannelId, string? LocalAddress);
 
 public sealed class AgentLocalDashboard(AgentConfiguration configuration, AgentStatus status) : BackgroundService
@@ -44,6 +44,18 @@ public sealed class AgentLocalDashboard(AgentConfiguration configuration, AgentS
             context.Response.Headers.XContentTypeOptions = "nosniff";
             await next();
         });
+        app.MapGet("/api/v1/status", () => Results.Ok(status.Snapshot));
+        app.MapGet("/api/v1/channels", () =>
+        {
+            var snapshot = status.Snapshot;
+            return Results.Ok(new AgentChannelsResponse(snapshot.ClientId, snapshot.Online, snapshot.UpdatedAtUtc, snapshot.Channels));
+        });
+        app.MapGet("/api/v1/mappings", () =>
+        {
+            var snapshot = status.Snapshot;
+            return Results.Ok(new AgentMappingsResponse(snapshot.ClientId, snapshot.Online, snapshot.UpdatedAtUtc, snapshot.OutboundMappings));
+        });
+        // Kept for compatibility with builds that exposed the original unversioned aggregate endpoint.
         app.MapGet("/api/status", () => Results.Ok(status.Snapshot));
         app.MapGet("/", () => Results.Content(Render(status.Snapshot), "text/html; charset=utf-8"));
         await app.RunAsync(stoppingToken);
@@ -56,7 +68,7 @@ public sealed class AgentLocalDashboard(AgentConfiguration configuration, AgentS
         html.Append("<h1>RelayLink Agent · ").Append(E(snapshot.ClientId)).Append("</h1><p class=\"" ).Append(snapshot.Online ? "ok" : "muted").Append("\">● ").Append(snapshot.Online ? "已连接服务端" : "未连接服务端").Append(" · 每 5 秒刷新</p>");
         html.Append("<section><h2>被访问通道</h2><table><thead><tr><th>通道</th><th>模式</th><th>目标</th><th>状态</th></tr></thead><tbody>");
         foreach (var channel in snapshot.Channels)
-            html.Append("<tr><td>").Append(E(channel.DisplayName)).Append(" <small>").Append(E(channel.ChannelId)).Append("</small></td><td>").Append(channel.AuthorizedClientsOnly ? "仅授权客户端" : "普通代理").Append("</td><td><code>").Append(E(channel.TargetHost)).Append(':').Append(channel.TargetPort).Append("</code></td><td>").Append(channel.Enabled ? "启用" : "禁用").Append("</td></tr>");
+            html.Append("<tr><td>").Append(E(channel.DisplayName)).Append(" <small>").Append(E(channel.ChannelId)).Append("</small></td><td>").Append(channel.AuthorizedClientsOnly ? channel.EndToEndEncryptionEnabled ? "仅授权客户端（加密）" : "仅授权客户端（明文）" : "普通代理").Append("</td><td><code>").Append(E(channel.TargetHost)).Append(':').Append(channel.TargetPort).Append("</code></td><td>").Append(channel.Enabled ? "启用" : "禁用").Append("</td></tr>");
         if (snapshot.Channels.Count == 0) html.Append("<tr><td colspan=\"4\" class=\"muted\">当前无在线通道</td></tr>");
         html.Append("</tbody></table></section><section><h2>端到端访问入口</h2><table><thead><tr><th>入口 ID</th><th>访问目标</th><th>本机地址</th></tr></thead><tbody>");
         foreach (var mapping in snapshot.OutboundMappings)
@@ -66,3 +78,6 @@ public sealed class AgentLocalDashboard(AgentConfiguration configuration, AgentS
         return html.ToString();
     }
 }
+
+public sealed record AgentChannelsResponse(string ClientId, bool Online, DateTimeOffset? UpdatedAtUtc, IReadOnlyList<AgentChannelView> Channels);
+public sealed record AgentMappingsResponse(string ClientId, bool Online, DateTimeOffset? UpdatedAtUtc, IReadOnlyList<AgentMappingView> Mappings);

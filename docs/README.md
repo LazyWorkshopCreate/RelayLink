@@ -2,7 +2,7 @@
 
 | 文档 | ID | 状态 | 用途 |
 |---|---|---|---|
-| [需求文档](requirements/requirements.md) | REQ-001 | Draft | 范围、功能与验收 |
+| [需求文档索引](requirements/README.md) | REQ-001A–REQ-001G | Accepted / Done | 按日期与主题拆分的需求范围、功能与验收；实现进度见验证状态 |
 | [技术实现文档](design/technical-design.md) | DES-001 | Draft | 架构、协议、配置与部署设计 |
 | [首期隧道方案](adr/0001-independent-tcp-tunnels.md) | ADR-0001 | Proposed | 记录独立数据隧道的方案取舍 |
 | [运行时通道配置](adr/0002-runtime-channel-configuration.md) | ADR-0002 | Superseded | 历史上的监听更新及配置下发决定 |
@@ -21,6 +21,7 @@
 | [应用层安全组](adr/0012-application-security-groups.md) | ADR-0012 | Accepted | 普通通道按来源 IP/CIDR 限制访问及规则变更撤销连接 |
 | [Linux Agent](adr/0014-linux-agent.md) | ADR-0014 | Accepted | Linux 自包含发布、systemd 托管及复用既有互访访问服务端管理页 |
 | [macOS Agent](adr/0015-macos-agent.md) | ADR-0015 | Accepted | Intel/Apple Silicon 自包含发布与 launchd 托管 |
+| [互访业务流可选加密](adr/0016-optional-peer-traffic-encryption.md) | ADR-0016 | Accepted | 按通道选择内层 TLS 或认证后的明文直接复制 |
 | [目录规划](development/repository-layout.md) | DEV-001 | Active | 文件归属及项目职责 |
 | [文档管理规则](development/documentation-policy.md) | DEV-002 | Active | 命名、状态、更新和引用规则 |
 | [GitHub Actions 流水线](development/ci.md) | DEV-003 | Active | CI 检查、构建产物和安全边界 |
@@ -34,4 +35,4 @@
 
 ## 状态说明
 
-Draft：待评审；Proposed：待采纳的架构决定；Accepted：已明确采纳；Active：当前采用的工作规则；Superseded：被后续决定替代。文档被采纳不代表功能已经实现。
+Draft：待评审；Proposed：待采纳的架构决定；Accepted：需求或设计已明确采纳，其中需求内容已冻结但不代表全部完成；Done：需求实现及全部验收已有证据；Active：当前采用的工作规则；Superseded：被后续决定替代。

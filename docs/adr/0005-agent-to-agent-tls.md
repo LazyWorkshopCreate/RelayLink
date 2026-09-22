@@ -1,6 +1,6 @@
 # ADR-0005：服务端协调的 Agent 互访与内层 TLS
 
-状态：Superseded by [ADR-0011](0011-client-level-e2e-identity.md)（证书登记部分）；其余互访决策仍适用\
+状态：Superseded by [ADR-0011](0011-client-level-e2e-identity.md)（证书登记部分）和 [ADR-0016](0016-optional-peer-traffic-encryption.md)（强制内层 TLS 部分）；其余互访决策仍适用\
 日期：2026-09-17
 
 ## 背景
@@ -28,6 +28,6 @@
 
 ## 关联
 
-- [需求文档](../requirements/requirements.md)
+- [Agent 能力需求](../requirements/2026-09-17-agent-capabilities.md)
 - [互访技术设计](../design/agent-to-agent.md)
 - [原独立隧道方案](0001-independent-tcp-tunnels.md)

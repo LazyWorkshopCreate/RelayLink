@@ -18,6 +18,51 @@ namespace RelayLink.IntegrationTests;
 public sealed class ServerTunnelTests
 {
     [Fact]
+    public async Task Admin_can_update_tags_and_delete_an_unreferenced_client()
+    {
+        using var fixture = new TunnelFixture();
+        await fixture.StartAsync();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var token = deadline.Token;
+        using var http = new HttpClient(new HttpClientHandler { UseCookies = true });
+        using var login = await http.PostAsJsonAsync($"http://127.0.0.1:{fixture.DashboardPort}/api/v1/admin/session",
+            new { username = "admin", password = "test-password" }, token);
+        login.EnsureSuccessStatusCode();
+        var csrf = (await login.Content.ReadFromJsonAsync<JsonElement>(cancellationToken: token)).GetProperty("csrfToken").GetString();
+
+        using (var update = new HttpRequestMessage(HttpMethod.Put,
+            $"http://127.0.0.1:{fixture.DashboardPort}/api/v1/admin/clients/test-agent")
+        {
+            Content = JsonContent.Create(new { displayName = "Test Agent", tags = new[] { "production", "shanghai" },
+                enabled = true, maxConnections = 10, maxPendingConnections = 5 })
+        })
+        {
+            update.Headers.Add("X-RelayLink-CSRF", csrf);
+            using var response = await http.SendAsync(update, token);
+            response.EnsureSuccessStatusCode();
+        }
+        using (var snapshot = await http.GetFromJsonAsync<JsonDocument>(
+            $"http://127.0.0.1:{fixture.DashboardPort}/api/v1/dashboard/snapshot?page=1&pageSize=100", token))
+        {
+            var tags = snapshot!.RootElement.GetProperty("clients")[0].GetProperty("tags").EnumerateArray()
+                .Select(item => item.GetString()).ToArray();
+            Assert.Equal(new[] { "production", "shanghai" }, tags);
+        }
+
+        using (var delete = new HttpRequestMessage(HttpMethod.Delete,
+            $"http://127.0.0.1:{fixture.DashboardPort}/api/v1/admin/clients/test-agent"))
+        {
+            delete.Headers.Add("X-RelayLink-CSRF", csrf);
+            using var response = await http.SendAsync(delete, token);
+            Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+        }
+        Assert.False(File.Exists(fixture.ClientPath));
+        using var after = await http.GetFromJsonAsync<JsonDocument>(
+            $"http://127.0.0.1:{fixture.DashboardPort}/api/v1/dashboard/snapshot?page=1&pageSize=100", token);
+        Assert.Equal(0, after!.RootElement.GetProperty("total").GetInt32());
+    }
+
+    [Fact]
     public async Task Dashboard_snapshot_batches_clients_channels_and_mappings_without_secrets()
     {
         using var fixture = new TunnelFixture();

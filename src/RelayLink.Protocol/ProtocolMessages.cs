@@ -17,8 +17,8 @@ public sealed record StartMessage(Guid ConnectionId);
 public sealed record ErrorMessage(ErrorCode Code);
 public sealed record ResetMessage(ErrorCode Code);
 public sealed record PeerOpenRequestMessage(Guid RequestId, string MappingId);
-public sealed record PeerOpenGrantedMessage(Guid RequestId, Guid ConnectionId, Guid SessionId, string Token);
-public sealed record PeerOpenMessage(Guid ConnectionId, Guid SessionId, string CallerClientId, string ChannelId, string Token);
+public sealed record PeerOpenGrantedMessage(Guid RequestId, Guid ConnectionId, Guid SessionId, string Token, bool EndToEndEncryptionEnabled = true);
+public sealed record PeerOpenMessage(Guid ConnectionId, Guid SessionId, string CallerClientId, string ChannelId, string Token, bool EndToEndEncryptionEnabled = true);
 public sealed record PeerBindDataMessage(Guid ConnectionId, Guid SessionId, string Token, string Role);
 public sealed record PeerBindAcceptedMessage(Guid ConnectionId);
 public sealed record PeerOpenRejectedMessage(Guid RequestId, ErrorCode ErrorCode);
@@ -47,5 +47,6 @@ public sealed record ChannelSnapshot(
     int TargetConnectTimeoutSeconds)
 {
     public bool AuthorizedClientsOnly { get; init; }
+    public bool EndToEndEncryptionEnabled { get; init; } = true;
     public string? AccessSecret { get; init; }
 }

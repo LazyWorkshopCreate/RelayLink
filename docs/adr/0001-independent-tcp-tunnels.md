@@ -22,7 +22,7 @@ RelayLink 需要用 C# 将各地 SQL Server 的固定 TCP 端点提供给云端�
 
 ## 关联
 
-- [需求文档](../requirements/requirements.md)
+- [核心需求](../requirements/2026-09-15-core-requirements.md)
 - [技术设计](../design/technical-design.md)
 
 该 ADR 摘录现有设计提议，尚不表示用户已逐项批准技术取舍。

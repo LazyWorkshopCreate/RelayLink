@@ -14,7 +14,7 @@ Agent 原交付范围仅包含 Windows 安装包，但核心实现和互访集�
 - Agent 正式支持 Windows 和 Linux。Linux 提供 `linux-x64` 自包含发布包，以独立无登录账号和 systemd 托管；Windows 交付方式保持不变。
 - 两个平台使用相同的 Agent 配置 schema、线协议、通道与访问映射模型。Linux 不增加平台专用通道字段或管理页面专用协议。
 - 服务端同机 Agent 通过普通授权互访通道连接 `127.0.0.1:18080`。Server 管理页只绑定 loopback；只有在访问方客户端配置了指向该通道的映射后，访问方本机 loopback 才出现入口。
-- 访问链路继续执行目标 Agent 证书指纹固定、访问密钥证明和 Agent 间内层 TLS。浏览器到访问方 Agent、目标 Agent 到管理页均为各自主机 loopback。
+- 访问链路继续执行目标 Agent 证书指纹固定、访问密钥证明，并为管理页面通道保留默认的 Agent 间内层 TLS。浏览器到访问方 Agent、目标 Agent 到管理页均为各自主机 loopback。后续 [ADR-0016](0016-optional-peer-traffic-encryption.md) 虽允许按通道关闭加密，但不改变本方案的安全默认值。
 - Linux 程序目录由 root 管理；配置、端到端身份、端口状态和诊断日志放在仅 Agent 服务账号可读写的 `/var/lib/relaylink-agent`，与 Server 的 `/var/lib/relaylink` 分离。升级程序不得删除或重建身份状态。
 
 ## 备选
@@ -31,7 +31,7 @@ Agent 原交付范围仅包含 Windows 安装包，但核心实现和互访集�
 
 ## 关联
 
-- [需求文档](../requirements/requirements.md)
+- [跨平台 Agent 需求](../requirements/2026-09-20-cross-platform-agents.md)
 - [技术设计](../design/technical-design.md)
 - [Agent 安全互访设计](../design/agent-to-agent.md)
 - [Linux 部署说明](../../deploy/linux/README.md)

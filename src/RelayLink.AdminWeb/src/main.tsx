@@ -19,6 +19,7 @@ import {
     Settings2,
     ShieldCheck,
     Shield,
+    Trash2,
     X,
 } from 'lucide-react';
 import './styles.css';
@@ -41,6 +42,7 @@ type Overview = {
 type Client = {
     clientId: string;
     displayName: string;
+    tags: string[];
     enabled: boolean;
     online: boolean;
     e2eCertificateSha256?: string;
@@ -51,8 +53,10 @@ type Client = {
 type Channel = {
     channelId: string;
     displayName: string;
+    tags: string[];
     enabled: boolean;
     authorizedClientsOnly?: boolean;
+    endToEndEncryptionEnabled?: boolean;
     securityGroupId?: string | null;
     available: boolean;
     listenAddress: string;
@@ -136,6 +140,7 @@ type DashboardSnapshot = {
 type ClientForm = {
     clientId: string;
     displayName: string;
+    tags: string;
     enabled: boolean;
     maxConnections: number;
     maxPendingConnections: number;
@@ -144,6 +149,7 @@ type ClientForm = {
 type ChannelForm = {
     channelId: string;
     displayName: string;
+    tags: string;
     enabled: boolean;
     listenAddress: string;
     listenPort: number;
@@ -152,6 +158,7 @@ type ChannelForm = {
     maxConnections: number;
     targetConnectTimeoutSeconds: number;
     authorizedClientsOnly: boolean;
+    endToEndEncryptionEnabled: boolean;
     securityGroupId: string;
 };
 type MappingForm = {
@@ -162,6 +169,7 @@ type MappingForm = {
 const emptyClient: ClientForm = {
     clientId: '',
     displayName: '',
+    tags: '',
     enabled: true,
     maxConnections: 100,
     maxPendingConnections: 100,
@@ -170,6 +178,7 @@ const emptyClient: ClientForm = {
 const emptyChannel: ChannelForm = {
     channelId: '',
     displayName: '',
+    tags: '',
     enabled: true,
     listenAddress: '0.0.0.0',
     listenPort: 19000,
@@ -178,6 +187,7 @@ const emptyChannel: ChannelForm = {
     maxConnections: 100,
     targetConnectTimeoutSeconds: 10,
     authorizedClientsOnly: false,
+    endToEndEncryptionEnabled: true,
     securityGroupId: '',
 };
 const emptyMapping: MappingForm = {
@@ -192,6 +202,19 @@ const fmt = (n: number) =>
           : `${(n / 1048576).toFixed(1)} MiB`;
 const time = (s?: string) => (s ? new Date(s).toLocaleString('zh-CN') : '—');
 const enc = encodeURIComponent;
+const parseTags = (value: string) => [
+    ...new Map(
+        value
+            .split(/[,，\n]+/)
+            .map((tag) => tag.trim())
+            .filter(Boolean)
+            .map((tag) => [tag.toLowerCase(), tag]),
+    ).values(),
+];
+const hasAllTags = (tags: string[] | undefined, required: string[]) => {
+    const normalized = new Set((tags || []).map((tag) => tag.toLowerCase()));
+    return required.every((tag) => normalized.has(tag.toLowerCase()));
+};
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
     const response = await fetch(path, { credentials: 'same-origin', cache: 'no-store', ...init });
@@ -326,6 +349,8 @@ export function App() {
     const [securityGroupOriginalId, setSecurityGroupOriginalId] = useState<string | null>(null);
     const [securityGroupToDelete, setSecurityGroupToDelete] = useState<SecurityGroup | null>(null);
     const [query, setQuery] = useState('');
+    const [clientTagQuery, setClientTagQuery] = useState('');
+    const [channelTagQuery, setChannelTagQuery] = useState('');
     const [status, setStatus] = useState('all');
     const [busy, setBusy] = useState(true);
     const [error, setError] = useState('');
@@ -361,6 +386,7 @@ export function App() {
     } | null>(null);
     const [confirmConnectionId, setConfirmConnectionId] = useState<string | null>(null);
     const [confirmDelete, setConfirmDelete] = useState<{ clientId: string; channel: Channel } | null>(null);
+    const [confirmDeleteClient, setConfirmDeleteClient] = useState<ViewClient | null>(null);
     const [saving, setSaving] = useState(false);
     const [updatedAt, setUpdatedAt] = useState(0);
     const [clock, setClock] = useState(Date.now());
@@ -372,6 +398,7 @@ export function App() {
         historyDialog ||
         connectionDialog ||
         confirmDelete ||
+        confirmDeleteClient ||
         confirmDeleteMapping ||
         securityGroupsOpen ||
         auditOpen ||
@@ -580,11 +607,30 @@ export function App() {
                           enabled: form.enabled,
                           maxConnections: form.maxConnections,
                           maxPendingConnections: form.maxPendingConnections,
+                          tags: parseTags(form.tags),
                       }
-                    : form,
+                    : { ...form, tags: parseTags(form.tags) },
             );
             setClientDialog(null);
             setNotice(original ? '客户端设置已保存。' : '客户端已创建，可下载 Agent 配置。');
+            await refresh();
+        } catch (e) {
+            setError((e as Error).message);
+        } finally {
+            setSaving(false);
+        }
+    }
+    async function deleteClient() {
+        if (!confirmDeleteClient) return;
+        setSaving(true);
+        setError('');
+        try {
+            await write(`/api/v1/admin/clients/${enc(confirmDeleteClient.clientId)}`, 'DELETE');
+            setClients((current) =>
+                current.filter((client) => client.clientId !== confirmDeleteClient.clientId),
+            );
+            setConfirmDeleteClient(null);
+            setNotice('客户端及其通道、访问入口配置已删除。');
             await refresh();
         } catch (e) {
             setError((e as Error).message);
@@ -602,7 +648,9 @@ export function App() {
             const result = await write<{ message: string }>(
                 `/api/v1/admin/clients/${enc(clientId)}/channels${original ? `/${enc(original.channelId)}` : ''}`,
                 original ? 'PUT' : 'POST',
-                original ? { ...form, channelId: undefined } : form,
+                original
+                    ? { ...form, tags: parseTags(form.tags), channelId: undefined }
+                    : { ...form, tags: parseTags(form.tags) },
             );
             setChannelDialog(null);
             setNotice(result.message);
@@ -735,16 +783,32 @@ export function App() {
             setSaving(false);
         }
     }
-    const visible = clients.filter(
-        (c) =>
-            (status === 'all' ||
-                (status === 'online' && c.online && c.enabled) ||
-                (status === 'offline' && !c.online && c.enabled) ||
-                (status === 'disabled' && !c.enabled)) &&
-            `${c.clientId} ${c.displayName} ${c.channels.map((ch) => `${ch.channelId} ${ch.displayName}`).join(' ')}`
-                .toLowerCase()
-                .includes(query.toLowerCase()),
-    );
+    const clientTagTerms = parseTags(clientTagQuery);
+    const channelTagTerms = parseTags(channelTagQuery);
+    const visible = clients
+        .filter(
+            (c) =>
+                (status === 'all' ||
+                    (status === 'online' && c.online && c.enabled) ||
+                    (status === 'offline' && !c.online && c.enabled) ||
+                    (status === 'disabled' && !c.enabled)) &&
+                `${c.clientId} ${c.displayName} ${c.channels.map((ch) => `${ch.channelId} ${ch.displayName}`).join(' ')}`
+                    .toLowerCase()
+                    .includes(query.toLowerCase()) &&
+                hasAllTags(c.tags, clientTagTerms) &&
+                (channelTagTerms.length === 0 ||
+                    c.channels.some((ch) => hasAllTags(ch.tags, channelTagTerms))),
+        )
+        .map((client) =>
+            channelTagTerms.length === 0
+                ? client
+                : {
+                      ...client,
+                      channels: client.channels.filter((channel) =>
+                          hasAllTags(channel.tags, channelTagTerms),
+                      ),
+                  },
+        );
     const stale = Boolean(error || (updatedAt && clock - updatedAt > 10000));
 
     return (
@@ -866,8 +930,8 @@ export function App() {
                             <small>
                                 → 目标 / → 访问方 · 自 {overview ? time(overview.statsSinceUtc) : '—'}
                             </small>
-                            <small title="互访通道采用端到端 TLS，服务端仅能统计转发的密文字节">
-                                互访密文：
+                            <small title="互访通道的服务端转发字节；是否加密由目标通道设置决定">
+                                互访转发：
                                 {overview
                                     ? `${fmt(overview.peerCiphertextToTarget)} / ${fmt(overview.peerCiphertextToCaller)}`
                                     : '—'}
@@ -895,6 +959,24 @@ export function App() {
                             placeholder="搜索客户端或通道"
                             value={query}
                             onChange={(e) => setQuery(e.target.value)}
+                        />
+                    </label>
+                    <label className="tag-filter">
+                        <span>客户端 tag</span>
+                        <input
+                            aria-label="客户端 tag 筛选"
+                            placeholder="多个用逗号分隔"
+                            value={clientTagQuery}
+                            onChange={(e) => setClientTagQuery(e.target.value)}
+                        />
+                    </label>
+                    <label className="tag-filter">
+                        <span>通道 tag</span>
+                        <input
+                            aria-label="通道 tag 筛选"
+                            placeholder="多个用逗号分隔"
+                            value={channelTagQuery}
+                            onChange={(e) => setChannelTagQuery(e.target.value)}
                         />
                     </label>
                     <label className="status-filter">
@@ -939,6 +1021,15 @@ export function App() {
                                             <small>
                                                 {client.clientId} · 最近心跳 {time(client.lastHeartbeatUtc)}
                                             </small>
+                                            {client.tags?.length > 0 && (
+                                                <div className="tag-list" aria-label="客户端 tags">
+                                                    {client.tags.map((tag) => (
+                                                        <span className="tag" key={tag}>
+                                                            {tag}
+                                                        </span>
+                                                    ))}
+                                                </div>
+                                            )}
                                             {session.authenticated && (
                                                 <small
                                                     title={
@@ -976,12 +1067,19 @@ export function App() {
                                                             maxConnections: client.maxConnections,
                                                             maxPendingConnections:
                                                                 client.maxPendingConnections,
+                                                            tags: (client.tags || []).join(', '),
                                                             agentServerHost: '',
                                                         },
                                                     })
                                                 }
                                             >
                                                 <Settings2 size={15} /> 编辑客户端
+                                            </button>
+                                            <button
+                                                className="ghost danger-action"
+                                                onClick={() => setConfirmDeleteClient(client)}
+                                            >
+                                                <Trash2 size={15} /> 删除客户端
                                             </button>
                                             <button
                                                 className="ghost"
@@ -1029,10 +1127,22 @@ export function App() {
                                                                 {ch.displayName}
                                                             </strong>
                                                             <small>{ch.channelId}</small>
+                                                            {ch.tags?.length > 0 && (
+                                                                <div
+                                                                    className="tag-list"
+                                                                    aria-label="通道 tags"
+                                                                >
+                                                                    {ch.tags.map((tag) => (
+                                                                        <span className="tag" key={tag}>
+                                                                            {tag}
+                                                                        </span>
+                                                                    ))}
+                                                                </div>
+                                                            )}
                                                         </td>
                                                         <td className="mono">
                                                             {ch.authorizedClientsOnly
-                                                                ? '仅客户端互访'
+                                                                ? `仅客户端互访 · ${ch.endToEndEncryptionEnabled !== false ? '加密' : '明文'}`
                                                                 : `${ch.listenAddress}:${ch.listenPort}`}
                                                             {ch.securityGroupId && (
                                                                 <small>安全组：{ch.securityGroupId}</small>
@@ -1067,7 +1177,13 @@ export function App() {
                                                         </td>
                                                         <td>
                                                             {ch.authorizedClientsOnly ? (
-                                                                <span title="端到端 TLS 密文字节；服务端无法统计业务有效载荷">
+                                                                <span
+                                                                    title={
+                                                                        ch.endToEndEncryptionEnabled !== false
+                                                                            ? '端到端 TLS 密文字节；服务端无法统计业务有效载荷'
+                                                                            : '未加密的互访业务字节；服务端中继链路可读取内容'
+                                                                    }
+                                                                >
                                                                     {fmt(ch.peerCiphertextToTarget)} /{' '}
                                                                     {fmt(ch.peerCiphertextToCaller)}
                                                                 </span>
@@ -1116,6 +1232,9 @@ export function App() {
                                                                                     channelId: ch.channelId,
                                                                                     displayName:
                                                                                         ch.displayName,
+                                                                                    tags: (
+                                                                                        ch.tags || []
+                                                                                    ).join(', '),
                                                                                     enabled: ch.enabled,
                                                                                     listenAddress:
                                                                                         ch.listenAddress,
@@ -1130,6 +1249,9 @@ export function App() {
                                                                                         Boolean(
                                                                                             ch.authorizedClientsOnly,
                                                                                         ),
+                                                                                    endToEndEncryptionEnabled:
+                                                                                        ch.endToEndEncryptionEnabled !==
+                                                                                        false,
                                                                                     securityGroupId:
                                                                                         ch.securityGroupId ||
                                                                                         '',
@@ -1329,15 +1451,22 @@ export function App() {
                                 <tr key={item.eventId}>
                                     <td>{time(item.occurredAtUtc)}</td>
                                     <td>{auditLabels[item.eventType] || item.eventType}</td>
-                                    <td>
+                                    <td
+                                        title={`${item.outcome}${item.reasonCode ? ` · ${item.reasonCode}` : ''}`}
+                                    >
                                         {item.outcome}
                                         {item.reasonCode ? ` · ${item.reasonCode}` : ''}
                                     </td>
-                                    <td className="mono">
+                                    <td
+                                        className="mono"
+                                        title={`${item.clientId || item.actor || '—'}${item.channelId ? ` / ${item.channelId}` : ''}`}
+                                    >
                                         {item.clientId || item.actor || '—'}
                                         {item.channelId ? ` / ${item.channelId}` : ''}
                                     </td>
-                                    <td className="mono">{item.remoteIp || item.callerClientId || '—'}</td>
+                                    <td className="mono" title={item.remoteIp || item.callerClientId || '—'}>
+                                        {item.remoteIp || item.callerClientId || '—'}
+                                    </td>
                                     <td className="mono" title={item.connectionId || ''}>
                                         {item.connectionId ? `${item.connectionId.slice(0, 8)}…` : '—'}
                                     </td>
@@ -1623,6 +1752,24 @@ export function App() {
                                     }
                                 />
                             </label>
+                            <label className="field full-width">
+                                Tags
+                                <input
+                                    aria-label="客户端 Tags"
+                                    maxLength={2100}
+                                    placeholder="例如：生产, 上海, 数据库"
+                                    value={clientDialog.form.tags}
+                                    onChange={(e) =>
+                                        setClientDialog({
+                                            ...clientDialog,
+                                            form: { ...clientDialog.form, tags: e.target.value },
+                                        })
+                                    }
+                                />
+                                <small>
+                                    手动输入，多个 tag 使用逗号分隔；最多 32 个，每个不超过 64 个字符。
+                                </small>
+                            </label>
                             <NumberField
                                 label="最大连接数"
                                 value={clientDialog.form.maxConnections}
@@ -1741,6 +1888,22 @@ export function App() {
                                     }
                                 />
                             </label>
+                            <label className="field full-width">
+                                Tags
+                                <input
+                                    aria-label="通道 Tags"
+                                    maxLength={2100}
+                                    placeholder="例如：数据库, 只读"
+                                    value={channelDialog.form.tags}
+                                    onChange={(e) =>
+                                        setChannelDialog({
+                                            ...channelDialog,
+                                            form: { ...channelDialog.form, tags: e.target.value },
+                                        })
+                                    }
+                                />
+                                <small>手动输入，多个 tag 使用逗号分隔；仅用于管理列表筛选。</small>
+                            </label>
                             {!channelDialog.form.authorizedClientsOnly && (
                                 <>
                                     <label className="field">
@@ -1858,6 +2021,24 @@ export function App() {
                             />{' '}
                             仅允许授权客户端互访（停止云端代理监听；服务端自动生成 32 字节访问密钥）
                         </label>
+                        {channelDialog.form.authorizedClientsOnly && (
+                            <label className="check">
+                                <input
+                                    type="checkbox"
+                                    checked={channelDialog.form.endToEndEncryptionEnabled}
+                                    onChange={(e) =>
+                                        setChannelDialog({
+                                            ...channelDialog,
+                                            form: {
+                                                ...channelDialog.form,
+                                                endToEndEncryptionEnabled: e.target.checked,
+                                            },
+                                        })
+                                    }
+                                />{' '}
+                                启用 Agent 间端到端加密（默认启用；关闭后业务流量以明文中继）
+                            </label>
+                        )}
                         <label className="check">
                             <input
                                 type="checkbox"
@@ -2117,7 +2298,7 @@ export function App() {
 
             <Modal
                 title={`${historyDialog?.client.displayName ?? ''} / ${historyDialog?.channel.displayName ?? ''}`}
-                description="历史流量按分钟存储；图表随时间范围按分钟、15 分钟或小时汇总。端到端通道统计密文字节。"
+                description="历史流量按分钟存储；图表随时间范围按分钟、15 分钟或小时汇总。互访通道统计服务端转发字节，加密通道对应密文字节。"
                 open={!!historyDialog}
                 onClose={() => setHistoryDialog(null)}
                 error={error}
@@ -2167,6 +2348,31 @@ export function App() {
                         </div>
                     </div>
                 )}
+            </Modal>
+
+            <Modal
+                title="删除客户端？"
+                description="删除后将停止该客户端的监听与会话，并删除服务端客户端配置文件。"
+                open={!!confirmDeleteClient}
+                onClose={() => setConfirmDeleteClient(null)}
+                error={error}
+            >
+                <p>
+                    确定删除客户端「{confirmDeleteClient?.displayName}
+                    」及其全部通道和访问入口？此操作不可撤销。
+                </p>
+                <div className="form-actions">
+                    <button className="ghost" onClick={() => setConfirmDeleteClient(null)}>
+                        取消
+                    </button>
+                    <button
+                        className="primary danger-fill"
+                        disabled={saving}
+                        onClick={() => void deleteClient()}
+                    >
+                        删除客户端
+                    </button>
+                </div>
             </Modal>
 
             <Modal

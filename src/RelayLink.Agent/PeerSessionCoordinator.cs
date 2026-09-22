@@ -128,25 +128,31 @@ internal sealed class PeerSessionCoordinator(
                 await controlWriter.WriteAsync(new Frame(FrameType.PeerOpenRequest, JsonProtocolSerializer.Serialize(new PeerOpenRequestMessage(requestId, mapping.MappingId))), deadline.Token);
                 var grant = await reply.Task.WaitAsync(deadline.Token);
                 await using var connection = await ConnectDataAsync(grant.ConnectionId, grant.SessionId, grant.Token, "caller", deadline.Token);
-                using var tls = new SslStream(connection.Framed, leaveInnerStreamOpen: true);
-                var expected = Convert.FromHexString(mapping.TargetCertificateSha256);
-                await tls.AuthenticateAsClientAsync(new SslClientAuthenticationOptions
+                using var tls = grant.EndToEndEncryptionEnabled ? new SslStream(connection.Framed, leaveInnerStreamOpen: true) : null;
+                Stream peerStream = connection.Framed;
+                if (tls is not null)
                 {
-                    TargetHost = mapping.TargetClientId,
-                    EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
-                    CertificateRevocationCheckMode = System.Security.Cryptography.X509Certificates.X509RevocationMode.NoCheck,
-                    RemoteCertificateValidationCallback = (_, certificate, _, _) => MatchesPinnedCertificate(certificate, expected)
-                }, deadline.Token);
-                if (!tls.IsEncrypted) throw new AuthenticationException("Peer TLS is not encrypted.");
+                    var expected = Convert.FromHexString(mapping.TargetCertificateSha256);
+                    await tls.AuthenticateAsClientAsync(new SslClientAuthenticationOptions
+                    {
+                        TargetHost = mapping.TargetClientId,
+                        EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
+                        CertificateRevocationCheckMode = System.Security.Cryptography.X509Certificates.X509RevocationMode.NoCheck,
+                        RemoteCertificateValidationCallback = (_, certificate, _, _) => MatchesPinnedCertificate(certificate, expected)
+                    }, deadline.Token);
+                    if (!tls.IsEncrypted) throw new AuthenticationException("Peer TLS is not encrypted.");
+                    peerStream = tls;
+                }
                 var challenge = new byte[32];
-                await tls.ReadExactlyAsync(challenge, deadline.Token);
-                var proof = ComputeProof(mapping.AccessSecret, agent.ClientId, mapping.TargetChannelId, grant.ConnectionId, challenge);
-                await tls.WriteAsync(proof, deadline.Token);
+                await peerStream.ReadExactlyAsync(challenge, deadline.Token);
+                var proof = ComputeProof(mapping.AccessSecret, agent.ClientId, mapping.TargetChannelId, grant.ConnectionId, grant.EndToEndEncryptionEnabled, challenge);
+                await peerStream.WriteAsync(proof, deadline.Token);
                 var status = new byte[1];
-                await tls.ReadExactlyAsync(status, deadline.Token);
+                await peerStream.ReadExactlyAsync(status, deadline.Token);
                 if (status[0] != 1) throw new IOException("Peer target was not ready.");
                 deadline.CancelAfter(Timeout.InfiniteTimeSpan);
-                await RelaySocketAsync(caller, tls, connection.Framed, sessionToken);
+                if (tls is not null) await RelayEncryptedSocketAsync(caller, tls, connection.Framed, sessionToken);
+                else await RelayPlainSocketAsync(caller, connection.Framed, sessionToken);
             }
             catch (Exception exception) when (exception is IOException or SocketException or OperationCanceledException or AuthenticationException or ProtocolException)
             {
@@ -160,35 +166,41 @@ internal sealed class PeerSessionCoordinator(
     {
         var current = Volatile.Read(ref snapshot);
         var channel = current.Channels.SingleOrDefault(candidate => candidate.ChannelId == open.ChannelId && candidate.Enabled && candidate.AuthorizedClientsOnly);
-        if (channel is null || string.IsNullOrWhiteSpace(channel.AccessSecret)) return;
+        if (channel is null || string.IsNullOrWhiteSpace(channel.AccessSecret) || channel.EndToEndEncryptionEnabled != open.EndToEndEncryptionEnabled) return;
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(sessionToken);
         deadline.CancelAfter(TimeSpan.FromSeconds(20));
         try
         {
             await using var connection = await ConnectDataAsync(open.ConnectionId, open.SessionId, open.Token, "target", deadline.Token);
-            using var tls = new SslStream(connection.Framed, leaveInnerStreamOpen: true);
-            await tls.AuthenticateAsServerAsync(new SslServerAuthenticationOptions
+            using var tls = open.EndToEndEncryptionEnabled ? new SslStream(connection.Framed, leaveInnerStreamOpen: true) : null;
+            Stream peerStream = connection.Framed;
+            if (tls is not null)
             {
-                ServerCertificate = identity.Certificate,
-                EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
-                ClientCertificateRequired = false,
-                CertificateRevocationCheckMode = System.Security.Cryptography.X509Certificates.X509RevocationMode.NoCheck
-            }, deadline.Token);
-            if (!tls.IsEncrypted) throw new AuthenticationException("Peer TLS is not encrypted.");
+                await tls.AuthenticateAsServerAsync(new SslServerAuthenticationOptions
+                {
+                    ServerCertificate = identity.Certificate,
+                    EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
+                    ClientCertificateRequired = false,
+                    CertificateRevocationCheckMode = System.Security.Cryptography.X509Certificates.X509RevocationMode.NoCheck
+                }, deadline.Token);
+                if (!tls.IsEncrypted) throw new AuthenticationException("Peer TLS is not encrypted.");
+                peerStream = tls;
+            }
             var challenge = RandomNumberGenerator.GetBytes(32);
-            await tls.WriteAsync(challenge, deadline.Token);
+            await peerStream.WriteAsync(challenge, deadline.Token);
             var provided = new byte[32];
-            await tls.ReadExactlyAsync(provided, deadline.Token);
-            var expected = ComputeProof(channel.AccessSecret, open.CallerClientId, channel.ChannelId, open.ConnectionId, challenge);
+            await peerStream.ReadExactlyAsync(provided, deadline.Token);
+            var expected = ComputeProof(channel.AccessSecret, open.CallerClientId, channel.ChannelId, open.ConnectionId, open.EndToEndEncryptionEnabled, challenge);
             if (!CryptographicOperations.FixedTimeEquals(provided, expected)) throw new AuthenticationException("Peer access proof was invalid.");
 
             using var target = new TcpClient();
             using var targetDeadline = CancellationTokenSource.CreateLinkedTokenSource(deadline.Token);
             targetDeadline.CancelAfter(TimeSpan.FromSeconds(channel.TargetConnectTimeoutSeconds));
             await target.ConnectAsync(channel.TargetHost, channel.TargetPort, targetDeadline.Token);
-            await tls.WriteAsync(new byte[] { 1 }, deadline.Token);
+            await peerStream.WriteAsync(new byte[] { 1 }, deadline.Token);
             deadline.CancelAfter(Timeout.InfiniteTimeSpan);
-            await RelaySocketAsync(target.Client, tls, connection.Framed, sessionToken);
+            if (tls is not null) await RelayEncryptedSocketAsync(target.Client, tls, connection.Framed, sessionToken);
+            else await RelayPlainSocketAsync(target.Client, connection.Framed, sessionToken);
         }
         catch (Exception exception) when (exception is IOException or SocketException or OperationCanceledException or AuthenticationException or ProtocolException)
         {
@@ -215,9 +227,9 @@ internal sealed class PeerSessionCoordinator(
         catch { client.Dispose(); throw; }
     }
 
-    private static byte[] ComputeProof(string base64Secret, string callerId, string channelId, Guid connectionId, byte[] challenge)
+    private static byte[] ComputeProof(string base64Secret, string callerId, string channelId, Guid connectionId, bool encryptionEnabled, byte[] challenge)
     {
-        var context = Encoding.UTF8.GetBytes($"RelayLink peer proof v1\0{callerId}\0{channelId}\0{connectionId:N}\0");
+        var context = Encoding.UTF8.GetBytes($"RelayLink peer proof v2\0{callerId}\0{channelId}\0{connectionId:N}\0{(encryptionEnabled ? "tls" : "plain")}\0");
         var payload = new byte[context.Length + challenge.Length];
         context.CopyTo(payload, 0);
         challenge.CopyTo(payload, context.Length);
@@ -232,7 +244,7 @@ internal sealed class PeerSessionCoordinator(
             DateTime.UtcNow >= leaf.NotBefore.ToUniversalTime() && DateTime.UtcNow <= leaf.NotAfter.ToUniversalTime();
     }
 
-    private static async Task RelaySocketAsync(Socket socket, SslStream tls, FramedDuplexStream framed, CancellationToken cancellationToken)
+    private static async Task RelayEncryptedSocketAsync(Socket socket, SslStream tls, FramedDuplexStream framed, CancellationToken cancellationToken)
     {
         using var relayCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var toPeer = Task.Run(async () =>
@@ -270,6 +282,46 @@ internal sealed class PeerSessionCoordinator(
         }, relayCancellation.Token);
         await RelayPump.CompleteBidirectionalAsync(toPeer, fromPeer, () => { relayCancellation.Cancel(); socket.Dispose(); });
         await framed.CompleteWritesAsync(relayCancellation.Token);
+    }
+
+    private static async Task RelayPlainSocketAsync(Socket socket, FramedDuplexStream framed, CancellationToken cancellationToken)
+    {
+        using var relayCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var toPeer = Task.Run(async () =>
+        {
+            var payload = new byte[ProtocolConstants.MaxDataPayloadLength];
+            while (true)
+            {
+                var count = await socket.ReceiveAsync(payload, SocketFlags.None, relayCancellation.Token);
+                if (count == 0)
+                {
+                    await framed.CompleteWritesAsync(relayCancellation.Token);
+                    return;
+                }
+                await framed.WriteAsync(payload.AsMemory(0, count), relayCancellation.Token);
+            }
+        }, relayCancellation.Token);
+        var fromPeer = Task.Run(async () =>
+        {
+            var payload = new byte[ProtocolConstants.MaxDataPayloadLength];
+            while (true)
+            {
+                var count = await framed.ReadAsync(payload, relayCancellation.Token);
+                if (count == 0)
+                {
+                    socket.Shutdown(SocketShutdown.Send);
+                    return;
+                }
+                var pending = payload.AsMemory(0, count);
+                while (!pending.IsEmpty)
+                {
+                    var sent = await socket.SendAsync(pending, SocketFlags.None, relayCancellation.Token);
+                    if (sent == 0) throw new IOException("Local socket closed during peer relay.");
+                    pending = pending[sent..];
+                }
+            }
+        }, relayCancellation.Token);
+        await RelayPump.CompleteBidirectionalAsync(toPeer, fromPeer, () => { relayCancellation.Cancel(); socket.Dispose(); });
     }
 
     private void Track(Task task)

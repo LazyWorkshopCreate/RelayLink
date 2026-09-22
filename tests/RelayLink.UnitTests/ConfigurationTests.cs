@@ -16,6 +16,58 @@ namespace RelayLink.UnitTests;
 public sealed class ConfigurationTests
 {
     [Fact]
+    public void Client_and_channel_tags_are_validated_as_distinct_bounded_metadata()
+    {
+        var channel = new ChannelConfiguration("echo", "Echo", true, "127.0.0.1", 19000, "127.0.0.1", 19001, 5, 5)
+        { Tags = ["database", "production"] };
+        var client = new ClientConfiguration(1, "agent", "Agent", true,
+            Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)), 10, 5, [channel])
+        { Tags = ["shanghai", "production"] };
+        var loader = new ConfigurationLoader();
+
+        loader.ValidateClientUpdate(TestConfiguration(client));
+        Assert.Throws<ConfigurationException>(() => loader.ValidateClientUpdate(
+            TestConfiguration(client with { Tags = ["Production", "production"] })));
+        Assert.Throws<ConfigurationException>(() => loader.ValidateClientUpdate(
+            TestConfiguration(client with { Channels = [channel with { Tags = [new string('x', 65)] }] })));
+    }
+
+    [Fact]
+    public void Tags_do_not_change_agent_snapshot_or_channel_runtime_settings()
+    {
+        var channel = new ChannelConfiguration("echo", "Echo", true, "127.0.0.1", 19000, "127.0.0.1", 19001, 5, 5);
+        var client = new ClientConfiguration(1, "agent", "Agent", true,
+            Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)), 10, 5, [channel]);
+        var taggedChannel = channel with { Tags = ["database"] };
+        var taggedClient = client with { Tags = ["production"], Channels = [taggedChannel] };
+
+        Assert.True(channel.HasSameRuntimeSettings(taggedChannel));
+        Assert.Equal(ConfigurationSnapshotFactory.Create(client).Version,
+            ConfigurationSnapshotFactory.Create(taggedClient).Version);
+    }
+
+    [Fact]
+    public void Peer_encryption_defaults_on_and_is_included_in_agent_snapshot()
+    {
+        const string legacyJson = """{"channelId":"private","displayName":"Private","enabled":true,"listenAddress":"127.0.0.1","listenPort":19000,"targetHost":"127.0.0.1","targetPort":19001,"maxConnections":5,"targetConnectTimeoutSeconds":5,"authorizedClientsOnly":true}""";
+        var options = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
+        var legacy = JsonSerializer.Deserialize<ChannelConfiguration>(legacyJson, options)!;
+        var plaintext = legacy with { EndToEndEncryptionEnabled = false, AccessSecret = Convert.ToBase64String(new byte[32]) };
+        var client = new ClientConfiguration(1, "agent", "Agent", true,
+            Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)), 10, 5, [plaintext]);
+
+        Assert.True(legacy.EndToEndEncryptionEnabled);
+        Assert.False(plaintext.EndToEndEncryptionEnabled);
+        Assert.False(ConfigurationSnapshotFactory.Create(client).Snapshot.Channels.Single().EndToEndEncryptionEnabled);
+        Assert.NotEqual(ConfigurationSnapshotFactory.Create(client).Version,
+            ConfigurationSnapshotFactory.Create(client with { Channels = [plaintext with { EndToEndEncryptionEnabled = true }] }).Version);
+
+        var oldGrant = JsonProtocolSerializer.Deserialize<PeerOpenGrantedMessage>(
+            """{"requestId":"00000000-0000-0000-0000-000000000001","connectionId":"00000000-0000-0000-0000-000000000002","sessionId":"00000000-0000-0000-0000-000000000003","token":"test"}"""u8);
+        Assert.True(oldGrant.EndToEndEncryptionEnabled);
+    }
+
+    [Fact]
     public void Dashboard_client_creation_reports_invalid_uppercase_id_clearly()
     {
         var client = new ClientConfiguration(1, "795S7", "Test", true, Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)), 10, 5, []);
