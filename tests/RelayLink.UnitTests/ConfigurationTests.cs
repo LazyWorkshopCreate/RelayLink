@@ -97,9 +97,12 @@ public sealed class ConfigurationTests
         File.WriteAllBytes(agentPath, AgentConfigurationFactory.Create(server, client));
 
         using var document = JsonDocument.Parse(File.ReadAllBytes(agentPath));
-        Assert.True(document.RootElement.TryGetProperty("trustedCaPemBase64", out _));
-        Assert.False(document.RootElement.TryGetProperty("trustedCaPemPath", out _));
-        Assert.Equal("tunnel.example.com", AgentConfigurationLoader.Load(agentPath).ServerHost);
+        var profiles = document.RootElement.GetProperty("servers");
+        Assert.Equal(1, profiles.GetArrayLength());
+        Assert.Equal("primary", profiles[0].GetProperty("profileId").GetString());
+        Assert.True(profiles[0].TryGetProperty("trustedCaPemBase64", out _));
+        Assert.False(profiles[0].TryGetProperty("trustedCaPemPath", out _));
+        Assert.Equal("tunnel.example.com", AgentProcessConfigurationLoader.Load(agentPath).Servers.Single().ServerHost);
     }
 
     [Fact]

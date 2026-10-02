@@ -22,7 +22,10 @@ if (-not $service) {
 }
 $registered = Get-WmiObject -Class Win32_Service -Filter "Name='$ServiceName'"
 $expectedPrefix = '"{0}" --config ' -f ([IO.Path]::GetFullPath($ExecutablePath))
-if (-not $registered -or -not $registered.PathName.StartsWith($expectedPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+$legacyExecutable = Join-Path (Split-Path -Parent ([IO.Path]::GetFullPath($ExecutablePath))) 'program\RelayLink.Agent.exe'
+$legacyPrefix = '"{0}" --config ' -f $legacyExecutable
+if (-not $registered -or (-not $registered.PathName.StartsWith($expectedPrefix, [StringComparison]::OrdinalIgnoreCase) -and
+    -not $registered.PathName.StartsWith($legacyPrefix, [StringComparison]::OrdinalIgnoreCase))) {
     throw "Service '$ServiceName' does not belong to this installation."
 }
 if ($service.Status -ne 'Stopped') {

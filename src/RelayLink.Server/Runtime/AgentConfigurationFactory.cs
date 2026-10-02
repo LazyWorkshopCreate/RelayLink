@@ -13,8 +13,9 @@ public static class AgentConfigurationFactory
         var trustedCaPemBase64 = tunnel.TlsEnabled
             ? Convert.ToBase64String(File.ReadAllBytes(tunnel.TrustedCaPemPath!))
             : null;
-        var agent = new
+        var profile = new
         {
+            profileId = "primary",
             serverHost = client.AgentServerHost ?? tunnel.DefaultAgentServerHost,
             serverPort = tunnel.Port,
             dataPort = tunnel.EffectiveDataPort,
@@ -23,6 +24,14 @@ public static class AgentConfigurationFactory
             trustedCaPemBase64,
             secret = client.Secret,
             reconnect = new { initialDelaySeconds = 1, maxDelaySeconds = 30, permanentErrorDelaySeconds = 60 }
+        };
+        var agent = new
+        {
+            dashboardPort = 18081,
+            outboundPortRangeStart = 20000,
+            outboundPortRangeEnd = 59999,
+            maxConnections = 2000,
+            servers = new[] { profile }
         };
         return JsonSerializer.SerializeToUtf8Bytes(agent, JsonOptions);
     }

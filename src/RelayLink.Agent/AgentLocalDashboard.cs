@@ -1,6 +1,6 @@
 using System.Net;
-using System.Text;
-using System.Text.Encodings.Web;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using RelayLink.Protocol;
 
 namespace RelayLink.Agent;
@@ -29,55 +29,211 @@ public sealed record AgentStatusSnapshot(string ClientId, bool Online, DateTimeO
 public sealed record AgentChannelView(string ChannelId, string DisplayName, bool Enabled, bool AuthorizedClientsOnly, bool EndToEndEncryptionEnabled, string TargetHost, int TargetPort);
 public sealed record AgentMappingView(string MappingId, bool Enabled, string TargetClientId, string TargetChannelId, string? LocalAddress);
 
-public sealed class AgentLocalDashboard(AgentConfiguration configuration, AgentStatus status) : BackgroundService
+public sealed class AgentLocalDashboard : BackgroundService
 {
+    private readonly int dashboardPort;
+    private readonly Func<IReadOnlyList<AgentServerRuntimeSnapshot>> snapshots;
+    private readonly AgentProcessRuntime? runtime;
+    private readonly AgentLocalWriteSession writeSession;
+    private static readonly JsonSerializerOptions AdminJsonOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        PropertyNameCaseInsensitive = false,
+        UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow
+    };
+    private string AdminCookie => $"relaylink-agent-local-write-{dashboardPort}";
+
+    public AgentLocalDashboard(AgentConfiguration configuration, AgentStatus status)
+    {
+        writeSession = new AgentLocalWriteSession();
+        dashboardPort = configuration.DashboardPort;
+        snapshots = () => [new AgentServerRuntimeSnapshot(configuration.ProfileId, configuration.ServerHost, configuration.UseTls, true, status.Snapshot)];
+    }
+
+    public AgentLocalDashboard(AgentProcessConfiguration configuration, AgentProcessRuntime runtime, AgentLocalWriteSession? writeSession = null)
+    {
+        dashboardPort = configuration.DashboardPort;
+        snapshots = () => runtime.Snapshot;
+        this.runtime = runtime;
+        this.writeSession = writeSession ?? new AgentLocalWriteSession();
+    }
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        if (configuration.DashboardPort == 0) return;
+        if (dashboardPort == 0) return;
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions { Args = [], ContentRootPath = AppContext.BaseDirectory });
-        builder.WebHost.ConfigureKestrel(kestrel => kestrel.Listen(IPAddress.Loopback, configuration.DashboardPort));
+        builder.WebHost.ConfigureKestrel(kestrel =>
+        {
+            kestrel.Listen(IPAddress.Loopback, dashboardPort);
+            kestrel.Limits.MaxRequestBodySize = 64 * 1024;
+        });
         var app = builder.Build();
         app.Use(async (context, next) =>
         {
             context.Response.Headers.CacheControl = "no-store";
-            context.Response.Headers.ContentSecurityPolicy = "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'";
+            context.Response.Headers.ContentSecurityPolicy = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'";
             context.Response.Headers.XContentTypeOptions = "nosniff";
+            var expectedOrigin = $"http://127.0.0.1:{dashboardPort}";
+            if (context.Request.Host.Host != "127.0.0.1" || context.Request.Host.Port != dashboardPort)
+            {
+                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                return;
+            }
+            var origin = context.Request.Headers.Origin.ToString();
+            if ((!string.IsNullOrEmpty(origin) && !string.Equals(origin, expectedOrigin, StringComparison.Ordinal)) ||
+                (context.Request.Method is "POST" or "PUT" or "PATCH" or "DELETE" && !string.Equals(origin, expectedOrigin, StringComparison.Ordinal)))
+            {
+                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                return;
+            }
             await next();
         });
-        app.MapGet("/api/v1/status", () => Results.Ok(status.Snapshot));
+        app.UseDefaultFiles();
+        app.UseStaticFiles();
+        IResult Single(Func<AgentStatusSnapshot, object> response)
+        {
+            var groups = snapshots();
+            return groups.Count == 1 ? Results.Ok(response(groups[0].Status)) : Results.Conflict(new { message = "Use the grouped Agent v2 API.", statusPath = "/api/v2/status" });
+        }
+        app.MapGet("/api/v1/status", () => Single(snapshot => snapshot));
         app.MapGet("/api/v1/channels", () =>
-        {
-            var snapshot = status.Snapshot;
-            return Results.Ok(new AgentChannelsResponse(snapshot.ClientId, snapshot.Online, snapshot.UpdatedAtUtc, snapshot.Channels));
-        });
+            Single(snapshot => new AgentChannelsResponse(snapshot.ClientId, snapshot.Online, snapshot.UpdatedAtUtc, snapshot.Channels)));
         app.MapGet("/api/v1/mappings", () =>
+            Single(snapshot => new AgentMappingsResponse(snapshot.ClientId, snapshot.Online, snapshot.UpdatedAtUtc, snapshot.OutboundMappings)));
+        app.MapGet("/api/v2/status", () => Results.Ok(new { servers = snapshots().Select(group => new
         {
-            var snapshot = status.Snapshot;
-            return Results.Ok(new AgentMappingsResponse(snapshot.ClientId, snapshot.Online, snapshot.UpdatedAtUtc, snapshot.OutboundMappings));
-        });
+            group.ProfileId, group.ServerHost, group.UseTls, group.Enabled, group.Status.ClientId, group.Status.Online, group.Status.UpdatedAtUtc,
+            group.PendingConnections, group.ActiveConnections, group.CapacityRejected,
+            group.Status.Channels, mappings = group.Status.OutboundMappings
+        }).ToArray() }));
+        app.MapGet("/api/v2/channels", () => Results.Ok(new { servers = snapshots().Select(group => new
+        {
+            group.ProfileId, group.Enabled, group.Status.ClientId, group.Status.Online, group.Status.UpdatedAtUtc, group.Status.Channels
+        }).ToArray() }));
+        app.MapGet("/api/v2/mappings", () => Results.Ok(new { servers = snapshots().Select(group => new
+        {
+            group.ProfileId, group.Enabled, group.Status.ClientId, group.Status.Online, group.Status.UpdatedAtUtc, mappings = group.Status.OutboundMappings
+        }).ToArray() }));
         // Kept for compatibility with builds that exposed the original unversioned aggregate endpoint.
-        app.MapGet("/api/status", () => Results.Ok(status.Snapshot));
-        app.MapGet("/", () => Results.Content(Render(status.Snapshot), "text/html; charset=utf-8"));
+        app.MapGet("/api/status", () => Single(snapshot => snapshot));
+        if (runtime is not null)
+        {
+            app.MapGet("/api/v2/admin/session", (HttpContext context) =>
+            {
+                var cookie = context.Request.Cookies[AdminCookie];
+                var session = writeSession.GetOrCreate(cookie);
+                if (cookie != session.Token)
+                    context.Response.Cookies.Append(AdminCookie, session.Token, new CookieOptions
+                    {
+                        HttpOnly = true, SameSite = SameSiteMode.Strict, Secure = false,
+                        IsEssential = true, Path = "/api/v2/admin", Expires = session.ExpiresAtUtc
+                    });
+                return Results.Ok(new
+                {
+                    csrfToken = session.CsrfToken,
+                    version = runtime.ConfigurationVersion
+                });
+            });
+            app.MapDelete("/api/v2/admin/session", (HttpContext context) =>
+            {
+                var rejection = RequireWriteSession(context);
+                if (rejection is not null) return rejection;
+                writeSession.Remove(context.Request.Cookies[AdminCookie]);
+                context.Response.Cookies.Delete(AdminCookie, new CookieOptions { Path = "/api/v2/admin" });
+                return Results.NoContent();
+            });
+            app.MapPost("/api/v2/admin/servers", async (HttpContext context) =>
+            {
+                var rejection = RequireWriteSession(context);
+                if (rejection is not null) return rejection;
+                AgentAddProfileRequest? request;
+                try { request = await JsonSerializer.DeserializeAsync<AgentAddProfileRequest>(context.Request.Body, AdminJsonOptions, context.RequestAborted); }
+                catch (JsonException) { return Results.BadRequest(new { message = "Invalid server profile request." }); }
+                if (request?.Server is null || string.IsNullOrWhiteSpace(request.Version)) return Results.BadRequest(new { message = "Invalid server profile request." });
+                try
+                {
+                    var version = await runtime.AddAsync(request.Server, request.Version, request.ConfirmExistingState, context.RequestAborted);
+                    return Results.Ok(new { version, profileId = request.Server.ProfileId });
+                }
+                catch (AgentProfileMutationException exception) { return MutationError(exception); }
+                catch (AgentConfigurationException) { return Results.BadRequest(new { message = "Invalid server profile or process limits." }); }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { return Results.Problem("Unable to save Agent configuration.", statusCode: 500); }
+            });
+            app.MapDelete("/api/v2/admin/servers/{profileId}", async (string profileId, HttpContext context) =>
+            {
+                var rejection = RequireWriteSession(context);
+                if (rejection is not null) return rejection;
+                AgentRemoveProfileRequest? request;
+                try { request = await JsonSerializer.DeserializeAsync<AgentRemoveProfileRequest>(context.Request.Body, AdminJsonOptions, context.RequestAborted); }
+                catch (JsonException) { return Results.BadRequest(new { message = "Invalid delete request." }); }
+                if (string.IsNullOrWhiteSpace(request?.Version)) return Results.BadRequest(new { message = "Invalid delete request." });
+                try
+                {
+                    var version = await runtime.RemoveAsync(profileId, request.Version, context.RequestAborted);
+                    return Results.Ok(new { version });
+                }
+                catch (AgentProfileMutationException exception) { return MutationError(exception); }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { return Results.Problem("Unable to save Agent configuration.", statusCode: 500); }
+            });
+            app.MapPut("/api/v2/admin/servers/{profileId}", async (string profileId, HttpContext context) =>
+            {
+                var rejection = RequireWriteSession(context);
+                if (rejection is not null) return rejection;
+                AgentUpdateProfileRequest? request;
+                try { request = await JsonSerializer.DeserializeAsync<AgentUpdateProfileRequest>(context.Request.Body, AdminJsonOptions, context.RequestAborted); }
+                catch (JsonException) { return Results.BadRequest(new { message = "Invalid server profile request." }); }
+                if (request?.Server is null || string.IsNullOrWhiteSpace(request.Version)) return Results.BadRequest(new { message = "Invalid server profile request." });
+                try
+                {
+                    var version = await runtime.UpdateAsync(profileId, request.Server, request.Version, context.RequestAborted);
+                    return Results.Ok(new { version, profileId });
+                }
+                catch (AgentProfileMutationException exception) { return MutationError(exception); }
+                catch (AgentConfigurationException) { return Results.BadRequest(new { message = "Invalid server profile or process limits." }); }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { return Results.Problem("Unable to save Agent configuration.", statusCode: 500); }
+            });
+            app.MapPut("/api/v2/admin/servers/{profileId}/enabled", async (string profileId, HttpContext context) =>
+            {
+                var rejection = RequireWriteSession(context);
+                if (rejection is not null) return rejection;
+                AgentSetProfileEnabledRequest? request;
+                try { request = await JsonSerializer.DeserializeAsync<AgentSetProfileEnabledRequest>(context.Request.Body, AdminJsonOptions, context.RequestAborted); }
+                catch (JsonException) { return Results.BadRequest(new { message = "Invalid profile state request." }); }
+                if (request?.Enabled is null || string.IsNullOrWhiteSpace(request.Version)) return Results.BadRequest(new { message = "Invalid profile state request." });
+                try
+                {
+                    var version = await runtime.SetEnabledAsync(profileId, request.Enabled.Value, request.Version, context.RequestAborted);
+                    return Results.Ok(new { version, profileId, enabled = request.Enabled.Value });
+                }
+                catch (AgentProfileMutationException exception) { return MutationError(exception); }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { return Results.Problem("Unable to save Agent configuration.", statusCode: 500); }
+            });
+        }
         await app.RunAsync(stoppingToken);
     }
 
-    private static string Render(AgentStatusSnapshot snapshot)
+    private AgentWriteSession? Session(HttpContext context) => writeSession.Get(context.Request.Cookies[AdminCookie]);
+
+    private IResult? RequireWriteSession(HttpContext context)
     {
-        static string E(string? text) => HtmlEncoder.Default.Encode(text ?? "");
-        var html = new StringBuilder("<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><meta http-equiv=\"refresh\" content=\"5\"><title>RelayLink Agent</title><style>body{font:15px system-ui,sans-serif;background:#f6f8fb;color:#182337;margin:0;padding:32px}main{max-width:900px;margin:auto}h1{font-size:24px}section{background:white;border:1px solid #e4e9f0;border-radius:12px;margin:18px 0;padding:20px}table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:10px;border-bottom:1px solid #eef1f5}th{color:#526078}.ok{color:#087f5b}.muted{color:#718096}code{background:#edf2f7;padding:3px 6px;border-radius:4px}</style></head><body><main>");
-        html.Append("<h1>RelayLink Agent · ").Append(E(snapshot.ClientId)).Append("</h1><p class=\"" ).Append(snapshot.Online ? "ok" : "muted").Append("\">● ").Append(snapshot.Online ? "已连接服务端" : "未连接服务端").Append(" · 每 5 秒刷新</p>");
-        html.Append("<section><h2>被访问通道</h2><table><thead><tr><th>通道</th><th>模式</th><th>目标</th><th>状态</th></tr></thead><tbody>");
-        foreach (var channel in snapshot.Channels)
-            html.Append("<tr><td>").Append(E(channel.DisplayName)).Append(" <small>").Append(E(channel.ChannelId)).Append("</small></td><td>").Append(channel.AuthorizedClientsOnly ? channel.EndToEndEncryptionEnabled ? "仅授权客户端（加密）" : "仅授权客户端（明文）" : "普通代理").Append("</td><td><code>").Append(E(channel.TargetHost)).Append(':').Append(channel.TargetPort).Append("</code></td><td>").Append(channel.Enabled ? "启用" : "禁用").Append("</td></tr>");
-        if (snapshot.Channels.Count == 0) html.Append("<tr><td colspan=\"4\" class=\"muted\">当前无在线通道</td></tr>");
-        html.Append("</tbody></table></section><section><h2>端到端访问入口</h2><table><thead><tr><th>入口 ID</th><th>访问目标</th><th>本机地址</th></tr></thead><tbody>");
-        foreach (var mapping in snapshot.OutboundMappings)
-            html.Append("<tr><td>").Append(E(mapping.MappingId)).Append("</td><td>").Append(E(mapping.TargetClientId)).Append('/').Append(E(mapping.TargetChannelId)).Append("</td><td>").Append(mapping.LocalAddress is null ? "<span class=\"muted\">不可用</span>" : $"<code>{E(mapping.LocalAddress)}</code>").Append("</td></tr>");
-        if (snapshot.OutboundMappings.Count == 0) html.Append("<tr><td colspan=\"3\" class=\"muted\">当前无端到端访问入口</td></tr>");
-        html.Append("</tbody></table></section><p class=\"muted\">此页面仅在本机 127.0.0.1 提供，只读且不展示密钥。</p></main></body></html>");
-        return html.ToString();
+        var session = Session(context);
+        if (session is null) return Results.StatusCode(StatusCodes.Status401Unauthorized);
+        if (!writeSession.CheckCsrf(session, context.Request.Headers["X-RelayLink-CSRF"].ToString()))
+            return Results.StatusCode(StatusCodes.Status403Forbidden);
+        return null;
     }
+
+    private static IResult MutationError(AgentProfileMutationException exception) => exception.Reason switch
+    {
+        AgentProfileMutationError.Missing => Results.NotFound(new { message = exception.Message }),
+        _ => Results.Conflict(new { message = exception.Message })
+    };
+
 }
 
 public sealed record AgentChannelsResponse(string ClientId, bool Online, DateTimeOffset? UpdatedAtUtc, IReadOnlyList<AgentChannelView> Channels);
 public sealed record AgentMappingsResponse(string ClientId, bool Online, DateTimeOffset? UpdatedAtUtc, IReadOnlyList<AgentMappingView> Mappings);
+public sealed record AgentAddProfileRequest(string Version, AgentServerProfile Server, bool ConfirmExistingState);
+public sealed record AgentRemoveProfileRequest(string Version);
+public sealed record AgentUpdateProfileRequest(string Version, AgentServerProfile Server);
+public sealed record AgentSetProfileEnabledRequest(string Version, bool? Enabled);

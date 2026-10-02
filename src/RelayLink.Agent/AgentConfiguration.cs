@@ -7,6 +7,9 @@ namespace RelayLink.Agent;
 
 public sealed record AgentConfiguration(string ServerHost, int ServerPort, string ClientId, string Secret, bool UseTls, string? TrustedCaPemPath, ReconnectConfiguration Reconnect)
 {
+    public string ProfileId { get; init; } = "primary";
+    public int MaxConnections { get; init; } = 100;
+    public int MaxPendingConnections { get; init; } = 20;
     public int DataPort { get; init; }
     [JsonIgnore]
     public int EffectiveDataPort => DataPort == 0 ? ServerPort + 1 : DataPort;

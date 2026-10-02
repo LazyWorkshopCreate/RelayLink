@@ -15,6 +15,10 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Admin web tests failed.' }
     pnpm --dir src/RelayLink.AdminWeb format:check
     if ($LASTEXITCODE -ne 0) { throw 'Admin web formatting check failed.' }
+    pnpm --dir src/RelayLink.AgentWeb build
+    if ($LASTEXITCODE -ne 0) { throw 'Agent web build failed.' }
+    pnpm --dir src/RelayLink.AgentWeb format:check
+    if ($LASTEXITCODE -ne 0) { throw 'Agent web formatting check failed.' }
     git diff --check
     if ($LASTEXITCODE -ne 0) { throw 'Whitespace check failed.' }
 }

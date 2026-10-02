@@ -2,8 +2,9 @@
 
 | 文档 | ID | 状态 | 用途 |
 |---|---|---|---|
-| [需求文档索引](requirements/README.md) | REQ-001A–REQ-001I | Accepted / Done | 按日期与主题拆分的需求范围、功能与验收；实现进度见验证状态 |
+| [需求文档索引](requirements/README.md) | REQ-001A–REQ-001J | Draft / Accepted / Done | 按日期与主题拆分的需求范围、功能与验收；实现进度见验证状态 |
 | [技术实现文档](design/technical-design.md) | DES-001 | Draft | 架构、协议、配置与部署设计 |
+| [Agent 多服务端技术设计](design/multi-server-agent.md) | DES-004 | Draft | 多服务端运行隔离、启动前转换与本机页面管理方案 |
 | [首期隧道方案](adr/0001-independent-tcp-tunnels.md) | ADR-0001 | Proposed | 记录独立数据隧道的方案取舍 |
 | [运行时通道配置](adr/0002-runtime-channel-configuration.md) | ADR-0002 | Superseded | 历史上的监听更新及配置下发决定 |
 | [流量历史持久化](adr/0003-traffic-history-persistence.md) | ADR-0003 | Superseded | 历史 JSONL 流量快照方案 |
@@ -11,6 +12,9 @@
 | [SQLite 审计与放行门槛](adr/0013-sqlite-audit-gate.md) | ADR-0013 | Accepted | 登录和连接开始前审计落库、查询与故障拒绝 |
 | [审计与流量设计](design/audit-and-traffic.md) | DES-003 | Draft | 审计事件与 SQLite 流量实现、迁移及验收设计 |
 | [独立管理前端](adr/0004-standalone-admin-web.md) | ADR-0004 | Accepted | React/Vite 管理项目及 Server 托管方式 |
+| [独立 Agent 本机前端](adr/0021-standalone-agent-web.md) | ADR-0021 | Accepted | React/Vite Agent 本机页面及静态资源托管 |
+| [Agent 服务端配置仅通过导入修改](adr/0022-import-only-agent-profile-changes.md) | ADR-0022 | Accepted | 导入式新增与修改、身份保留和单项重连 |
+| [Agent 服务端连接项持久化停用](adr/0023-persistent-agent-profile-disable.md) | ADR-0023 | Accepted | 服务端连接项停用、重新启用与重启后状态保留 |
 | [安全互访设计](design/agent-to-agent.md) | DES-002 | Draft | Agent↔Agent 授权、内层 TLS 与协议增量 |
 | [互访架构决策](adr/0005-agent-to-agent-tls.md) | ADR-0005 | Superseded（身份登记部分） | 服务端协调、密文中继与原身份登记取舍 |
 | [客户端级端到端身份](adr/0011-client-level-e2e-identity.md) | ADR-0011 | Accepted | Agent 自动上报、首次固定、拒绝旧通道指纹字段 |
@@ -22,7 +26,10 @@
 | [Linux Agent](adr/0014-linux-agent.md) | ADR-0014 | Accepted | Linux 自包含发布、systemd 托管及复用既有互访访问服务端管理页 |
 | [macOS Agent](adr/0015-macos-agent.md) | ADR-0015 | Accepted | Intel/Apple Silicon 自包含发布与 launchd 托管 |
 | [互访业务流可选加密](adr/0016-optional-peer-traffic-encryption.md) | ADR-0016 | Accepted | 按通道选择内层 TLS 或认证后的明文直接复制 |
-| [Windows Agent 框架依赖发布](adr/0017-windows-agent-framework-dependent.md) | ADR-0017 | Accepted | Windows Agent 不携带运行时，安装前检查 .NET 10 ASP.NET Core Runtime x64 |
+| [Windows Agent 框架依赖发布](adr/0017-windows-agent-framework-dependent.md) | ADR-0017 | Superseded | 原单一框架依赖交付决定 |
+| [Windows Agent 双模式发布](adr/0019-dual-windows-agent-distribution.md) | ADR-0019 | Superseded（目录布局） | 自包含与框架依赖双产物，原 `program` 子目录布局 |
+| [Windows Agent 安装根目录布局](adr/0020-flat-windows-agent-installation.md) | ADR-0020 | Accepted | 根目录程序文件清理、旧子目录迁移和 ProgramData 分离 |
+| [Agent 多服务端隔离](adr/0018-agent-multi-server-isolation.md) | ADR-0018 | Proposed | Agent 按服务端配置项隔离会话、状态并授权本机增删的拟议取舍 |
 | [目录规划](development/repository-layout.md) | DEV-001 | Active | 文件归属及项目职责 |
 | [文档管理规则](development/documentation-policy.md) | DEV-002 | Active | 命名、状态、更新和引用规则 |
 | [GitHub Actions 流水线](development/ci.md) | DEV-003 | Active | CI 检查、构建产物和安全边界 |
@@ -30,6 +37,7 @@
 | [安装与使用指南](operations/installation-and-usage.md) | OPS-001 | Active | Docker/原生 Server 部署、Agent 安装、通道配置和排障 |
 | [验证状态](testing/verification-status.md) | TST-001 | Active | 已执行检查与未完成验收证据 |
 | [本地多场景验收方案](testing/local-acceptance-plan.md) | TST-002 | Active | 隔离启动、场景判定、运行记录与安全停止 |
+| [Agent 多服务端验收记录](testing/multi-server-agent-verification.md) | TST-003 | Active | REQ-001J 的自动化测试与 Windows Sandbox 安装验收证据 |
 | [对外介绍材料](intro/README.md) | DOC-001 | Active | 演示文稿与公众号文章的源文件、插图及重建脚本 |
 
 需求及首期技术文档来自 2026-09-15 的调研设计，2026-09-16 迁入 RelayLink 并统一名称；2026-09-17 增补互访设计及本机验证。此目录中的文件是后续维护入口；原交付副本保留为交付记录，不再作为同步维护对象。

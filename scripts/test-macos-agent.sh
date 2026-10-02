@@ -125,8 +125,10 @@ cat > "$configuration_file" <<'JSON'
 JSON
 sudo install -o "$service_user" -g "$service_user" -m 0600 "$configuration_file" "$configuration_path"
 
-sudo -u "$service_user" "$program_directory/RelayLink.Agent" --config "$configuration_path" --check-config
-fingerprint_before="$(sudo -u "$service_user" "$program_directory/RelayLink.Agent" --config "$configuration_path" --show-e2e-fingerprint)"
+if sudo -u "$service_user" "$program_directory/RelayLink.Agent" --config "$configuration_path" --check-config >/dev/null 2>&1; then
+  echo "Legacy Agent configuration unexpectedly passed validation before migration." >&2
+  exit 1
+fi
 
 sudo install -o root -g wheel -m 0644 \
   "$repository_root/deploy/macos/relaylink-agent.plist" "$launchd_plist"
@@ -144,6 +146,9 @@ for _ in $(seq 1 30); do
 done
 grep -q '"clientId":"macos-ci"' "$RUNNER_TEMP/relaylink-agent-status.json"
 grep -q '"online":false' "$RUNNER_TEMP/relaylink-agent-status.json"
+sudo grep -q '"servers"' "$configuration_path"
+sudo -u "$service_user" "$program_directory/RelayLink.Agent" --config "$configuration_path" --check-config
+fingerprint_before="$(sudo -u "$service_user" "$program_directory/RelayLink.Agent" --config "$configuration_path" --show-e2e-fingerprint)"
 
 launchd_state="$(sudo launchctl print "system/$service_label")"
 grep -q 'state = running' <<< "$launchd_state"

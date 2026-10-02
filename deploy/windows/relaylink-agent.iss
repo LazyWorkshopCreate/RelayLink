@@ -4,6 +4,12 @@
 #ifndef PackageVersion
   #define PackageVersion "1.0.0"
 #endif
+#ifndef PackageMode
+  #error PackageMode must be self-contained or framework-dependent.
+#endif
+#ifndef PackageSelfContained
+  #error PackageSelfContained must be 1 or 0.
+#endif
 
 [Setup]
 AppId={{F34F4AB2-43B3-4E22-9A04-58CC1F15E78B}
@@ -13,7 +19,7 @@ DefaultDirName={autopf}\RelayLink\Agent
 DisableDirPage=yes
 DisableProgramGroupPage=yes
 OutputDir=..\..\artifacts\installer
-OutputBaseFilename=RelayLink-Agent-win-x64-{#PackageVersion}
+OutputBaseFilename=RelayLink-Agent-win-x64-{#PackageMode}-{#PackageVersion}
 Compression=lzma2
 SolidCompression=yes
 PrivilegesRequired=admin
@@ -22,6 +28,18 @@ ArchitecturesInstallIn64BitMode=x64compatible
 CloseApplications=no
 SetupLogging=yes
 UninstallDisplayName=RelayLink Agent
+
+[InstallDelete]
+; Inno's uninstall records and installer scripts stay in {app}. Remove only
+; known Agent payload patterns before copying either deployment mode.
+Type: filesandordirs; Name: "{app}\program"
+Type: filesandordirs; Name: "{app}\wwwroot"
+Type: files; Name: "{app}\*.dll"
+Type: files; Name: "{app}\*.pdb"
+Type: files; Name: "{app}\RelayLink.Agent*.exe"
+Type: files; Name: "{app}\createdump.exe"
+Type: files; Name: "{app}\RelayLink.Agent*.json"
+Type: files; Name: "{app}\web.config"
 
 [Files]
 Source: "{#PublishDir}\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
@@ -44,6 +62,7 @@ var
   ModePage: TInputOptionWizardPage;
   ConfigPage: TInputFileWizardPage;
   ExistingInstall: Boolean;
+  PostInstallFailed: Boolean;
 
 function IsSupportedWindows: Boolean;
 var
@@ -89,8 +108,12 @@ end;
 
 function IsDotNetRuntimeInstalled: Boolean;
 begin
+#if PackageSelfContained
+  Result := True;
+#else
   Result := HasDotNet10SharedFramework('Microsoft.NETCore.App') and
     HasDotNet10SharedFramework('Microsoft.AspNetCore.App');
+#endif
 end;
 
 procedure SetDependencyStatus(StatusLabel: TNewStaticText; Passed: Boolean; const Text: String);
@@ -135,11 +158,14 @@ begin
   SetDependencyStatus(OsStatusLabel, OsPassed, 'Windows Server 2012 R2 / Windows 8.1 或更高版本');
   SetDependencyStatus(ArchitectureStatusLabel, ArchitecturePassed, 'x64 操作系统');
   SetDependencyStatus(VcStatusLabel, VcPassed, 'Microsoft Visual C++ 2015–2022 Redistributable (x64)');
-  SetDependencyStatus(DotNetStatusLabel, DotNetPassed, '.NET 10 ASP.NET Core Runtime (x64)');
+  if {#PackageSelfContained} = 1 then
+    SetDependencyStatus(DotNetStatusLabel, True, '.NET 10 ASP.NET Core Runtime (安装包内置)')
+  else
+    SetDependencyStatus(DotNetStatusLabel, DotNetPassed, '.NET 10 ASP.NET Core Runtime (x64)');
   VcDownloadLabel.Visible := not VcPassed;
-  DotNetDownloadLabel.Visible := not DotNetPassed;
+  DotNetDownloadLabel.Visible := ({#PackageSelfContained} = 0) and (not DotNetPassed);
   DependencyChecksPassed := OsPassed and ArchitecturePassed and VcPassed and DotNetPassed;
-  Log(Format('Dependency checks: OS=%d, x64=%d, VC=%d, dotnet-aspnetcore-10=%d', [Ord(OsPassed), Ord(ArchitecturePassed), Ord(VcPassed), Ord(DotNetPassed)]));
+  Log(Format('Dependency checks: package={#PackageMode}, OS=%d, x64=%d, VC=%d, dotnet-aspnetcore-10=%d', [Ord(OsPassed), Ord(ArchitecturePassed), Ord(VcPassed), Ord(DotNetPassed)]));
 end;
 
 function InstallMode: String;
@@ -189,7 +215,8 @@ begin
   ExistingInstall := RegKeyExists(HKLM, 'SYSTEM\CurrentControlSet\Services\RelayLinkAgent');
   // The {app} constant is not initialized while InitializeWizard is running.
   if not ExistingInstall then
-    ExistingInstall := FileExists(ExpandConstant('{autopf}\RelayLink\Agent\RelayLink.Agent.exe'));
+    ExistingInstall := FileExists(ExpandConstant('{autopf}\RelayLink\Agent\RelayLink.Agent.exe')) or
+      FileExists(ExpandConstant('{autopf}\RelayLink\Agent\program\RelayLink.Agent.exe'));
   DependencyPage := CreateCustomPage(wpWelcome, '安装依赖检查',
     '必须通过以下检查才能安装 RelayLink Agent。');
   OsStatusLabel := TNewStaticText.Create(DependencyPage);
@@ -255,7 +282,7 @@ begin
     Result := False;
     Exit;
   end;
-  if (CurPageID = ModePage.ID) and ExistingInstall and (InstallMode = 'Reconfigure') then begin
+  if (CurPageID = ModePage.ID) and ExistingInstall and (InstallMode = 'Reconfigure') and (not WizardSilent) then begin
     Result := MsgBox('重新配置会删除现有 Agent 的配置、端到端身份、端口状态和诊断日志。请确认已备份所需文件，并准备好新的客户端 JSON。是否继续？',
       mbConfirmation, MB_YESNO) = IDYES;
   end;
@@ -272,6 +299,8 @@ function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   ResultCode: Integer;
   Params: String;
+  ErrorReportPath: String;
+  ErrorDetails: AnsiString;
 begin
   Result := '';
   RefreshDependencyChecks;
@@ -286,12 +315,21 @@ begin
   Result := ConfigProblem;
   if Result <> '' then Exit;
   ExtractTemporaryFile('agent-installer-preflight.ps1');
+  ErrorReportPath := ExpandConstant('{tmp}\relaylink-agent-preflight-error.txt');
+  DeleteFile(ErrorReportPath);
+  ResultCode := -1;
   Params := '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' +
     ExpandConstant('{tmp}\agent-installer-preflight.ps1') + '" -Mode ' + InstallMode +
-    ' -ExecutablePath "' + ExpandConstant('{app}\RelayLink.Agent.exe') + '"';
+    ' -ExecutablePath "' + ExpandConstant('{app}\RelayLink.Agent.exe') + '"' +
+    ' -ErrorReportPath "' + ErrorReportPath + '"';
+  if NeedsConfig then Params := Params + ' -ConfigurationPath "' + SelectedConfig + '"';
   if not Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
       Params, '', SW_HIDE, ewWaitUntilTerminated, ResultCode) or (ResultCode <> 0) then
-    Result := 'Agent 服务检查或停止失败（退出码 ' + IntToStr(ResultCode) + '）。请检查服务归属和 Windows 事件日志。';
+  begin
+    ErrorDetails := '未生成错误详情';
+    LoadStringFromFile(ErrorReportPath, ErrorDetails);
+    Result := 'Agent 安装预检失败（退出码 ' + IntToStr(ResultCode) + '）：' + ErrorDetails;
+  end;
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
@@ -312,8 +350,12 @@ begin
     Log('Starting Agent configuration and service registration.');
     if not Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
         Params, '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+    begin
+      PostInstallFailed := True;
       RaiseException('无法启动 Agent 服务安装程序：' + SysErrorMessage(ResultCode));
+    end;
     if ResultCode <> 0 then begin
+      PostInstallFailed := True;
       ErrorDetails := '未生成错误详情';
       LoadStringFromFile(ErrorReportPath, ErrorDetails);
       Log('Agent service registration failed: ' + ErrorDetails);
@@ -322,6 +364,11 @@ begin
     end;
     Log('Agent service registration completed successfully.');
   end;
+end;
+
+function GetCustomSetupExitCode: Integer;
+begin
+  if PostInstallFailed then Result := 1 else Result := 0;
 end;
 
 procedure DeinitializeSetup;
@@ -353,7 +400,7 @@ begin
   DeleteFile(ErrorReportPath);
   Params := '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' +
     ExpandConstant('{app}\uninstall-agent-service.ps1') + '" -ExecutablePath "' +
-    ExpandConstant('{app}\RelayLink.Agent.exe') + '" -ErrorReportPath "' + ErrorReportPath + '"';
+      ExpandConstant('{app}\RelayLink.Agent.exe') + '" -ErrorReportPath "' + ErrorReportPath + '"';
   if not Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
       Params, '', SW_HIDE, ewWaitUntilTerminated, ResultCode) or (ResultCode <> 0) then
   begin

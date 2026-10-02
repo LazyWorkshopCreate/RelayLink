@@ -2,10 +2,12 @@
 
 文档 ID：TST-001\
 状态：Active\
-版本：v1.28.0\
+版本：v1.29.0\
 更新日期：2026-09-23
 
 本文记录当前仓库可重复执行的验证证据，不替代 [需求文档](../requirements/README.md) 的验收标准，也不把未在目标环境运行的项目标记为通过。
+
+2026-09-23 在 Windows Docker Desktop Linux 引擎和独立的 `.local/compose-validation-desktop` 目录验证 Compose：`docker compose config --quiet` 通过，配置解析结果为 host 网络、只读根文件系统、配置和数据库分别绑定挂载。首次运行 `start-server-compose.ps1 -NoBuild` 生成仅含 PBKDF2-SHA256 哈希、无模板占位符的配置，容器配置预检通过并启动；容器网络内 `/health/ready` 返回 200，SQLite 文件已创建。重复运行脚本未改写配置，重启后就绪仍为 200；运行 `stop-server-compose.ps1` 后容器移除，配置和数据库保留。因此 A58、A59 的本地检查通过。Docker Desktop 的 host 网络未将管理端口映射到 Windows `127.0.0.1`，该环境不作为 Linux Docker Engine 的 A60 验收；动态普通通道转发尚未验证。构建时发现原 Dockerfile 引用不存在的 .NET 10 `bookworm-slim` 镜像标签，已改用官方 `10.0` 标签；修正后的 `docker compose build` 完整通过，生成 `relaylink-server:local`，用该镜像再次执行配置预检、启动和容器内就绪检查均通过。曾尝试新建独立的 Multipass Ubuntu 24.04 实例，但实例持续停在 Starting，随后 Multipass 命令无响应；当前账户无权重启 Multipass 服务或读取 Hyper-V 事件，因此尚未在该 Linux VM 执行 A60。
 
 2026-09-23 增加 Linux Server Docker Compose 交付：多阶段镜像构建 Server 与 React 管理前端，Compose 使用 host 网络支持运行时动态业务端口，并把配置、客户端文件和 SQLite 数据挂载到 `.local/docker-server`；容器根文件系统只读，Docker JSON 日志启用大小和数量轮换。首次启动脚本交互生成管理员密码哈希、保留既有配置、先执行配置预检再启动，停止脚本默认保留数据。PowerShell 语法、Docker JSON 示例、`docker compose config --quiet`、`git diff --check` 和 Server Release 构建通过；构建机使用 .NET 10 预览 SDK。当前 Docker Engine 未运行，因此镜像实际构建、Linux 容器启动、重启持久化和动态通道转发仍需在 Linux Docker 主机完成，A60 尚未通过。
 

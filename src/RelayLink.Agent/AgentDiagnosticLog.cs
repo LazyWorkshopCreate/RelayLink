@@ -17,6 +17,8 @@ public sealed class AgentDiagnosticLog(AgentConfiguration configuration)
         var entry = JsonSerializer.Serialize(new
         {
             timestampUtc = DateTimeOffset.UtcNow,
+            profileId = configuration.ProfileId,
+            clientId = configuration.ClientId,
             connectionId,
             channelId,
             phase,

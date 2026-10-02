@@ -9,14 +9,27 @@ using RelayLink.Transport;
 
 namespace RelayLink.Agent;
 
-public sealed class ControlSessionWorker(AgentConfiguration configuration, AgentStatus status, AgentDiagnosticLog diagnostics, ILogger<ControlSessionWorker> logger) : BackgroundService
+public sealed class ControlSessionWorker(AgentConfiguration configuration, AgentStatus status, AgentDiagnosticLog diagnostics, AgentConnectionQuota quota, ILogger<ControlSessionWorker> logger) : BackgroundService
 {
     private readonly Random random = new();
     private readonly X509Certificate2Collection? trustedRoots = configuration.UseTls ? AgentConfigurationLoader.LoadTrustedRoots(configuration) : null;
     private readonly AgentIdentity identity = AgentIdentity.LoadOrCreate(configuration.E2eIdentityPath, configuration.ClientId);
 
+    public override void Dispose()
+    {
+        base.Dispose();
+        identity.Dispose();
+        if (trustedRoots is not null)
+            foreach (var certificate in trustedRoots.Cast<X509Certificate2>()) certificate.Dispose();
+    }
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        using var profileScope = logger.BeginScope(new Dictionary<string, object?>
+        {
+            ["profileId"] = configuration.ProfileId,
+            ["clientId"] = configuration.ClientId
+        });
         var failures = 0;
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -75,13 +88,15 @@ public sealed class ControlSessionWorker(AgentConfiguration configuration, Agent
         logger.LogInformation("Agent control session is online with session {SessionId}.", registration.SessionId);
         using var sessionCancellation = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
         var activeConfiguration = new SessionConfiguration(registration.ConfigVersion, registration.Config);
-        await using var peerSession = new PeerSessionCoordinator(configuration, identity, registration.SessionId, writer, logger, sessionCancellation.Token);
+        await using var peerSession = new PeerSessionCoordinator(configuration, identity, registration.SessionId, writer, logger, quota, sessionCancellation.Token);
         peerSession.ApplyConfiguration(registration.Config);
         if (registration.Config.OutboundMappings.Count > 0)
             await writer.WriteAsync(new Frame(FrameType.PeerMappingStatus, JsonProtocolSerializer.Serialize(new PeerMappingStatusMessage(registration.SessionId, registration.ConfigVersion, peerSession.Addresses))), sessionCancellation.Token);
         status.SetOnline(registration.Config, peerSession.Addresses);
-        using var openLimit = new SemaphoreSlim(registration.Config.MaxConnections);
+        using var openLimit = new SemaphoreSlim(Math.Min(registration.Config.MaxConnections, configuration.MaxConnections));
         var startSignals = new ConcurrentDictionary<Guid, TaskCompletionSource>();
+        var openTasks = new ConcurrentDictionary<long, Task>();
+        long nextOpenTaskId = 0;
         try
         {
             while (!sessionCancellation.IsCancellationRequested)
@@ -100,7 +115,14 @@ public sealed class ControlSessionWorker(AgentConfiguration configuration, Agent
                 if (frame.Type == FrameType.Open)
                 {
                     var open = JsonProtocolSerializer.Deserialize<OpenMessage>(frame.Payload.Span);
-                    _ = HandleOpenWithLimitAsync(open, registration.SessionId, activeConfiguration, writer, openLimit, startSignals, sessionCancellation.Token);
+                    var task = HandleOpenWithLimitAsync(open, registration.SessionId, activeConfiguration, writer, openLimit, startSignals, sessionCancellation.Token);
+                    var taskId = Interlocked.Increment(ref nextOpenTaskId);
+                    openTasks[taskId] = task;
+                    _ = task.ContinueWith(completed =>
+                    {
+                        openTasks.TryRemove(taskId, out _);
+                        if (completed.IsFaulted) logger.LogWarning(completed.Exception, "Agent open task failed for profile {ProfileId}.", configuration.ProfileId);
+                    }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
                     continue;
                 }
 
@@ -150,11 +172,20 @@ public sealed class ControlSessionWorker(AgentConfiguration configuration, Agent
             sessionCancellation.Cancel();
             foreach (var signal in startSignals.Values) signal.TrySetCanceled();
             status.SetOffline();
+            try { await Task.WhenAll(openTasks.Values.ToArray()); }
+            catch (OperationCanceledException) when (sessionCancellation.IsCancellationRequested) { }
         }
     }
 
     private async Task HandleOpenWithLimitAsync(OpenMessage open, Guid sessionId, SessionConfiguration activeConfiguration, FrameWriter controlWriter, SemaphoreSlim openLimit, ConcurrentDictionary<Guid, TaskCompletionSource> startSignals, CancellationToken cancellationToken)
     {
+        using var lease = quota.TryAcquirePending();
+        if (lease is null)
+        {
+            await diagnostics.WriteAsync(open.ConnectionId, open.ChannelId, "profile_capacity_rejected");
+            await SendOpenFailedAsync(open, ErrorCode.CapacityExceeded, controlWriter, cancellationToken);
+            return;
+        }
         if (!await openLimit.WaitAsync(0, cancellationToken))
         {
             await diagnostics.WriteAsync(open.ConnectionId, open.ChannelId, "capacity_rejected");
@@ -164,7 +195,7 @@ public sealed class ControlSessionWorker(AgentConfiguration configuration, Agent
 
         try
         {
-            await HandleOpenAsync(open, sessionId, activeConfiguration.Current, controlWriter, startSignals, cancellationToken);
+            await HandleOpenAsync(open, sessionId, activeConfiguration.Current, controlWriter, startSignals, lease, cancellationToken);
         }
         finally
         {
@@ -172,7 +203,7 @@ public sealed class ControlSessionWorker(AgentConfiguration configuration, Agent
         }
     }
 
-    private async Task HandleOpenAsync(OpenMessage open, Guid sessionId, (string Version, ClientConfigSnapshot Config) activeConfiguration, FrameWriter controlWriter, ConcurrentDictionary<Guid, TaskCompletionSource> startSignals, CancellationToken sessionCancellation)
+    private async Task HandleOpenAsync(OpenMessage open, Guid sessionId, (string Version, ClientConfigSnapshot Config) activeConfiguration, FrameWriter controlWriter, ConcurrentDictionary<Guid, TaskCompletionSource> startSignals, AgentConnectionQuota.Lease lease, CancellationToken sessionCancellation)
     {
         var started = Stopwatch.GetTimestamp();
         var phase = "open_received";
@@ -227,6 +258,7 @@ public sealed class ControlSessionWorker(AgentConfiguration configuration, Agent
             phase = "target_ready";
             await diagnostics.WriteAsync(open.ConnectionId, open.ChannelId, phase, elapsedMs: (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds);
             await startSignal.Task.WaitAsync(deadline.Token);
+            lease.MarkActive();
             phase = "relay_started";
             logger.LogInformation("Agent proxy {ConnectionId} started relay for {ChannelId}; target connect {TargetConnectMs} ms.", open.ConnectionId, open.ChannelId, duration);
             await diagnostics.WriteAsync(open.ConnectionId, open.ChannelId, phase, elapsedMs: (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds);

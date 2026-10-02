@@ -2,8 +2,8 @@
 
 文档 ID：OPS-001\
 状态：Active\
-版本：v2.0.0\
-更新日期：2026-09-23
+版本：v2.2.0\
+更新日期：2026-09-29
 
 RelayLink 只转发 TCP 字节流，不替代目标服务自身的账号、权限、TLS 和网络访问控制。
 
@@ -131,7 +131,7 @@ RelayLink.Server --config <server.json> --check-config
 
 | 平台 | 操作 | 注意事项 |
 |---|---|---|
-| Windows | 运行 Agent 安装包并选择下载的 JSON | 需要 x64、VC++ 2015–2022 x64 和 .NET 10 ASP.NET Core Runtime x64 |
+| Windows | 运行自包含或框架依赖 Agent 安装包并选择下载的 JSON | 两种包均需要 x64 和 VC++ 2015–2022 x64；框架依赖包另需 .NET 10 ASP.NET Core Runtime x64 |
 | Linux | 发布 `linux-x64`，按 systemd 文档安装 | 程序目录只读，状态目录仅服务账号可写 |
 | macOS Intel | 使用 `osx-x64` 包 | 按 launchd 文档创建服务账号和状态目录 |
 | macOS Apple Silicon | 使用 `osx-arm64` 包 | 不要混用 Intel 包 |
@@ -139,6 +139,7 @@ RelayLink.Server --config <server.json> --check-config
 Windows 已有安装时：
 
 - “仅更新”保留配置、身份、端口状态和日志。
+- 对旧单服务端安装，“仅更新”会在启动新 Agent 前运行独立转换器；原配置和状态留作受保护的回退材料。
 - “重新配置”要求新的 JSON，并清除 Agent 管理的旧状态。
 - 服务注册失败会中止安装并显示底层原因，不会静默成功。
 
@@ -155,8 +156,11 @@ Windows 已有安装时：
 | `/api/v1/status` | 完整状态快照 |
 | `/api/v1/channels` | 被访问通道 |
 | `/api/v1/mappings` | Agent 互访入口及实际本机端口 |
+| `/api/v2/status` | 按 `profileId` 分组的状态 |
+| `/api/v2/channels` | 按 `profileId` 分组的通道 |
+| `/api/v2/mappings` | 按 `profileId` 分组的互访入口 |
 
-这些接口仅监听 `127.0.0.1`，不返回密钥或证书指纹。不要把它们转发到 LAN 或公网。
+这些接口仅监听 `127.0.0.1`，不返回密钥或证书指纹。多于一个服务端配置项时，旧 `/api/v1/*` 和 `/api/status` 返回 409，应使用 v2 接口。不要把它们转发到 LAN 或公网。
 
 ## 6. 创建普通代理通道
 

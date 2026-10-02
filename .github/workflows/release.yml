@@ -74,6 +74,8 @@ jobs:
           run_install: false
       - name: Install frontend dependencies
         run: pnpm --dir src/RelayLink.AdminWeb install --frozen-lockfile
+      - name: Install Agent frontend dependencies
+        run: pnpm --dir src/RelayLink.AgentWeb install --frozen-lockfile
       - name: Restore Server for linux-x64
         run: dotnet restore src/RelayLink.Server/RelayLink.Server.csproj --runtime linux-x64 --configfile NuGet.Config
       - name: Publish self-contained Server
@@ -90,7 +92,9 @@ jobs:
       - name: Archive Agent
         env:
           RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
-        run: tar -C artifacts/publish/linux-x64/RelayLink.Agent -czf "artifacts/release/RelayLink-Agent-linux-x64-${RELEASE_VERSION}.tar.gz" .
+        run: |
+          test -f artifacts/publish/linux-x64/RelayLink.Agent/wwwroot/index.html
+          tar -C artifacts/publish/linux-x64/RelayLink.Agent -czf "artifacts/release/RelayLink-Agent-linux-x64-${RELEASE_VERSION}.tar.gz" .
       - uses: actions/upload-artifact@v7
         with:
           name: release-server-linux-x64
@@ -133,6 +137,8 @@ jobs:
           run_install: false
       - name: Install frontend dependencies
         run: pnpm --dir src/RelayLink.AdminWeb install --frozen-lockfile
+      - name: Install Agent frontend dependencies
+        run: pnpm --dir src/RelayLink.AgentWeb install --frozen-lockfile
       - name: Publish self-contained Server
         run: ./scripts/publish.ps1 -RuntimeIdentifier win-x64 -Component Server
       - name: Archive Server
@@ -153,19 +159,25 @@ jobs:
           if ($process.ExitCode -ne 0) { throw "Inno Setup installation failed: $($process.ExitCode)" }
           if (-not (Test-Path -LiteralPath (Join-Path $compilerDirectory 'ISCC.exe'))) { throw 'ISCC.exe was not installed.' }
           "INNO_COMPILER=$(Join-Path $compilerDirectory 'ISCC.exe')" >> $env:GITHUB_ENV
-      - name: Build Agent installer
+      - name: Build both Agent installers and program variants
         env:
           RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
-        run: ./scripts/build-agent-installer.ps1 -Version $env:RELEASE_VERSION -InnoCompiler $env:INNO_COMPILER
+        run: ./scripts/build-agent-installer.ps1 -Version $env:RELEASE_VERSION -InnoCompiler $env:INNO_COMPILER -PublishRoot artifacts/publish/windows-agent
       - uses: actions/upload-artifact@v7
         with:
           name: release-server-win-x64
-          path: artifacts/release/*.zip
+          path: artifacts/release/RelayLink-Server-win-x64-*.zip
           if-no-files-found: error
           retention-days: 7
       - uses: actions/upload-artifact@v7
         with:
-          name: release-agent-installer-win-x64
+          name: release-agent-program-win-x64
+          path: artifacts/release/RelayLink-Agent-win-x64-*.zip
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-agent-installers-win-x64
           path: artifacts/installer/RelayLink-Agent-win-x64-*.exe
           if-no-files-found: error
           retention-days: 7
@@ -186,6 +198,16 @@ jobs:
           dotnet-quality: ga
       - name: Select stable .NET SDK
         run: dotnet new globaljson --sdk-version "${{ steps.dotnet.outputs.dotnet-version }}" --roll-forward disable
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          package-manager-cache: false
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11.19.0
+          run_install: false
+      - name: Install Agent frontend dependencies
+        run: pnpm --dir src/RelayLink.AgentWeb install --frozen-lockfile
       - name: Publish Intel Agent
         run: pwsh ./scripts/publish.ps1 -RuntimeIdentifier osx-x64 -Component Agent
       - name: Publish Apple Silicon Agent
@@ -194,6 +216,8 @@ jobs:
         env:
           RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
         run: |
+          test -f artifacts/publish/osx-x64/RelayLink.Agent/wwwroot/index.html
+          test -f artifacts/publish/osx-arm64/RelayLink.Agent/wwwroot/index.html
           mkdir -p artifacts/release
           tar -C artifacts/publish/osx-x64/RelayLink.Agent -czf "artifacts/release/RelayLink-Agent-osx-x64-${RELEASE_VERSION}.tar.gz" .
           tar -C artifacts/publish/osx-arm64/RelayLink.Agent -czf "artifacts/release/RelayLink-Agent-osx-arm64-${RELEASE_VERSION}.tar.gz" .
@@ -233,8 +257,8 @@ jobs:
         run: |
           shopt -s nullglob
           assets=(release-assets/*)
-          if (( ${#assets[@]} != 6 )); then
-            echo "Expected Linux Server, Linux Agent, Windows Server, Windows Agent installer, macOS Intel Agent and macOS Apple Silicon Agent assets; found ${#assets[@]}" >&2
+          if (( ${#assets[@]} != 9 )); then
+            echo "Expected nine release assets including both Windows Agent program and installer variants; found ${#assets[@]}" >&2
             exit 1
           fi
           sha256sum "${assets[@]}" | sed 's#release-assets/##' > release-assets/SHA256SUMS

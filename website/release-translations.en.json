@@ -1,4 +1,37 @@
 {
+  "v0.1.0-rc.7": {
+    "title": "RelayLink v0.1.0-rc.7",
+    "intro": "A release candidate focused on multi-server Agent connections, local management, and cross-platform delivery.",
+    "sections": [
+      {
+        "title": "Highlights",
+        "items": [
+          "One Agent can connect to multiple servers with separate client secrets, TLS trust, and runtime state. Channels and access mappings remain managed by their respective servers.",
+          "The Agent local dashboard is now a standalone React frontend. Profiles can be added or modified only by importing a single-server JSON file, and can be disabled, re-enabled, or deleted. Disabling disconnects the profile and stops retries while preserving its configuration and identity across restarts.",
+          "A standalone pre-start migrator converts legacy single-server configuration and identity state to the servers[] format. Windows, Linux, and macOS startup paths run the migrator before the Agent.",
+          "Windows Agent now has both self-contained and framework-dependent program archives and installers. Program files stay in the Agent install root; configuration and state stay in ProgramData.",
+          "Fixes the .NET 10 Docker build image selection and UTF-8 BOM handling during Windows configuration migration.",
+          "The bilingual product site now explains multi-server Agent connections, JSON import, and profile disabling. The tag triggers both website deployment and software package release."
+        ]
+      },
+      {
+        "title": "Upgrade and compatibility",
+        "items": [
+          "Use the preserve-state update path for an installed Agent. First install and reconfiguration accept only the new JSON format. Reconfiguration resets managed local state and is unsuitable when retaining the end-to-end identity.",
+          "Legacy configuration must be migrated before the new Agent starts. A failed conversion prevents startup while retaining the original configuration and identity state for investigation and retry.",
+          "The proxy wire protocol is unchanged. The Agent dashboard binds only to 127.0.0.1; writes require a local session and CSRF token, and read responses do not expose registration secrets."
+        ]
+      },
+      {
+        "title": "Verification and limitations",
+        "items": [
+          "63 .NET unit tests and 22 integration tests passed locally. One peer TLS integration test was skipped by the local default; the release pipeline enables it.",
+          "The Agent frontend build, formatting check, and isolated local preview passed. Automated coverage checks active-flow disconnection on disable, reconnection on enable, and persistence across restart.",
+          "Windows installers are unsigned, and macOS packages are not Developer ID signed or notarized. Installation, connectivity, and capacity still need validation in target environments."
+        ]
+      }
+    ]
+  },
   "v0.1.0-rc.6": {
     "title": "RelayLink v0.1.0-rc.6",
     "intro": "A release candidate focused on deployment, installer compatibility, and product documentation. The proxy protocol is unchanged from rc.5.",

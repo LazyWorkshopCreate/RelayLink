@@ -16,11 +16,11 @@ RelayLink 是基于 .NET 的反向 TCP 代理，用于让云端内网应用访�
 - 每个 Agent 使用独立客户端 ID 和密钥认证；通道及访问映射由服务端集中管理，认证后下发。
 - 控制连接与按业务连接建立的数据隧道使用独立服务端端口。控制连接默认使用 TLS；普通代理数据通道完成绑定后直接复制原始 TCP 字节，不提供链路加密。客户端授权互访要求控制 TLS；Agent 间业务流默认建立内层 TLS，关闭通道加密后则以明文中继。
 - 服务端管理页面支持匿名只读查看状态、通道和流量历史；管理员登录后可管理客户端、通道、访问映射及普通通道的来源 IP 安全组，并查看登录与连接生命周期审计日志。
-- Agent 提供本机只读状态页，展示通道和可用的访问方地址；Windows 使用 Windows Service，Linux 使用 systemd，macOS 使用 launchd 托管。
+- Agent 提供本机状态页，展示通道和可用的访问方地址，并通过导入服务端 JSON 新增或修改连接项；连接项可停用、重新启用或删除。Windows 使用 Windows Service，Linux 使用 systemd，macOS 使用 launchd 托管。
 
 ## 组成与边界
 
-服务端支持 Linux 与 Windows，Agent 支持 Windows、Linux 与 macOS（Intel 和 Apple Silicon）。后端使用 C# / .NET，管理前端使用 React 和 TypeScript。控制与数据入口只应对 Agent 开放；普通数据入口为明文 TCP，敏感业务必须使用业务自身 TLS 或受保护的网络链路。普通通道可用应用层安全组限制来源 IP；部署环境的安全组或防火墙仍须限制业务端口及管理页面的可达范围。
+服务端支持 Linux 与 Windows，Agent 支持 Windows、Linux 与 macOS（Intel 和 Apple Silicon）。后端使用 C# / .NET，服务端管理页面与 Agent 本机页面分别使用 React 和 TypeScript。控制与数据入口只应对 Agent 开放；普通数据入口为明文 TCP，敏感业务必须使用业务自身 TLS 或受保护的网络链路。普通通道可用应用层安全组限制来源 IP；部署环境的安全组或防火墙仍须限制业务端口及管理页面的可达范围。
 
 RelayLink 不提供 UDP、VPN/IP 层组网或 P2P 打洞，也不替代目标服务自身的身份认证。TCP 连接中断后不会重放业务请求或恢复原连接。
 
@@ -39,7 +39,8 @@ RelayLink/
 │   ├── RelayLink.Agent/    Windows/Linux/macOS Agent
 │   ├── RelayLink.Protocol/ 协议与消息模型
 │   ├── RelayLink.Transport/ TCP、TLS 与流量转发
-│   └── RelayLink.AdminWeb/ React 管理前端
+│   ├── RelayLink.AdminWeb/ React 服务端管理前端
+│   └── RelayLink.AgentWeb/ React Agent 本机前端
 ├── tests/                  单元与集成测试
 ├── tools/                  模拟目标与模拟调用方
 ├── config/examples/        脱敏配置示例
@@ -58,7 +59,7 @@ RelayLink/
 | [Microsoft.Data.Sqlite](https://www.nuget.org/packages/Microsoft.Data.Sqlite/) | 服务端分钟流量历史与审计日志的 SQLite 持久化 |
 | [React / React DOM](https://react.dev/) | 管理页面的组件与浏览器渲染 |
 | [Radix Dialog](https://www.radix-ui.com/primitives/docs/components/dialog)、[Lucide](https://lucide.dev/) | 管理页面的弹窗交互与图标 |
-| [TypeScript](https://www.typescriptlang.org/)、[Vite](https://vite.dev/)、[Node.js](https://nodejs.org/)、[pnpm](https://pnpm.io/) | 前端类型检查、依赖管理和静态资源构建；发布后的服务端不需要 Node.js 或 pnpm |
+| [TypeScript](https://www.typescriptlang.org/)、[Vite](https://vite.dev/)、[Node.js](https://nodejs.org/)、[pnpm](https://pnpm.io/) | 前端类型检查、依赖管理和静态资源构建；发布后的服务端和 Agent 不需要 Node.js 或 pnpm |
 | [xUnit.net](https://xunit.net/)、[Vitest](https://vitest.dev/)、[Testing Library](https://testing-library.com/)、[jsdom](https://github.com/jsdom/jsdom)、[Prettier](https://prettier.io/) | .NET 与前端测试、浏览器环境模拟及代码格式检查 |
 | [Inno Setup](https://jrsoftware.org/isinfo.php) | 生成 Windows Agent 安装包；不作为服务运行依赖 |
 

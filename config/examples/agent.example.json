@@ -1,17 +1,26 @@
 {
-  "serverHost": "tunnel.example.com",
-  "serverPort": 7443,
-  "dataPort": 7444,
-  "useTls": true,
-  "clientId": "shanghai-01",
-  "secret": "REPLACE_WITH_SAME_CLIENT_SECRET",
-  "trustedCaPemBase64": "REPLACE_WITH_BASE64_OF_CA_CERTIFICATE_PEM",
+  "dashboardPort": 18081,
   "outboundPortRangeStart": 20000,
   "outboundPortRangeEnd": 59999,
-  "dashboardPort": 18081,
-  "reconnect": {
-    "initialDelaySeconds": 1,
-    "maxDelaySeconds": 30,
-    "permanentErrorDelaySeconds": 60
-  }
+  "maxConnections": 2000,
+  "servers": [
+    {
+      "profileId": "primary",
+      "enabled": true,
+      "serverHost": "tunnel.example.com",
+      "serverPort": 7443,
+      "dataPort": 7444,
+      "useTls": true,
+      "clientId": "shanghai-01",
+      "secret": "REPLACE_WITH_SAME_CLIENT_SECRET",
+      "trustedCaPemBase64": "REPLACE_WITH_BASE64_OF_CA_CERTIFICATE_PEM",
+      "maxConnections": 100,
+      "maxPendingConnections": 20,
+      "reconnect": {
+        "initialDelaySeconds": 1,
+        "maxDelaySeconds": 30,
+        "permanentErrorDelaySeconds": 60
+      }
+    }
+  ]
 }

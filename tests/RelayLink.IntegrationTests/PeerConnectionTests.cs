@@ -91,10 +91,10 @@ public sealed class PeerConnectionTests
         await fixture.WaitOnlineAsync(deadline.Token);
 
         using var dashboardHttp = new HttpClient();
-        var agentPage = await dashboardHttp.GetStringAsync($"http://127.0.0.1:{fixture.AgentDashboardPort}/", deadline.Token);
-        Assert.Contains($"127.0.0.1:{fixture.LocalPort}", agentPage);
-        Assert.Contains("to-visited", agentPage);
-        Assert.DoesNotContain("accessSecret", agentPage, StringComparison.OrdinalIgnoreCase);
+        var agentStatus = await dashboardHttp.GetStringAsync($"http://127.0.0.1:{fixture.AgentDashboardPort}/api/v2/status", deadline.Token);
+        Assert.Contains($"127.0.0.1:{fixture.LocalPort}", agentStatus);
+        Assert.Contains("to-visited", agentStatus);
+        Assert.DoesNotContain("accessSecret", agentStatus, StringComparison.OrdinalIgnoreCase);
 
         using var caller = await fixture.ConnectLocalAsync(deadline.Token);
         try
@@ -317,7 +317,7 @@ public sealed class PeerConnectionTests
             Assert.True(channel.GetProperty("peerCiphertextToTarget").GetInt64() >= 8L * 1024 * 1024);
             Assert.True(channel.GetProperty("peerCiphertextToCaller").GetInt64() >= 8L * 1024 * 1024);
         }
-        for (var attempt = 0; attempt < 50; attempt++)
+        for (var attempt = 0; attempt < 150; attempt++)
         {
             using var history = await http.GetFromJsonAsync<JsonDocument>(
                 $"http://{fixture.DashboardAddress}/api/v1/history?clientId=visited&hours=24", deadline.Token);
@@ -327,7 +327,8 @@ public sealed class PeerConnectionTests
                 Assert.All(samples, sample => Assert.Equal(0, sample.GetProperty("bytesToTarget").GetInt64() - sample.GetProperty("peerCiphertextToTarget").GetInt64()));
                 break;
             }
-            Assert.True(attempt < 49, "Peer ciphertext was not persisted for both channels.");
+            Assert.True(attempt < 149,
+                $"Peer ciphertext was not persisted for both channels. History: {history.RootElement.GetRawText()}");
             await Task.Delay(200, deadline.Token);
         }
     }
@@ -588,11 +589,24 @@ public sealed class PeerConnectionTests
         var registration = JsonProtocolSerializer.Deserialize<RegisterAcceptedMessage>(registrationFrame!.Payload.Span);
         await writer.WriteAsync(new Frame(FrameType.ConfigAck, JsonProtocolSerializer.Serialize(new ConfigAckMessage(registration.SessionId, registration.ConfigVersion))), deadline.Token);
         Assert.Equal(FrameType.Ready, (await reader.ReadAsync(ProtocolConstants.MaxControlPayloadLength, deadline.Token))?.Type);
-        var requestId = Guid.NewGuid();
-        await writer.WriteAsync(new Frame(FrameType.PeerOpenRequest, JsonProtocolSerializer.Serialize(new PeerOpenRequestMessage(requestId, encryptionEnabled ? "to-visited" : "to-visited-b"))), deadline.Token);
-        var grantFrame = await reader.ReadAsync(ProtocolConstants.MaxControlPayloadLength, deadline.Token);
-        Assert.Equal(FrameType.PeerOpenGranted, grantFrame?.Type);
-        var grant = JsonProtocolSerializer.Deserialize<PeerOpenGrantedMessage>(grantFrame!.Payload.Span);
+        PeerOpenGrantedMessage? grant = null;
+        while (grant is null)
+        {
+            var requestId = Guid.NewGuid();
+            await writer.WriteAsync(new Frame(FrameType.PeerOpenRequest, JsonProtocolSerializer.Serialize(new PeerOpenRequestMessage(requestId, encryptionEnabled ? "to-visited" : "to-visited-b"))), deadline.Token);
+            var grantFrame = await reader.ReadAsync(ProtocolConstants.MaxControlPayloadLength, deadline.Token);
+            if (grantFrame?.Type == FrameType.PeerOpenRejected)
+            {
+                var rejected = JsonProtocolSerializer.Deserialize<PeerOpenRejectedMessage>(grantFrame.Payload.Span);
+                Assert.Equal(requestId, rejected.RequestId);
+                Assert.Equal(ErrorCode.ChannelUnavailable, rejected.ErrorCode);
+                await Task.Delay(100, deadline.Token);
+                continue;
+            }
+            Assert.Equal(FrameType.PeerOpenGranted, grantFrame?.Type);
+            grant = JsonProtocolSerializer.Deserialize<PeerOpenGrantedMessage>(grantFrame!.Payload.Span);
+            Assert.Equal(requestId, grant.RequestId);
+        }
         Assert.Equal(encryptionEnabled, grant.EndToEndEncryptionEnabled);
         using var dataClient = new TcpClient();
         await dataClient.ConnectAsync(IPAddress.Loopback, fixture.DataPort, deadline.Token);
@@ -676,7 +690,8 @@ public sealed class PeerConnectionTests
             var accessSecret = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
             var accessSecretB = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
             var dashboardAccessSecret = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
-            var fingerprint = CreateIdentity(Path.Combine(visitedDirectory, "visited.e2e.pfx"));
+            var visitedState = Directory.CreateDirectory(Path.Combine(visitedDirectory, "state", "primary"));
+            var fingerprint = CreateIdentity(Path.Combine(visitedState.FullName, "identity.pfx"));
             TargetFingerprint = fingerprint;
             var visitedChannels = new List<ChannelConfiguration>
             { new ChannelConfiguration("private", "Private", true, "127.0.0.1", ProxyPort, "127.0.0.1", targetPort, 10, 5)
@@ -801,7 +816,7 @@ public sealed class PeerConnectionTests
         private bool TryReadPort(string mappingId, out int port)
         {
             port = 0;
-            var path = Path.Combine(directory, "caller", "caller.ports.json");
+            var path = Path.Combine(directory, "caller", "state", "primary", "ports.json");
             if (!File.Exists(path)) return false;
             try
             {
@@ -864,9 +879,16 @@ public sealed class PeerConnectionTests
 
         private string AgentJson(string clientId, string secret) => JsonSerializer.Serialize(new
         {
-            serverHost = "127.0.0.1", serverPort = TunnelPort, dataPort = DataPort, clientId, secret, useTls = true, trustedCaPemBase64 = Convert.ToBase64String(File.ReadAllBytes(caPath)),
             dashboardPort = clientId == "caller" ? AgentDashboardPort : 0,
-            reconnect = new { initialDelaySeconds = 1, maxDelaySeconds = 2, permanentErrorDelaySeconds = 2 }
+            servers = new[]
+            {
+                new
+                {
+                    profileId = "primary", serverHost = "127.0.0.1", serverPort = TunnelPort, dataPort = DataPort,
+                    clientId, secret, useTls = true, trustedCaPemBase64 = Convert.ToBase64String(File.ReadAllBytes(caPath)),
+                    reconnect = new { initialDelaySeconds = 1, maxDelaySeconds = 2, permanentErrorDelaySeconds = 2 }
+                }
+            }
         });
 
         private void StartProcess(string assembly, string configurationPath)

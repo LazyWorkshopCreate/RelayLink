@@ -8,7 +8,7 @@ RUN pnpm install --frozen-lockfile
 COPY src/RelayLink.AdminWeb/ ./
 RUN pnpm build
 
-FROM mcr.microsoft.com/dotnet/sdk:10.0-bookworm-slim AS build
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
 COPY NuGet.Config Directory.Build.props ./
 COPY src/RelayLink.Protocol/RelayLink.Protocol.csproj src/RelayLink.Protocol/
@@ -24,7 +24,7 @@ RUN dotnet publish src/RelayLink.Server/RelayLink.Server.csproj \
     -p:SkipAdminWebBuild=true \
     -p:UseAppHost=false
 
-FROM mcr.microsoft.com/dotnet/aspnet:10.0-bookworm-slim AS runtime
+FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
 WORKDIR /app
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends libsqlite3-0 \

@@ -17,6 +17,7 @@ internal sealed class PeerSessionCoordinator(
     Guid sessionId,
     FrameWriter controlWriter,
     ILogger logger,
+    AgentConnectionQuota quota,
     CancellationToken sessionToken) : IAsyncDisposable
 {
     private readonly ConcurrentDictionary<Guid, TaskCompletionSource<PeerOpenGrantedMessage>> requests = new();
@@ -46,10 +47,17 @@ internal sealed class PeerSessionCoordinator(
             if (mapping.LocalAddress != "127.0.0.1" || Convert.FromBase64String(mapping.AccessSecret).Length < 32)
                 throw new AgentPermanentException("Server sent an invalid outbound mapping.");
             if (listeners.ContainsKey(mapping.MappingId)) continue;
-            var binding = new LocalBinding(mapping, ports.Bind(mapping.MappingId));
-            listeners.Add(mapping.MappingId, binding);
-            Track(AcceptLoopAsync(binding));
-            logger.LogInformation("Peer loopback listener {MappingId} started on 127.0.0.1:{Port}.", mapping.MappingId, binding.Port);
+            try
+            {
+                var binding = new LocalBinding(mapping, ports.Bind(mapping.MappingId));
+                listeners.Add(mapping.MappingId, binding);
+                Track(AcceptLoopAsync(binding));
+                logger.LogInformation("Peer loopback listener {MappingId} started on 127.0.0.1:{Port}.", mapping.MappingId, binding.Port);
+            }
+            catch (Exception exception) when (exception is SocketException or IOException or UnauthorizedAccessException)
+            {
+                logger.LogWarning(exception, "Peer loopback listener {MappingId} could not bind; other mappings continue.", mapping.MappingId);
+            }
         }
     }
 
@@ -70,18 +78,29 @@ internal sealed class PeerSessionCoordinator(
         var current = Volatile.Read(ref snapshot);
         var channel = current.Channels.SingleOrDefault(candidate => candidate.ChannelId == open.ChannelId && candidate.Enabled && candidate.AuthorizedClientsOnly);
         if (channel is null) return;
+        var lease = quota.TryAcquirePending();
+        if (lease is null)
+        {
+            logger.LogWarning("Peer target request for {ChannelId} exceeded profile {ProfileId} capacity.", open.ChannelId, agent.ProfileId);
+            return;
+        }
         lock (quotaLock)
         {
-            if (openConnections >= current.MaxConnections || targetCounts.GetValueOrDefault(channel.ChannelId) >= channel.MaxConnections) return;
+            if (openConnections >= current.MaxConnections || targetCounts.GetValueOrDefault(channel.ChannelId) >= channel.MaxConnections)
+            {
+                lease.Dispose();
+                return;
+            }
             openConnections++;
             targetCounts[channel.ChannelId] = targetCounts.GetValueOrDefault(channel.ChannelId) + 1;
         }
-        Track(HandleTargetWithLeaseAsync(open, channel.ChannelId));
+        Track(HandleTargetWithLeaseAsync(open, channel.ChannelId, lease));
     }
 
-    private async Task HandleTargetWithLeaseAsync(PeerOpenMessage open, string channelId)
+    private async Task HandleTargetWithLeaseAsync(PeerOpenMessage open, string channelId, AgentConnectionQuota.Lease lease)
     {
-        try { await HandleTargetAsync(open); }
+        using (lease)
+        try { await HandleTargetAsync(open, lease); }
         finally
         {
             lock (quotaLock) { openConnections--; targetCounts[channelId]--; }
@@ -95,12 +114,19 @@ internal sealed class PeerSessionCoordinator(
             while (!sessionToken.IsCancellationRequested && !binding.Stopped)
             {
                 var caller = await binding.Listener.AcceptSocketAsync(sessionToken);
+                var lease = quota.TryAcquirePending();
+                if (lease is null)
+                {
+                    caller.Dispose();
+                    logger.LogWarning("Peer caller request for {MappingId} exceeded profile {ProfileId} capacity.", binding.Mapping.MappingId, agent.ProfileId);
+                    continue;
+                }
                 lock (quotaLock)
                 {
-                    if (openConnections >= Volatile.Read(ref snapshot).MaxConnections) { caller.Dispose(); continue; }
+                    if (openConnections >= Volatile.Read(ref snapshot).MaxConnections) { lease.Dispose(); caller.Dispose(); continue; }
                     openConnections++;
                 }
-                Track(HandleCallerWithLeaseAsync(caller, binding.Mapping));
+                Track(HandleCallerWithLeaseAsync(caller, binding.Mapping, lease));
             }
         }
         catch (OperationCanceledException) when (sessionToken.IsCancellationRequested) { }
@@ -108,13 +134,14 @@ internal sealed class PeerSessionCoordinator(
         catch (SocketException) when (binding.Stopped) { }
     }
 
-    private async Task HandleCallerWithLeaseAsync(Socket caller, OutboundMappingSnapshot mapping)
+    private async Task HandleCallerWithLeaseAsync(Socket caller, OutboundMappingSnapshot mapping, AgentConnectionQuota.Lease lease)
     {
-        try { await HandleCallerAsync(caller, mapping); }
+        using (lease)
+        try { await HandleCallerAsync(caller, mapping, lease); }
         finally { lock (quotaLock) openConnections--; }
     }
 
-    private async Task HandleCallerAsync(Socket caller, OutboundMappingSnapshot mapping)
+    private async Task HandleCallerAsync(Socket caller, OutboundMappingSnapshot mapping, AgentConnectionQuota.Lease lease)
     {
         using (caller)
         using (var deadline = CancellationTokenSource.CreateLinkedTokenSource(sessionToken))
@@ -150,6 +177,7 @@ internal sealed class PeerSessionCoordinator(
                 var status = new byte[1];
                 await peerStream.ReadExactlyAsync(status, deadline.Token);
                 if (status[0] != 1) throw new IOException("Peer target was not ready.");
+                lease.MarkActive();
                 deadline.CancelAfter(Timeout.InfiniteTimeSpan);
                 if (tls is not null) await RelayEncryptedSocketAsync(caller, tls, connection.Framed, sessionToken);
                 else await RelayPlainSocketAsync(caller, connection.Framed, sessionToken);
@@ -162,7 +190,7 @@ internal sealed class PeerSessionCoordinator(
         }
     }
 
-    private async Task HandleTargetAsync(PeerOpenMessage open)
+    private async Task HandleTargetAsync(PeerOpenMessage open, AgentConnectionQuota.Lease lease)
     {
         var current = Volatile.Read(ref snapshot);
         var channel = current.Channels.SingleOrDefault(candidate => candidate.ChannelId == open.ChannelId && candidate.Enabled && candidate.AuthorizedClientsOnly);
@@ -198,6 +226,7 @@ internal sealed class PeerSessionCoordinator(
             targetDeadline.CancelAfter(TimeSpan.FromSeconds(channel.TargetConnectTimeoutSeconds));
             await target.ConnectAsync(channel.TargetHost, channel.TargetPort, targetDeadline.Token);
             await peerStream.WriteAsync(new byte[] { 1 }, deadline.Token);
+            lease.MarkActive();
             deadline.CancelAfter(Timeout.InfiniteTimeSpan);
             if (tls is not null) await RelayEncryptedSocketAsync(target.Client, tls, connection.Framed, sessionToken);
             else await RelayPlainSocketAsync(target.Client, connection.Framed, sessionToken);
@@ -340,7 +369,11 @@ internal sealed class PeerSessionCoordinator(
         foreach (var listener in listeners.Values) listener.Stop();
         foreach (var request in requests.Values) request.TrySetCanceled();
         var tasks = active.Values.ToArray();
-        if (tasks.Length > 0) await Task.WhenAny(Task.WhenAll(tasks), Task.Delay(TimeSpan.FromSeconds(5)));
+        if (tasks.Length > 0)
+        {
+            try { await Task.WhenAll(tasks); }
+            catch (OperationCanceledException) when (sessionToken.IsCancellationRequested) { }
+        }
     }
 
     private sealed class LocalBinding(OutboundMappingSnapshot mapping, TcpListener listener)

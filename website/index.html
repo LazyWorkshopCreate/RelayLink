@@ -13,10 +13,10 @@
         <link rel="alternate" hreflang="en" href="./en/" />
         <link rel="alternate" hreflang="x-default" href="./" />
         <link rel="icon" type="image/svg+xml" href="./assets/relaylink-icon.svg" />
-        <link rel="stylesheet" href="./assets/styles.css?v=20260923-6" />
-        <script src="./assets/locale.js?v=20260923-6" defer></script>
-        <script src="./assets/releases.js?v=20260923-6" defer></script>
-        <script src="./assets/app.js?v=20260923-6" defer></script>
+        <link rel="stylesheet" href="./assets/styles.css?v=20260930-1" />
+        <script src="./assets/locale.js?v=20260930-1" defer></script>
+        <script src="./assets/releases.js?v=20260930-1" defer></script>
+        <script src="./assets/app.js?v=20260930-1" defer></script>
     </head>
     <body>
         <a class="skip-link" href="#main">跳到正文</a>
@@ -154,6 +154,19 @@
                         </article>
                     </div>
 
+                    <div class="agent-feature" aria-labelledby="agent-feature-title">
+                        <div class="agent-feature-intro">
+                            <p class="card-kicker">AGENT / 多服务端</p>
+                            <h3 id="agent-feature-title">一台 Agent，连接多台 Server。</h3>
+                            <p>每个服务端使用独立的客户端身份、密钥和 TLS 信任。各自的控制连接、通道和本机入口互不混用；一项离线不影响其他项。</p>
+                        </div>
+                        <div class="agent-feature-list">
+                            <div><strong>导入配置</strong><span>从服务端下载单服务端 JSON，在 Agent 本机页面导入新增或修改；连接参数不提供手工编辑。</span></div>
+                            <div><strong>暂停与恢复</strong><span>停用时断开该项连接并停止重连，配置和身份保留；重新启用后按原身份连接。</span></div>
+                            <div><strong>平滑升级</strong><span>旧配置在 Agent 启动前转换；Windows 安装包同时提供自包含与运行时依赖版本。</span></div>
+                        </div>
+                    </div>
+
                     <aside class="security-note">
                         <span class="note-mark">!</span>
                         <div>
@@ -217,6 +230,7 @@
                                 <div class="step-panel" id="step-3-panel" hidden>
                                     <p>Windows 使用安装包；Linux 使用 systemd；macOS 使用 launchd。安装时使用刚下载的配置。</p>
                                     <p class="hint">Agent 本机状态页默认位于 <code>http://127.0.0.1:18081/</code>。</p>
+                                    <p class="hint">要连接第二台 Server，在此页面导入另一份单服务端 JSON。</p>
                                 </div>
                             </article>
                             <article class="step" data-step="4">
@@ -317,6 +331,9 @@
                             </a>
                             <a href="https://github.com/DeronQi/RelayLink/blob/main/docs/design/agent-to-agent.md" target="_blank" rel="noreferrer">
                                 <span><strong>Agent 安全互访</strong><small>访问授权、内层 TLS 与身份校验</small></span><b>→</b>
+                            </a>
+                            <a href="https://github.com/DeronQi/RelayLink/blob/main/docs/design/multi-server-agent.md" target="_blank" rel="noreferrer">
+                                <span><strong>Agent 多服务端</strong><small>独立身份、导入管理与停用连接项</small></span><b>→</b>
                             </a>
                             <a href="https://github.com/DeronQi/RelayLink/tree/main/docs/adr" target="_blank" rel="noreferrer">
                                 <span><strong>架构决策记录</strong><small>理解关键方案为何这样设计</small></span><b>→</b>

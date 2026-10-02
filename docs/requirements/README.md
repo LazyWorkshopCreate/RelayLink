@@ -13,6 +13,7 @@
 | [客户端互访可选加密需求](2026-09-22-optional-peer-encryption.md) | REQ-001G | Done | 互访通道默认加密及可选明文直接复制、A51–A53；实现与自动化验收已完成 |
 | [Windows Agent 安装与依赖需求](2026-09-22-windows-agent-installation.md) | REQ-001H | Accepted | Server 2012 R2 最低版本、依赖检查页、兼容服务脚本、失败可见性与安装日志、A54–A57 |
 | [Server Docker Compose 部署](2026-09-23-server-docker-deployment.md) | REQ-001I | Accepted | Linux Server 一键容器启动、持久化、安全边界与安装文档重构、A58–A60 |
+| [Agent 多服务端连接需求](2026-09-28-multi-server-agent.md) | REQ-001J | Draft | 多服务端隔离、启动前转换、新版安装配置与本机页面管理、A61–A69 |
 
 需求编号和验收编号沿用原文，不因拆分重排。当前存在两个历史 `A28`：一个属于 Windows 安装包升级，一个属于控制/数据入口验证；本次只做结构拆分，不改写既有编号语义。
 

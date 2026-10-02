@@ -1,10 +1,10 @@
 using RelayLink.Agent;
 
 var parsed = ParseArguments(args);
-AgentConfiguration configuration;
+AgentProcessConfiguration configuration;
 try
 {
-    configuration = AgentConfigurationLoader.Load(parsed.ConfigurationPath);
+    configuration = AgentProcessConfigurationLoader.Load(parsed.ConfigurationPath);
 }
 catch (AgentConfigurationException exception)
 {
@@ -19,7 +19,20 @@ if (parsed.CheckOnly)
 }
 if (parsed.ShowE2eFingerprint)
 {
-    using var identity = AgentIdentity.LoadOrCreate(configuration.E2eIdentityPath, configuration.ClientId);
+    if (configuration.Servers.Count != 1)
+    {
+        Console.Error.WriteLine("--show-e2e-fingerprint requires exactly one server profile.");
+        return 2;
+    }
+    var server = AgentProcessConfigurationLoader.CreateRuntimeConfiguration(configuration, configuration.Servers[0], parsed.ConfigurationPath);
+    var stateDirectory = Path.GetDirectoryName(server.E2eIdentityPath)!;
+    Directory.CreateDirectory(stateDirectory);
+    if (!OperatingSystem.IsWindows())
+    {
+        File.SetUnixFileMode(Path.GetDirectoryName(stateDirectory)!, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        File.SetUnixFileMode(stateDirectory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+    }
+    using var identity = AgentIdentity.LoadOrCreate(server.E2eIdentityPath, server.ClientId);
     Console.WriteLine(identity.Fingerprint);
     return 0;
 }
@@ -30,9 +43,10 @@ builder.Logging.AddJsonConsole(console => console.IncludeScopes = true);
 builder.Services.AddSystemd();
 builder.Services.AddWindowsService(options => options.ServiceName = "RelayLink Agent");
 builder.Services.AddSingleton(configuration);
-builder.Services.AddSingleton<AgentStatus>();
-builder.Services.AddSingleton<AgentDiagnosticLog>();
-builder.Services.AddHostedService<ControlSessionWorker>();
+builder.Services.AddSingleton(new AgentConfigurationPath(parsed.ConfigurationPath));
+builder.Services.AddSingleton<AgentLocalWriteSession>();
+builder.Services.AddSingleton<AgentProcessRuntime>();
+builder.Services.AddHostedService(provider => provider.GetRequiredService<AgentProcessRuntime>());
 builder.Services.AddHostedService<AgentLocalDashboard>();
 await builder.Build().RunAsync();
 return 0;
@@ -51,5 +65,10 @@ static (string ConfigurationPath, bool CheckOnly, bool ShowE2eFingerprint) Parse
     }
 
     if (string.IsNullOrWhiteSpace(path)) { Console.Error.WriteLine("--config is required."); Environment.Exit(2); }
+    if ((check ? 1 : 0) + (showFingerprint ? 1 : 0) > 1)
+    {
+        Console.Error.WriteLine("Select only one Agent command.");
+        Environment.Exit(2);
+    }
     return (path!, check, showFingerprint);
 }

@@ -4,6 +4,8 @@
     <RootNamespace>RelayLink.Agent</RootNamespace>
   </PropertyGroup>
   <ItemGroup>
+    <InternalsVisibleTo Include="RelayLink.UnitTests" />
+    <InternalsVisibleTo Include="RelayLink.IntegrationTests" />
     <!-- Local test outputs must never become Web SDK publish content. -->
     <Content Remove="artifacts/**" />
     <None Remove="artifacts/**" />
@@ -12,4 +14,19 @@
     <PackageReference Include="Microsoft.Extensions.Hosting.Systemd" Version="10.0.2" />
     <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.2" />
   </ItemGroup>
+  <Target Name="BuildAgentWeb" BeforeTargets="Build;Publish" Condition="'$(SkipAdminWebBuild)' != 'true'">
+    <Exec Command="pnpm --dir &quot;$(MSBuildProjectDirectory)/../RelayLink.AgentWeb&quot; build" />
+  </Target>
+  <Target Name="CopyAgentWebToBuild" AfterTargets="Build" DependsOnTargets="BuildAgentWeb">
+    <ItemGroup>
+      <AgentWebFile Include="$(MSBuildProjectDirectory)/../RelayLink.AgentWeb/dist/**/*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(AgentWebFile)" DestinationFiles="@(AgentWebFile->'$(TargetDir)wwwroot/%(RecursiveDir)%(Filename)%(Extension)')" />
+  </Target>
+  <Target Name="CopyAgentWebToPublish" AfterTargets="Publish" DependsOnTargets="BuildAgentWeb">
+    <ItemGroup>
+      <AgentWebPublishFile Include="$(MSBuildProjectDirectory)/../RelayLink.AgentWeb/dist/**/*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(AgentWebPublishFile)" DestinationFiles="@(AgentWebPublishFile->'$(PublishDir)wwwroot/%(RecursiveDir)%(Filename)%(Extension)')" />
+  </Target>
 </Project>

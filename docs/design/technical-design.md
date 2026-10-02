@@ -2,8 +2,8 @@
 
 文档 ID：DES-001\
 状态：Draft（待评审）\
-版本：v2.11 设计评审稿\
-更新日期：2026-09-23\
+版本：v2.17.0 设计评审稿\
+更新日期：2026-09-29\
 调研日期：2026-09-15\
 配套文档：[需求文档索引](../requirements/README.md)
 
@@ -12,7 +12,7 @@
 采用 **.NET 10 / C# + Socket + 可选 SslStream + ASP.NET Core** 实现专用反向 TCP 代理。控制连接默认启用 TLS；普通数据连接为独立端口上的原始 TCP，安全取舍见 [ADR-0008](../adr/0008-separated-control-and-raw-data.md)。
 
 - Linux 或 Windows 服务端分别提供控制端口与数据端口；只有已认证控制会话能授权建立数据连接。
-- 每个 Windows/Linux/macOS Agent 保持一条控制连接；每条业务 TCP 连接按需建立一条独立数据 TCP 连接。
+- 当前 Windows/Linux/macOS Agent 按 `servers[]` 配置项分别保持控制连接；每条业务 TCP 连接按需建立一条独立数据 TCP 连接。多服务端 Agent 的拟议扩展见[多服务端技术设计](multi-server-agent.md)，各服务端分别保持自己的控制会话与数据连接。
 - 通道及每客户端密钥保存在服务端每客户端一个 JSON 文件中；启动加载、认证后及管理保存后下发快照。
 - Agent 注册时上报本机端到端证书指纹，服务端首次认证并确认配置后固定到对应客户端 JSON；授权通道不保存指纹，访问映射引用目标客户端固定身份。后续变化拒绝自动覆盖；旧通道级字段不兼容，加载时拒绝，见 [ADR-0011](../adr/0011-client-level-e2e-identity.md)。
 - 普通代理在数据连接绑定、目标就绪后直接双向复制 TCP 字节；互访默认使用端到端 TLS，也可按目标通道关闭后在访问证明成功时直接复制，并分别保留半关闭语义。不实现多业务连接在同一 TCP 上的复用。
@@ -170,28 +170,13 @@ Agent 使用 Generic Host；Windows 通过 `Microsoft.Extensions.Hosting.Windows
 
 客户端和通道的 `tags` 可省略，管理端将手工输入的逗号分隔值规范化为数组；每层最多 32 个不区分大小写的唯一 tag，每个 1～64 字符。tag 仅进入匿名管理查询和页面筛选，不进入 Agent 下发快照、配置摘要、认证、授权或转发判断；仅修改 tag 不撤销连接，也不向 Agent 发送配置更新。
 
-服务端 `tunnel.agentServerHost` 是 Agent 实际连接的 DNS 名称或 IP，不是隧道监听地址或管理页地址。管理端创建客户端时从此字段预填 `agentServerHost`，允许按客户端覆盖；若未配置且 `listenAddress` 为具体地址，则以监听地址预填。监听 `0.0.0.0` 或 `::` 时无法自动推断公网地址，必须显式配置或在创建时填写，不能从浏览器地址推断（管理页可能经 SSH 转发）。服务端创建接口在客户端未提交该值时同样使用上述默认值。TLS 启用时，所用地址必须匹配服务端证书 SAN。服务端 `tunnel.trustedCaPemPath` 指向仅含 CA 公钥证书的 PEM 文件，管理端不要求填写 Agent 本机 CA 路径；下载 Agent 配置时读取该文件并以 `trustedCaPemBase64` 内嵌。服务端不允许将私钥放入此字段。完整脱敏示例以 [客户端配置示例](../../config/examples/client.example.json) 为准。
+服务端 `tunnel.agentServerHost` 是 Agent 实际连接的 DNS 名称或 IP，不是隧道监听地址或管理页地址。管理端创建客户端时从此字段预填 `agentServerHost`，允许按客户端覆盖；若未配置且 `listenAddress` 为具体地址，则以监听地址预填。监听 `0.0.0.0` 或 `::` 时无法自动推断公网地址，必须显式配置或在创建时填写，不能从浏览器地址推断（管理页可能经 SSH 转发）。服务端创建接口在客户端未提交该值时同样使用上述默认值。TLS 启用时，所用地址必须匹配服务端证书 SAN。服务端 `tunnel.trustedCaPemPath` 指向仅含 CA 公钥证书的 PEM 文件，管理端不要求填写 Agent 本机 CA 路径；当前下载 Agent 配置时读取该文件并以 `trustedCaPemBase64` 内嵌。服务端不允许将私钥放入此字段。当前完整脱敏示例以 [客户端配置示例](../../config/examples/client.example.json) 为准。当前下载接口输出只含该服务端一个 `servers[]` 项的新格式，见[多服务端技术设计](multi-server-agent.md)。
 
 ### 5.3 Agent 本地配置：agent.json
 
-```json
-{
-  "serverHost": "tunnel.example.com",
-  "serverPort": 7443,
-  "dataPort": 7444,
-  "useTls": true,
-  "clientId": "shanghai-01",
-  "secret": "REPLACE_WITH_SAME_CLIENT_SECRET",
-  "trustedCaPemBase64": "REPLACE_WITH_BASE64_OF_CA_CERTIFICATE_PEM",
-  "reconnect": {
-    "initialDelaySeconds": 1,
-    "maxDelaySeconds": 30,
-    "permanentErrorDelaySeconds": 60
-  }
-}
-```
+Agent 主程序现在仅接受包含 `servers[]` 的新格式；配置示例见[Agent 配置示例](../../config/examples/agent.example.json)。每个 `profileId` 独立持有连接、控制 TLS 信任、端到端身份及端口状态。旧单服务端格式由独立转换器在启动前迁移；本机页面的增删写操作尚未实现。完整字段、迁移及剩余设计见[多服务端技术设计](multi-server-agent.md)及 [ADR-0018](../adr/0018-agent-multi-server-isolation.md)。
 
-`serverHost` 同时用于控制与数据连接的 DNS，控制 TLS 还用它校验服务端名称。`serverPort` 指控制入口，`dataPort` 指独立数据入口；旧配置缺少 `dataPort` 时默认为 `serverPort + 1`。若直接使用 IP，控制证书必须含匹配 IP SAN。TLS 配置使用 `trustedCaPemBase64`：它是 CA 证书 PEM 文本的 UTF-8 字节经 Base64 编码，不含私钥。Agent 从配置解码后构建私有信任链，不读取操作系统根证书库，仍校验证书链、CA 属性和名称。旧 Agent 配置的 `trustedCaPemPath` 可继续读取以便迁移，但新下载配置不再生成路径，也不允许同时给出两种信任来源。私有 CA 未提供 CRL/OCSP 时无法进行在线吊销检查；如需吊销，须先为签发链提供可访问的吊销服务并扩展相应策略。本地配置没有 `channels`、目标或代理端口字段，出现这些字段应报配置错误，避免误以为本地配置会生效。
+每个 `servers[]` 项的 `serverHost` 同时用于控制与数据连接，控制 TLS 还用它校验服务端名称。`serverPort` 指控制入口，`dataPort` 指独立数据入口；旧配置缺少 `dataPort` 时由转换器补为 `serverPort + 1`。若直接使用 IP，控制证书必须含匹配 IP SAN。TLS 信任材料使用本项的 `trustedCaPemBase64`，即 CA 证书 PEM 文本的 UTF-8 字节经 Base64 编码；不读取操作系统根证书库，仍校验证书链、CA 属性和名称。旧配置的 `trustedCaPemPath` 只由转换器读取，新格式不接受该字段。私有 CA 未提供 CRL/OCSP 时无法进行在线吊销检查。本地配置没有 `channels`、目标或代理端口字段，出现这些字段会报错。
 
 ### 5.4 下发快照
 
@@ -458,7 +443,7 @@ Agent：Disconnected → Connecting → Authenticating → Configuring → Onlin
 | POST `/api/v1/admin/clients` | 需会话与 CSRF 令牌；创建独立密钥客户端配置 |
 | PUT `/api/v1/admin/clients/{id}` | 需会话与 CSRF 令牌；编辑显示名、tag、启用状态与连接上限；禁用时立即撤销该客户端相关连接并停止监听 |
 | DELETE `/api/v1/admin/clients/{id}` | 需会话与 CSRF 令牌；无其他入口引用时删除客户端文件，停止监听并撤销相关连接与会话 |
-| GET `/api/v1/admin/clients/{id}/agent-config` | 需会话；下载包含独立密钥的 Agent JSON 配置，响应不得缓存或写日志 |
+| GET `/api/v1/admin/clients/{id}/agent-config` | 需会话；当前下载包含独立密钥的单项 `servers[]` 新格式 Agent JSON，响应不得缓存或写日志，见 [DES-004](multi-server-agent.md) |
 | GET/POST `/api/v1/admin/security-groups` | 需管理员会话；写入另需 CSRF；列出或新增安全组 |
 | PUT/DELETE `/api/v1/admin/security-groups/{id}` | 需管理员会话及 CSRF；修改或删除安全组；被通道引用时不可删除 |
 | POST `/api/v1/admin/clients/{id}/channels` | 需会话与 CSRF 令牌；新增通道并立即更新监听、下发快照 |
@@ -559,7 +544,7 @@ Docker Compose 方案见 [deploy/docker/README.md](../../deploy/docker/README.md
 
 ### 13.2 Windows Agent
 
-发布 win-x64 框架依赖包，目标机须预装 .NET 10 ASP.NET Core Runtime x64 和 VC++ x64 运行库；安装包不携带 .NET 运行时，决定见 [ADR-0017](../adr/0017-windows-agent-framework-dependent.md)。使用 [Windows Agent 安装包](../../deploy/windows/README.md) 检查依赖、选择并校验配置；首次安装及重新配置无 JSON 不得继续。程序位于 Program Files，配置和 TLS 信任 CA 复制到受限的 ProgramData 目录，Agent 生成的身份及端口状态也存于该目录。服务以 LocalService 运行，开机自动启动并配置失败恢复；安装成功后按 `dashboardPort` 在公共桌面创建指向本机状态页的 Internet Shortcut，由系统默认浏览器打开，状态页关闭时不创建。安装和卸载需要本机管理员权限。已有安装须显式选择仅更新或重新配置，且校验服务确属当前安装：仅更新停止服务、替换程序并重启，不触碰 ProgramData；重新配置在校验新 JSON 后清理 ProgramData 中 Agent 管理的配置、CA、身份、端口状态和诊断日志，写入新配置再重启，并更新快捷方式。不清理未知文件、Windows 事件日志或其他应用目录。卸载移除安装程序生成的快捷方式，但保留敏感配置与身份文件供管理员处理。实际架构不同则另行构建；生产连接和 Windows Service 生命周期仍需目标机验收。
+同时发布 win-x64 自包含与框架依赖程序及安装包，双模式决定见 [ADR-0019](../adr/0019-dual-windows-agent-distribution.md)，安装根目录布局见 [ADR-0020](../adr/0020-flat-windows-agent-installation.md)。两种包均检查 VC++ x64；框架依赖包还要求预装 .NET 10 ASP.NET Core Runtime x64，自包含包随包携带运行时。使用 [Windows Agent 安装包](../../deploy/windows/README.md) 检查依赖、选择并校验配置；首次安装及重新配置无 JSON 不得继续。程序直接位于 `C:\Program Files\RelayLink\Agent`；仅更新时停服并清理已知旧程序文件和运行时文件，再写入完整的新构建，保留 Inno 卸载记录与安装脚本。旧 `program` 子目录会清理，服务路径改回安装根目录。配置写入受限的 ProgramData 目录，TLS 信任 CA 内嵌于配置，Agent 身份及端口状态存于该目录的 `state/<profileId>/`。服务以 LocalService 运行，开机自动启动并配置失败恢复；安装成功后按 `dashboardPort` 在公共桌面创建指向本机状态页的 Internet Shortcut，由系统默认浏览器打开，状态页关闭时不创建。安装和卸载需要本机管理员权限。已有安装须显式选择仅更新或重新配置，且校验服务确属当前安装：仅更新清理旧程序、运行独立转换器后重启，保留旧材料；重新配置在校验新格式 JSON 后清理 ProgramData 中 Agent 管理的配置、身份、端口状态和诊断日志，写入新配置再重启，并更新快捷方式。不清理未知文件、Windows 事件日志或其他应用目录。卸载移除安装程序生成的快捷方式，但保留敏感配置与身份文件供管理员处理。实际架构不同则另行构建；生产连接和 Windows Service 生命周期仍需目标机验收。多服务端升级已在“仅更新”清理旧程序后、重启服务前运行独立配置转换器；新装和重新配置只校验并写入新格式，详见[多服务端技术设计](multi-server-agent.md)。
 
 ### 13.3 Linux Agent
 

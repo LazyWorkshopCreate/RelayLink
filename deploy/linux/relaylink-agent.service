@@ -8,6 +8,7 @@ Type=notify
 User=relaylink-agent
 Group=relaylink-agent
 WorkingDirectory=/opt/relaylink/agent
+ExecStartPre=/opt/relaylink/agent/RelayLink.Agent.ConfigMigrator --config /var/lib/relaylink-agent/agent.json
 ExecStart=/opt/relaylink/agent/RelayLink.Agent --config /var/lib/relaylink-agent/agent.json
 Restart=on-failure
 RestartSec=5

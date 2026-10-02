@@ -2,8 +2,8 @@
 
 文档 ID：REQ-001F\
 状态：Done\
-版本：v1.0\
-更新日期：2026-09-21\
+版本：v1.0.1\
+更新日期：2026-09-28\
 需求日期：2026-09-21\
 需求索引：[RelayLink 需求索引](README.md)\
 配套文档：[Agent 安全互访技术设计](../design/agent-to-agent.md)
@@ -16,6 +16,8 @@
 | U20 | 第三方软件可以通过 API 读取本机当前的被访问通道和端到端访问入口 |
 
 ## FR-15 Agent 本机只读 HTTP API
+
+本节界定现有 v1 状态 API。后续多服务端需求在本机监控页面增加受保护的服务端管理操作，并设计独立的 v2 接口，见 [REQ-001J](2026-09-28-multi-server-agent.md)；不改变此处已完成的 v1 单服务端验收结论。
 
 - API 与 Agent 本机状态页使用同一个 Kestrel 实例和 `dashboardPort`；只绑定 IPv4 loopback `127.0.0.1`。`dashboardPort` 为 0 时，网页和 API 同时关闭。
 - 提供版本化 GET 接口：`/api/v1/status` 返回聚合状态，`/api/v1/channels` 返回被访问通道，`/api/v1/mappings` 返回端到端访问入口。保留旧 `/api/status` 作为兼容入口。

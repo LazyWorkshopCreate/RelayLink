@@ -23,7 +23,7 @@ Linux Agent 使用与 Windows Agent 相同的配置、协议、互访通道和�
 pwsh ./scripts/publish.ps1 -RuntimeIdentifier linux-x64 -Component Agent
 ```
 
-建议使用独立的无登录服务账号。Agent 会在配置文件所在目录创建端到端身份、端口状态和诊断日志，因此该目录必须仅允许服务账号读写；程序目录由 root 管理且不允许服务账号写入。
+建议使用独立的无登录服务账号。Agent 在配置文件所在目录的 `state/<profileId>/` 中保存各服务端的身份、端口状态和诊断日志，因此配置目录必须仅允许服务账号读写；程序目录由 root 管理且不允许服务账号写入。旧单服务端配置须先由独立转换器迁移。
 
 ```bash
 sudo useradd --system --home-dir /var/lib/relaylink-agent --shell /usr/sbin/nologin relaylink-agent
@@ -31,15 +31,17 @@ sudo install -d -o root -g root -m 0755 /opt/relaylink/agent
 sudo tar -xzf RelayLink-Agent-linux-x64-<version>.tar.gz -C /opt/relaylink/agent
 sudo chown -R root:root /opt/relaylink/agent
 sudo chmod 0755 /opt/relaylink/agent/RelayLink.Agent
+sudo chmod 0755 /opt/relaylink/agent/RelayLink.Agent.ConfigMigrator
 sudo install -d -o relaylink-agent -g relaylink-agent -m 0700 /var/lib/relaylink-agent
 sudo install -o relaylink-agent -g relaylink-agent -m 0600 ./relaylink-agent-<clientId>.json /var/lib/relaylink-agent/agent.json
+sudo -u relaylink-agent /opt/relaylink/agent/RelayLink.Agent.ConfigMigrator --config /var/lib/relaylink-agent/agent.json
 sudo -u relaylink-agent /opt/relaylink/agent/RelayLink.Agent --config /var/lib/relaylink-agent/agent.json --check-config
 sudo install -m 0644 deploy/linux/relaylink-agent.service /etc/systemd/system/relaylink-agent.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now relaylink-agent
 ```
 
-通过 `systemctl status relaylink-agent` 和 `journalctl -u relaylink-agent` 检查进程；本机状态页默认位于 `http://127.0.0.1:18081/`。升级时只替换 `/opt/relaylink/agent` 中的程序文件并重启服务，不要覆盖 `/var/lib/relaylink-agent` 中的配置和身份状态。状态目录不放在 `/var/lib/relaylink/` 下，避免被 Server 服务账号目录的遍历权限阻断。
+通过 `systemctl status relaylink-agent` 和 `journalctl -u relaylink-agent` 检查进程；本机状态页默认位于 `http://127.0.0.1:18081/`。systemd 的 `ExecStartPre` 每次启动先运行转换器，新格式只作校验；转换失败时 Agent 不会启动。升级时只替换 `/opt/relaylink/agent` 中的程序文件并重启服务，不要覆盖 `/var/lib/relaylink-agent` 中的配置和身份状态。状态目录不放在 `/var/lib/relaylink/` 下，避免被 Server 服务账号目录的遍历权限阻断。
 
 ## 通过互访通道访问服务端管理页
 

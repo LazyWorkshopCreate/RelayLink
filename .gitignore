@@ -28,4 +28,7 @@ config/local/
 src/RelayLink.AdminWeb/node_modules/
 /.pnpm-store/
 src/RelayLink.AdminWeb/dist/
+src/RelayLink.AgentWeb/node_modules/
+src/RelayLink.AgentWeb/dist/
 src/RelayLink.Server/wwwroot/
+src/RelayLink.Agent/wwwroot/

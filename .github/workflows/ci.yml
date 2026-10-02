@@ -43,12 +43,16 @@ jobs:
           run_install: false
       - name: Install frontend dependencies
         run: pnpm --dir src/RelayLink.AdminWeb install --frozen-lockfile
+      - name: Install Agent frontend dependencies
+        run: pnpm --dir src/RelayLink.AgentWeb install --frozen-lockfile
       - name: Check frontend types
         run: pnpm --dir src/RelayLink.AdminWeb typecheck
       - name: Test frontend
         run: pnpm --dir src/RelayLink.AdminWeb test
       - name: Check frontend formatting
         run: pnpm --dir src/RelayLink.AdminWeb format:check
+      - name: Check Agent frontend
+        run: pnpm --dir src/RelayLink.AgentWeb build && pnpm --dir src/RelayLink.AgentWeb format:check
       - name: Restore .NET projects
         run: dotnet restore RelayLink.slnx --configfile NuGet.Config
       - name: Run .NET unit tests
@@ -83,6 +87,18 @@ jobs:
         run: dotnet new globaljson --sdk-version "${{ steps.dotnet.outputs.dotnet-version }}" --roll-forward disable
       - name: Restore native integration tests
         run: dotnet restore tests/RelayLink.IntegrationTests/RelayLink.IntegrationTests.csproj --configfile NuGet.Config
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          package-manager-cache: false
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11.19.0
+          run_install: false
+      - name: Build Agent frontend
+        run: |
+          pnpm --dir src/RelayLink.AgentWeb install --frozen-lockfile
+          pnpm --dir src/RelayLink.AgentWeb build
       - name: Run native integration tests (including peer TLS tests)
         run: dotnet test tests/RelayLink.IntegrationTests/RelayLink.IntegrationTests.csproj --configuration Release --no-restore -p:EnablePeerTlsTests=true -p:SkipAdminWebBuild=true
       - name: Verify native Agent and launchd lifecycle

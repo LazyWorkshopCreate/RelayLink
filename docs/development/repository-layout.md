@@ -2,8 +2,8 @@
 
 文档 ID：DEV-001\
 状态：Active\
-版本：v1.7.0\
-更新日期：2026-09-23
+版本：v1.8.0\
+更新日期：2026-09-29
 
 ```text
 RelayLink/
@@ -28,6 +28,8 @@ RelayLink/
 │   ├── RelayLink.Protocol/   帧协议、DTO、错误码
 │   ├── RelayLink.Transport/  TLS、转发和连接生命周期
 │   ├── RelayLink.AdminWeb/   React/TypeScript 管理端源码和构建配置
+│   ├── RelayLink.AgentWeb/   React/TypeScript Agent 本机页面源码和构建配置
+│   ├── RelayLink.Agent.ConfigMigrator/ Agent 启动前独立配置转换器
 │   ├── RelayLink.Server/     Linux/Windows 服务端、内网仪表盘与管理 API
 │   └── RelayLink.Agent/      Windows/Linux/macOS 客户端服务
 ├── tests/
@@ -55,6 +57,7 @@ RelayLink/
 - 需要新增 docs/operations 等类别时，须在有实际内容后创建并加入索引，不预建大量空文档。
 - docs/intro 是演示文稿与公众号文章的唯一位置，`pages.json` 是页码来源；生成的 PPTX 与插图提交，`.build/`、`.cache/`、`.slidep/` 和 `legacy-bak/` 由目录内 .gitignore 排除。
 - 管理端源码放 `src/RelayLink.AdminWeb`；构建生成的 `dist/` 不提交。Server 构建/发布时复制产物到输出目录的 `wwwroot/`，不再手工维护服务端静态页面；参见 [ADR-0004](../adr/0004-standalone-admin-web.md)。
+- Agent 本机页面源码放 `src/RelayLink.AgentWeb`；构建生成的 `dist/` 不提交。Agent 构建/发布时复制产物到输出目录的 `wwwroot/`，由本机 Kestrel 托管；参见 [ADR-0021](../adr/0021-standalone-agent-web.md)。
 
 ## 命名
 

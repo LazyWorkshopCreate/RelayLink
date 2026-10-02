@@ -1,6 +1,6 @@
 # ADR-0017：Windows Agent 使用框架依赖安装包
 
-状态：Accepted\
+状态：Superseded（由 [ADR-0019](0019-dual-windows-agent-distribution.md) 取代）\
 日期：2026-09-22
 
 ## 背景
