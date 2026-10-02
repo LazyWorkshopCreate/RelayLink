@@ -4,11 +4,22 @@ param(
     [string]$ConfigurationPath,
     [ValidateSet('Install', 'Update', 'Reconfigure')][string]$Mode = 'Install',
     [string]$ServiceName = 'RelayLinkAgent',
-    [string]$DataDirectory = (Join-Path $env:ProgramData 'RelayLink\Agent')
+    [string]$DataDirectory = (Join-Path $env:ProgramData 'RelayLink\Agent'),
+    [string]$ErrorReportPath
 )
 
 $ErrorActionPreference = 'Stop'
-if (-not [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+trap {
+    $message = $_.Exception.Message
+    if (-not [string]::IsNullOrWhiteSpace($ErrorReportPath)) {
+        [IO.File]::WriteAllText([IO.Path]::GetFullPath($ErrorReportPath), $message, [Text.Encoding]::UTF8)
+    }
+    [Console]::Error.WriteLine($message)
+    exit 1
+}
+$currentIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
+$currentPrincipal = New-Object Security.Principal.WindowsPrincipal($currentIdentity)
+if (-not $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw 'Administrator privileges are required to install the Agent service.'
 }
 $resolvedExecutable = (Resolve-Path -LiteralPath $ExecutablePath).Path
@@ -18,7 +29,7 @@ $existingService = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
 if ($Mode -eq 'Install' -and $existingService) { throw "Service '$ServiceName' already exists. Choose an explicit upgrade mode." }
 if ($Mode -ne 'Install' -and -not $existingService) { throw "Service '$ServiceName' does not exist." }
 if ($existingService) {
-    $registered = Get-CimInstance Win32_Service -Filter "Name='$ServiceName'"
+    $registered = Get-WmiObject -Class Win32_Service -Filter "Name='$ServiceName'"
     $expectedPath = '"{0}" --config "{1}"' -f $resolvedExecutable, $installedConfiguration
     if (-not $registered -or -not [string]::Equals($registered.PathName.Trim(), $expectedPath, [StringComparison]::OrdinalIgnoreCase)) {
         throw "Service '$ServiceName' does not belong to this installation."
@@ -107,12 +118,18 @@ $binaryPath = '"{0}" --config "{1}"' -f $resolvedExecutable, $installedConfigura
 $created = $false
 try {
     if ($Mode -eq 'Install') {
-        New-Service -Name $ServiceName -BinaryPathName $binaryPath -DisplayName 'RelayLink Agent' -Description 'RelayLink reverse TCP proxy agent' -StartupType Automatic | Out-Null
+        $serviceClass = Get-WmiObject -List -Class Win32_Service
+        $createResult = $serviceClass.Create($ServiceName, 'RelayLink Agent', $binaryPath, 16, 1, 'Automatic', $false, 'NT AUTHORITY\LocalService', $null, $null, $null, $null)
+        if ($createResult.ReturnValue -ne 0) {
+            throw "Could not create the Agent service (Win32_Service.Create return code $($createResult.ReturnValue))."
+        }
         $created = $true
-        & sc.exe config $ServiceName obj= 'NT AUTHORITY\LocalService' | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw 'Could not set the Agent service account.' }
+        & sc.exe description $ServiceName 'RelayLink reverse TCP proxy agent' | Out-Host
+        if ($LASTEXITCODE -ne 0) { throw "Could not set the Agent service description (sc.exe exit code $LASTEXITCODE)." }
         & sc.exe failure $ServiceName reset= 86400 actions= restart/5000/restart/15000/restart/30000 | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw 'Could not configure Agent service recovery.' }
+        if ($LASTEXITCODE -ne 0) { throw "Could not configure Agent service recovery (sc.exe exit code $LASTEXITCODE)." }
+        & sc.exe failureflag $ServiceName 1 | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "Could not enable Agent recovery for non-crash failures (sc.exe exit code $LASTEXITCODE)." }
     }
     Start-Service -Name $ServiceName
     if ($Mode -eq 'Reconfigure') { Remove-AgentMonitorShortcut }

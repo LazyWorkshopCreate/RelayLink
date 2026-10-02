@@ -2,8 +2,8 @@
 
 文档 ID：DES-001\
 状态：Draft（待评审）\
-版本：v2.9 设计评审稿\
-更新日期：2026-09-22\
+版本：v2.11 设计评审稿\
+更新日期：2026-09-23\
 调研日期：2026-09-15\
 配套文档：[需求文档索引](../requirements/README.md)
 
@@ -530,7 +530,7 @@ SQL 驱动可能通过协议获得其他主机/端口并重新连接，例如某
 
 ### 13.1 服务端：Linux 或 Windows
 
-服务端可部署到 Linux 或 Windows VM；内网仪表盘由 Kestrel 直接监听，不要求 Nginx 或 IIS 反向代理。Linux 由 systemd 管理；Windows 由 Windows Service 管理，使用与 Agent 相同的 Generic Host 服务生命周期支持。[Linux 托管文档](https://learn.microsoft.com/en-us/aspnet/core/host-and-deploy/linux-nginx?view=aspnetcore-10.0) [Windows Service 文档](https://learn.microsoft.com/en-us/dotnet/core/extensions/windows-service)
+服务端可部署到 Linux 或 Windows VM；Linux 还支持 Docker Compose。内网仪表盘由 Kestrel 直接监听，不要求 Nginx 或 IIS 反向代理。原生 Linux 由 systemd 管理，Windows 由 Windows Service 管理，使用与 Agent 相同的 Generic Host 服务生命周期支持。[Linux 托管文档](https://learn.microsoft.com/en-us/aspnet/core/host-and-deploy/linux-nginx?view=aspnetcore-10.0) [Windows Service 文档](https://learn.microsoft.com/en-us/dotnet/core/extensions/windows-service)
 
 目录建议：`/opt/relaylink/server` 程序；`/etc/relaylink/server.json`；`/etc/relaylink/clients/*.json`；`/etc/relaylink/tls`。使用专用非 root 用户，配置和密钥文件只读，所有示例端口均大于 1024。
 
@@ -555,11 +555,11 @@ LimitNOFILE=16384
 WantedBy=multi-user.target
 ```
 
-Linux 对应 systemd 模板见 [deploy/linux/relaylink-server.service](../../deploy/linux/relaylink-server.service)，部署步骤见 [deploy/linux/README.md](../../deploy/linux/README.md)。Windows 发布及 Service 安装见 [deploy/windows/README.md](../../deploy/windows/README.md) 和 [deploy/windows/install-server-service.ps1](../../deploy/windows/install-server-service.ps1)。Windows 服务账号需要对程序、配置、客户端目录及证书私钥有最小读取权限，并能够绑定配置端口。服务端重启依旧不提供无损迁移。证书续期在外部完成后安排重启加载；如使用 ACME DNS 验证，无须为签发额外开放 HTTP 入站端口。
+Docker Compose 方案见 [deploy/docker/README.md](../../deploy/docker/README.md)。由于普通通道端口由运行配置动态创建，Linux 容器使用 host 网络，不维护固定端口映射；配置、客户端文件和 SQLite 数据通过宿主目录持久化，容器根文件系统只读，日志由 Docker 轮换。Linux 原生部署对应 systemd 模板见 [deploy/linux/relaylink-server.service](../../deploy/linux/relaylink-server.service)，步骤见 [deploy/linux/README.md](../../deploy/linux/README.md)。Windows 发布及 Service 安装见 [deploy/windows/README.md](../../deploy/windows/README.md) 和 [deploy/windows/install-server-service.ps1](../../deploy/windows/install-server-service.ps1)。Windows 服务账号需要对程序、配置、客户端目录及证书私钥有最小读取权限，并能够绑定配置端口。服务端重启依旧不提供无损迁移。证书续期在外部完成后安排重启加载；如使用 ACME DNS 验证，无须为签发额外开放 HTTP 入站端口。
 
 ### 13.2 Windows Agent
 
-发布 win-x64 自包含包，使用 [Windows Agent 安装包](../../deploy/windows/README.md) 选择并校验配置；首次安装及重新配置无 JSON 不得继续。程序位于 Program Files，配置和 TLS 信任 CA 复制到受限的 ProgramData 目录，Agent 生成的身份及端口状态也存于该目录。服务以 LocalService 运行，开机自动启动并配置失败恢复；安装成功后按 `dashboardPort` 在公共桌面创建指向本机状态页的 Internet Shortcut，由系统默认浏览器打开，状态页关闭时不创建。安装和卸载需要本机管理员权限。已有安装须显式选择仅更新或重新配置，且校验服务确属当前安装：仅更新停止服务、替换程序并重启，不触碰 ProgramData；重新配置在校验新 JSON 后清理 ProgramData 中 Agent 管理的配置、CA、身份、端口状态和诊断日志，写入新配置再重启，并更新快捷方式。不清理未知文件、Windows 事件日志或其他应用目录。卸载移除安装程序生成的快捷方式，但保留敏感配置与身份文件供管理员处理。实际架构不同则另行构建；生产连接和 Windows Service 生命周期仍需目标机验收。
+发布 win-x64 框架依赖包，目标机须预装 .NET 10 ASP.NET Core Runtime x64 和 VC++ x64 运行库；安装包不携带 .NET 运行时，决定见 [ADR-0017](../adr/0017-windows-agent-framework-dependent.md)。使用 [Windows Agent 安装包](../../deploy/windows/README.md) 检查依赖、选择并校验配置；首次安装及重新配置无 JSON 不得继续。程序位于 Program Files，配置和 TLS 信任 CA 复制到受限的 ProgramData 目录，Agent 生成的身份及端口状态也存于该目录。服务以 LocalService 运行，开机自动启动并配置失败恢复；安装成功后按 `dashboardPort` 在公共桌面创建指向本机状态页的 Internet Shortcut，由系统默认浏览器打开，状态页关闭时不创建。安装和卸载需要本机管理员权限。已有安装须显式选择仅更新或重新配置，且校验服务确属当前安装：仅更新停止服务、替换程序并重启，不触碰 ProgramData；重新配置在校验新 JSON 后清理 ProgramData 中 Agent 管理的配置、CA、身份、端口状态和诊断日志，写入新配置再重启，并更新快捷方式。不清理未知文件、Windows 事件日志或其他应用目录。卸载移除安装程序生成的快捷方式，但保留敏感配置与身份文件供管理员处理。实际架构不同则另行构建；生产连接和 Windows Service 生命周期仍需目标机验收。
 
 ### 13.3 Linux Agent
 

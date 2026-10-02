@@ -2,7 +2,7 @@
 
 | 文档 | ID | 状态 | 用途 |
 |---|---|---|---|
-| [需求文档索引](requirements/README.md) | REQ-001A–REQ-001G | Accepted / Done | 按日期与主题拆分的需求范围、功能与验收；实现进度见验证状态 |
+| [需求文档索引](requirements/README.md) | REQ-001A–REQ-001I | Accepted / Done | 按日期与主题拆分的需求范围、功能与验收；实现进度见验证状态 |
 | [技术实现文档](design/technical-design.md) | DES-001 | Draft | 架构、协议、配置与部署设计 |
 | [首期隧道方案](adr/0001-independent-tcp-tunnels.md) | ADR-0001 | Proposed | 记录独立数据隧道的方案取舍 |
 | [运行时通道配置](adr/0002-runtime-channel-configuration.md) | ADR-0002 | Superseded | 历史上的监听更新及配置下发决定 |
@@ -22,11 +22,12 @@
 | [Linux Agent](adr/0014-linux-agent.md) | ADR-0014 | Accepted | Linux 自包含发布、systemd 托管及复用既有互访访问服务端管理页 |
 | [macOS Agent](adr/0015-macos-agent.md) | ADR-0015 | Accepted | Intel/Apple Silicon 自包含发布与 launchd 托管 |
 | [互访业务流可选加密](adr/0016-optional-peer-traffic-encryption.md) | ADR-0016 | Accepted | 按通道选择内层 TLS 或认证后的明文直接复制 |
+| [Windows Agent 框架依赖发布](adr/0017-windows-agent-framework-dependent.md) | ADR-0017 | Accepted | Windows Agent 不携带运行时，安装前检查 .NET 10 ASP.NET Core Runtime x64 |
 | [目录规划](development/repository-layout.md) | DEV-001 | Active | 文件归属及项目职责 |
 | [文档管理规则](development/documentation-policy.md) | DEV-002 | Active | 命名、状态、更新和引用规则 |
 | [GitHub Actions 流水线](development/ci.md) | DEV-003 | Active | CI 检查、构建产物和安全边界 |
 | [发布说明](releases/README.md) | DOC-002 | Active | 各版本 GitHub Release 的仓库内唯一说明来源 |
-| [安装与使用指南](operations/installation-and-usage.md) | OPS-001 | Active | 服务端与 Agent 安装、首次配置和连接验证 |
+| [安装与使用指南](operations/installation-and-usage.md) | OPS-001 | Active | Docker/原生 Server 部署、Agent 安装、通道配置和排障 |
 | [验证状态](testing/verification-status.md) | TST-001 | Active | 已执行检查与未完成验收证据 |
 | [本地多场景验收方案](testing/local-acceptance-plan.md) | TST-002 | Active | 隔离启动、场景判定、运行记录与安全停止 |
 | [对外介绍材料](intro/README.md) | DOC-001 | Active | 演示文稿与公众号文章的源文件、插图及重建脚本 |

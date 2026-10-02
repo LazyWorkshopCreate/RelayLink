@@ -14,13 +14,15 @@
 
 ## Agent
 
-推荐使用安装包。在 Windows 构建机安装 Inno Setup 6.3 或更新版本（需有 `ISCC.exe`），运行：
+推荐使用安装包。目标机最低支持 Windows Server 2012 R2 x64，并必须预装 .NET 10 ASP.NET Core Runtime x64 和 Microsoft Visual C++ 2015–2022 Redistributable x64。Agent 使用框架依赖发布，安装包不携带 .NET 运行时。在 Windows 构建机安装 Inno Setup 6.3 或更新版本（需有 `ISCC.exe`），运行：
 
 ```powershell
 .\scripts\build-agent-installer.ps1 -Version 1.0.0
 ```
 
-脚本先发布 win-x64 自包含 Agent，再生成 `artifacts/installer/RelayLink-Agent-win-x64-1.0.0.exe`。该安装包不包含任何真实配置、密钥或证书。目标机以管理员权限运行安装包：首次安装必须在向导中选择已有的 Agent JSON 配置文件；未选择、文件不存在或扩展名不对时不能开始安装。安装程序校验配置，复制到 `C:\ProgramData\RelayLink\Agent\agent.json`，然后注册 `RelayLinkAgent` 为自动启动的 Windows Service 并立即启动。安装成功后在所有用户桌面创建“RelayLink Agent Monitor”快捷方式，双击会用系统默认浏览器打开配置对应的 `http://127.0.0.1:dashboardPort/`；未填写端口时使用 18081，设置为 0 时不创建。新下载配置的控制 TLS 信任 CA 已作为 Base64 内容内嵌，不需要单独的 PEM 文件。服务以 `LocalService` 运行，配置目录只授予 LocalService、SYSTEM 和 Administrators 权限；服务账号必须能访问服务端的控制/数据端口及本地业务目标。配置文件只包含服务端地址与端口、客户端 ID、密钥、CA 公钥证书和本机参数，不得包含通道或目标地址。
+脚本先发布 win-x64 框架依赖 Agent，再生成 `artifacts/installer/RelayLink-Agent-win-x64-1.0.0.exe`。该安装包不包含 .NET 运行时，也不包含任何真实配置、密钥或证书。目标机以管理员权限运行安装包后，依赖检查页逐项显示操作系统版本、x64、VC++ 运行库和 .NET 10 ASP.NET Core Runtime x64；失败项以红叉显示并提供官方下载链接，任一必需项失败时不能继续，静默安装也执行同一检查。首次安装必须在向导中选择已有的 Agent JSON 配置文件；未选择、文件不存在或扩展名不对时不能开始安装。安装程序校验配置，复制到 `C:\ProgramData\RelayLink\Agent\agent.json`，然后通过兼容 Windows PowerShell 4.0 的 WMI 注册逻辑将 `RelayLinkAgent` 注册为自动启动的 Windows Service 并立即启动。服务注册或启动失败会使安装失败并显示底层原因，不会静默完成。安装成功后在所有用户桌面创建“RelayLink Agent Monitor”快捷方式，双击会用系统默认浏览器打开配置对应的 `http://127.0.0.1:dashboardPort/`；未填写端口时使用 18081，设置为 0 时不创建。新下载配置的控制 TLS 信任 CA 已作为 Base64 内容内嵌，不需要单独的 PEM 文件。服务以 `LocalService` 运行，配置目录只授予 LocalService、SYSTEM 和 Administrators 权限；服务账号必须能访问服务端的控制/数据端口及本地业务目标。配置文件只包含服务端地址与端口、客户端 ID、密钥、CA 公钥证书和本机参数，不得包含通道或目标地址。
+
+安装包默认启用详细日志，并在退出时把日志副本保存到 `C:\ProgramData\RelayLink\Agent\installer-logs`。日志包含依赖结论、安装阶段、脚本退出码和错误原因，但不写入 Agent JSON 正文、客户端密钥或 CA 内容。
 
 检测到已有安装时，向导要求选择“仅更新软件程序”或“重新配置”。两种方式都会短暂停止并重启当前安装的服务，不会接管其他目录的同名服务：
 
@@ -44,5 +46,14 @@
 ```
 
 脚本会先执行本地配置检查，再复制配置（旧配置另复制 CA）并安装自动启动且配置失败恢复策略的 Windows Service；没有配置文件不能首次安装。手动复制安装或卸载脚本时，须一并复制同目录的 `agent-monitor-shortcut.ps1`。调试时可直接用 `--config 'C:\ProgramData\RelayLink\Agent\agent.json'` 运行可执行文件。手动运行脚本默认仍是首次安装模式，已有同名服务不会被隐式覆盖。
+
+Windows Server 2012 / 2012 R2 若因系统自带 Windows PowerShell 版本较旧而无法执行上述安装脚本，可在确认程序与配置已复制完成后，以管理员身份运行仅依赖系统 WMI 与 `sc.exe` 的兼容注册脚本：
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\register-agent-service-legacy.ps1
+```
+
+脚本默认使用 `C:\Program Files\RelayLink\Agent\RelayLink.Agent.exe` 和 `C:\ProgramData\RelayLink\Agent\agent.json`，注册前会执行配置检查。若安装失败留下了同名服务，先用 `sc.exe qc RelayLinkAgent` 核对目标，再显式传入 `-ReplaceExisting` 重建；该选项会停止并删除同名服务。非默认路径须分别传入 `-ExecutablePath` 与 `-ConfigurationPath`，并自行确保 `LocalService` 对程序和配置可读、对配置所在状态目录可写。
 
 Agent 默认在本机 `127.0.0.1:18081` 提供只读状态页，显示当前通道和互访入口；可在 `agent.json` 中调整 `dashboardPort`，设为 `0` 则关闭。互访端口由 Agent 在 `outboundPortRangeStart`–`outboundPortRangeEnd`（默认 20000–59999）内自动选择，记录在配置目录的 `<clientId>.ports.json`，重启优先复用，冲突时轮换。服务账号须能写该目录并绑定相应本地端口；不应把状态页代理到公网。

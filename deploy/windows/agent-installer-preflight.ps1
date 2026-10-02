@@ -13,7 +13,7 @@ if ($Mode -eq 'Install') {
     return
 }
 if (-not $service) { throw "Existing installation has no '$ServiceName' service; repair it before upgrading." }
-$registered = Get-CimInstance Win32_Service -Filter "Name='$ServiceName'"
+$registered = Get-WmiObject -Class Win32_Service -Filter "Name='$ServiceName'"
 $expectedPath = '"{0}" --config "{1}"' -f ([IO.Path]::GetFullPath($ExecutablePath)), (Join-Path ([IO.Path]::GetFullPath($DataDirectory)) 'agent.json')
 if (-not $registered -or -not [string]::Equals($registered.PathName.Trim(), $expectedPath, [StringComparison]::OrdinalIgnoreCase)) {
     throw "Service '$ServiceName' does not belong to this installation."

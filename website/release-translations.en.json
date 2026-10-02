@@ -1,0 +1,195 @@
+{
+  "v0.1.0-rc.6": {
+    "title": "RelayLink v0.1.0-rc.6",
+    "intro": "A release candidate focused on deployment, installer compatibility, and product documentation. The proxy protocol is unchanged from rc.5.",
+    "sections": [
+      {
+        "title": "Highlights",
+        "items": [
+          "Adds a Linux Docker Engine deployment for the Server with a multi-stage image, initial configuration, start and stop scripts, and host networking for dynamic service ports.",
+          "The Windows Agent installer checks operating system architecture, VC++, and the .NET 10 ASP.NET Core Runtime. The Agent is now framework-dependent, and installation scripts support Windows PowerShell 4.0.",
+          "Adds a bilingual product site with an introduction, usage guide, documentation center, and release updates. A version tag triggers its GitHub Pages build and deployment.",
+          "Reorganizes installation and usage documentation by deployment method and task."
+        ]
+      },
+      {
+        "title": "Security and compatibility",
+        "items": [
+          "The introductory Docker configuration is for controlled testing only. Production use and Agent-to-Agent access require tunnel TLS and host-port access controls.",
+          "Docker configuration, client secrets, and SQLite data remain in host-mounted directories, outside the image. The stop script preserves them by default.",
+          "Windows Agent hosts need the applicable VC++ x64 runtime and .NET 10 ASP.NET Core Runtime x64; installation stops when required dependencies are missing.",
+          "The peer protocol is unchanged from rc.5. Upgrades from earlier versions still require coordinated Server and Agent upgrades."
+        ]
+      },
+      {
+        "title": "Verification and limitations",
+        "items": [
+          "The bilingual site build and script syntax checks passed locally. The first online Pages deployment must be verified in this tag's Actions run.",
+          "Docker Compose configuration parsing and a Server Release build passed. Container startup, persistence, and dynamic forwarding still need validation on a Linux Docker host.",
+          "The Windows Agent installer compiled, but its dependency screen and full installation and removal still need revalidation on a clean target machine."
+        ]
+      }
+    ]
+  },
+  "v0.1.0-rc.5": {
+    "title": "RelayLink v0.1.0-rc.5",
+    "intro": "A release candidate focused on client management, local integration, and channel security policy validation.",
+    "sections": [
+      {
+        "title": "Highlights",
+        "items": [
+          "The admin UI can delete offline clients and blocks deletion while a channel still references the client.",
+          "Clients and channels support one or more manually managed tags, with tag filtering in admin lists.",
+          "The Agent management endpoint adds a read-only loopback HTTP API for local software to inspect channels and Agent-to-Agent access endpoints.",
+          "Agent-to-Agent channels add an end-to-end encryption switch that is enabled by default. When explicitly disabled, traffic is copied directly over the authenticated peer connection.",
+          "The peer protocol moves to version 3 and binds the encryption mode into handshake authentication to prevent mismatched configurations."
+        ]
+      },
+      {
+        "title": "Security and compatibility",
+        "items": [
+          "Agent-to-Server control and raw data links continue to use TLS. The new option affects only peer application traffic on Agent-to-Agent channels.",
+          "Unencrypted peer mode retains mutual identity checks, channel authorization, session binding, resource limits, and connection revocation after configuration changes.",
+          "Server and all Agents participating in peer access must be upgraded together because older Agents cannot establish version 3 peer sessions.",
+          "The local read-only API binds only to `127.0.0.1` and exposes no configuration writes."
+        ]
+      },
+      {
+        "title": "Verification",
+        "items": [
+          "40 .NET unit tests and 29 integration tests passed, including peer TLS coverage.",
+          "8 admin frontend tests, the production build, and formatting checks passed.",
+          "Coverage includes encrypted-default compatibility, plaintext copying, handshake-mode validation, revocation after mode changes, and local API boundaries."
+        ]
+      }
+    ]
+  },
+  "v0.1.0-rc.4": {
+    "title": "RelayLink v0.1.0-rc.4",
+    "intro": "A release candidate for testing and cross-platform deployment, adding Linux and macOS Agent deliverables and improving admin loading with many clients.",
+    "sections": [
+      {
+        "title": "Highlights",
+        "items": [
+          "Adds a self-contained Linux x64 Agent package, a systemd service template, and deployment guidance for a dedicated low-privilege account.",
+          "Adds self-contained macOS Intel and Apple Silicon Agent packages, launchd templates, and deployment guidance.",
+          "The admin UI now loads clients, channels, and access mappings in batches to avoid request storms.",
+          "The management API adds an aggregated configuration snapshot while retaining compatible per-client endpoints.",
+          "GitHub Actions now runs native Agent integration and launchd lifecycle checks on Intel and Apple Silicon macOS runners."
+        ]
+      },
+      {
+        "title": "Fixes",
+        "items": [
+          "Fixes Agent identity loading on macOS, where `EphemeralKeySet` is unsupported.",
+          "Fixes Windows path separators in cross-platform publishing that created incorrect nested output paths on macOS.",
+          "Makes the client re-enable test wait for confirmed connectivity and removes a race during asynchronous startup."
+        ]
+      },
+      {
+        "title": "Upgrade notes",
+        "items": [
+          "Upgrade the Server and all Agents together to use the batch management API and current configuration protocol.",
+          "Run Linux and macOS Agents under dedicated low-privilege accounts with restricted configuration and identity-file permissions.",
+          "macOS packages are not yet Developer ID signed, notarized, or stapled.",
+          "Back up Server configuration, client configuration, Agent identity files, and SQLite databases before upgrading."
+        ]
+      }
+    ]
+  },
+  "v0.1.0-rc.3": {
+    "title": "RelayLink v0.1.0-rc.3",
+    "intro": "A release candidate for testing and early deployment that fills out management, security, auditing, and release capabilities while fixing compatibility issues found during real upgrades.",
+    "sections": [
+      {
+        "title": "Highlights",
+        "items": [
+          "Adds application-layer security groups, audit logs, active-connection inspection, and targeted disconnects to the admin UI.",
+          "Moves traffic history to minute-level SQLite aggregation with separate standard-proxy and Agent-to-Agent traffic accounting.",
+          "Promotes end-to-end identity to client-level certificate fingerprints with first-use registration, pinning, and mismatch rejection.",
+          "Suggests an available Server listen port when creating a standard channel.",
+          "Adds preserve-state upgrade and reconfiguration modes to the Agent installer.",
+          "Adds repeatable local acceptance scripts and project introduction material."
+        ]
+      },
+      {
+        "title": "Fixes",
+        "items": [
+          "Fixes an Inno Setup runtime error on clean Windows machines caused by expanding `{app}` before the installation directory was initialized.",
+          "Uses the system `libsqlite3.so.0` on Linux Server to support older glibc environments such as Ubuntu 20.04.",
+          "Stops shipping the unused and potentially incompatible `libe_sqlite3.so` in Linux artifacts."
+        ]
+      },
+      {
+        "title": "Upgrade notes",
+        "items": [
+          "End-to-end certificate fingerprints move from channels to clients; the former channel-level field is no longer compatible.",
+          "Upgrade the Server and all Agents together. Older Agents may fail to connect because their configuration digest differs.",
+          "Back up Server configuration, client configuration, and SQLite databases before upgrading."
+        ]
+      }
+    ]
+  },
+  "v0.1.0-rc.2": {
+    "title": "RelayLink v0.1.0-rc.2",
+    "intro": "This release restructures the tunnel, changes how Agent trust material is delivered, and adds end-to-end acceptance coverage using real database protocols.",
+    "sections": [
+      {
+        "title": "Highlights",
+        "items": [
+          "Fully separates control and data channels. Application data connections are accepted only after the control channel authenticates.",
+          "After binding, standard data channels use simple bidirectional TCP stream copying without parsing or modifying the application protocol.",
+          "Completes Agent-to-Agent configuration, Agent identity verification, channel updates, and local endpoint rotation.",
+          "Embeds the trusted CA in downloaded Agent configuration instead of requiring a CA file path on the target machine.",
+          "Improves management forms and guidance for clients, channels, and Agent-to-Agent access endpoints.",
+          "Adds a desktop shortcut for the local read-only status page after Windows Agent installation.",
+          "Adds SQL Server and PostgreSQL acceptance scripts covering common queries, joins, and transaction rollback through both standard and encrypted peer paths."
+        ]
+      },
+      {
+        "title": "Upgrade notes",
+        "items": [
+          "Control and data protocols changed. Upgrade the Server and Agents together and do not mix rc.1 and rc.2 components.",
+          "Download a fresh Agent configuration from the admin UI to avoid retaining obsolete trust settings.",
+          "Standard proxy data channels do not add encryption. Use application TLS or a protected network path for sensitive traffic."
+        ]
+      },
+      {
+        "title": "Release assets",
+        "items": [
+          "Self-contained Linux x64 Server archive",
+          "Self-contained Windows x64 Server archive",
+          "Windows x64 Agent installer",
+          "`SHA256SUMS` checksum manifest"
+        ]
+      }
+    ]
+  },
+  "v0.1.0-rc.1": {
+    "title": "RelayLink v0.1.0-rc.1",
+    "intro": "The first RelayLink release candidate provides an installable, configurable, and verifiable reverse TCP proxy. The Windows Agent connects outward, so the target network does not need a public inbound port.",
+    "sections": [
+      {
+        "title": "What's included",
+        "items": [
+          "Linux and Windows Servers plus a Windows Agent that can run as a Windows Service.",
+          "Per-client authentication secrets, centralized client and TCP-channel management, and configuration distribution to online Agents.",
+          "Control-connection TLS, resource limits, connection timeouts, half-close handling, and bidirectional stream copying.",
+          "Authorized Agent-to-Agent access through a local `127.0.0.1` endpoint on the calling Agent.",
+          "An admin UI with anonymous read-only status and authenticated client and channel management.",
+          "Agent installation that requires a valid configuration, registers the service, and starts it automatically.",
+          "Ubuntu and Windows CI plus tagged GitHub Release packaging."
+        ]
+      },
+      {
+        "title": "Release assets",
+        "items": [
+          "Self-contained Linux x64 Server archive",
+          "Self-contained Windows x64 Server archive",
+          "Windows x64 Agent installer",
+          "`SHA256SUMS` checksum manifest"
+        ]
+      }
+    ]
+  }
+}

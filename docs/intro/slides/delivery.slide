@@ -32,7 +32,7 @@
                     <Box style={{ height: 16 }} />
                     <Text style={{ fontSize: 24, fontWeight: 'bold', color: '#0F172A' }}>Windows 服务端</Text>
                     <Box style={{ height: 6 }} />
-                    <Text style={{ fontSize: 14, color: '#64748B' }}>win-x64 自包含</Text>
+                    <Text style={{ fontSize: 14, color: '#64748B' }}>win-x64 框架依赖</Text>
                     <Box style={{ height: 16 }} />
                     <Text style={{ fontSize: 14, color: '#0F172A', lineHeight: 1.7 }}>Windows Service 托管</Text>
                     <Text style={{ fontSize: 14, color: '#64748B', lineHeight: 1.7 }}>Kestrel 直接监听</Text>

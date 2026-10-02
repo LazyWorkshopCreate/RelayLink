@@ -1,0 +1,16 @@
+.git
+.github
+.local
+.vs
+.idea
+artifacts
+work
+**/bin
+**/obj
+**/node_modules
+**/dist
+**/*.log
+**/*.key
+**/*.pem
+**/*.pfx
+**/*.p12

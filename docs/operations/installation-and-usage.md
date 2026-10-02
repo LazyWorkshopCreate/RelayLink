@@ -2,39 +2,229 @@
 
 文档 ID：OPS-001\
 状态：Active\
-版本：v1.11.0\
-更新日期：2026-09-20
+版本：v2.0.0\
+更新日期：2026-09-23
 
-本文串起首次部署流程。具体命令和平台注意事项分别以 [Linux Server/Agent 部署](../../deploy/linux/README.md)、[Windows 部署及 Agent 安装](../../deploy/windows/README.md)和 [macOS Agent 部署](../../deploy/macos/README.md)为准。RelayLink 仅代理 TCP；业务目标自身的账号、权限和网络访问控制仍需单独配置。
+RelayLink 只转发 TCP 字节流，不替代目标服务自身的账号、权限、TLS 和网络访问控制。
 
-## 1. 准备服务端
+## 1. 选择部署方式
 
-构建机需要 .NET 10 SDK、Node.js、pnpm 和 PowerShell。使用 `scripts/publish.ps1 -RuntimeIdentifier linux-x64 -Component Server` 或 `scripts/publish.ps1 -RuntimeIdentifier win-x64 -Component Server` 发布服务端；构建过程会同时生成管理前端静态资源。Agent 可用相同脚本按 `linux-x64`、`win-x64`、`osx-x64` 或 `osx-arm64` 发布；macOS 运行标识只支持 Agent。把发布产物和服务端配置部署到目标主机，并参照 [Linux 配置示例](../../config/examples/server.example.json) 或 [Windows 配置示例](../../config/examples/server.windows.example.json) 设置隧道、管理页面、客户端目录和历史记录路径。
+| 组件 | 推荐方式 | 适用环境 | 详细说明 |
+|---|---|---|---|
+| Server | Docker Compose | Linux Docker Engine | [Docker Compose 部署](../../deploy/docker/README.md) |
+| Server | systemd | Linux 主机原生部署 | [Linux 部署](../../deploy/linux/README.md#server) |
+| Server | Windows Service | Windows 主机原生部署 | [Windows 部署](../../deploy/windows/README.md#server) |
+| Agent | 安装包 | Windows Server 2012 R2 及以上 | [Windows Agent 安装](../../deploy/windows/README.md#agent) |
+| Agent | systemd | Linux x64 | [Linux Agent 部署](../../deploy/linux/README.md#agent) |
+| Agent | launchd | macOS Intel / Apple Silicon | [macOS Agent 部署](../../deploy/macos/README.md) |
 
-流量历史启用后默认保存 90 天，建议将 `history.filePath` 设为服务账号可写的数据目录中的 `.db` 文件。旧配置若仍指向 `.jsonl`，首次启动会在同目录创建同名 `.db` 并一次性导入旧样本；原 JSONL 不会删除。升级前备份旧文件与目录，确认 SQLite 数据可查询后再按自己的备份策略处理旧文件。SQLite WAL 模式运行时还会生成 `-wal`、`-shm` 文件，不要在运行中只拷贝主 `.db` 文件作为备份。审计日志默认写入同一库，也可通过 `audit.filePath` 指定独立路径，默认保留 90 天。务必确保服务账号对数据库目录有写权限，否则服务无法启动或后续登录/建连将被拒绝。管理员登录后可在页面顶部打开“审计日志”查询，详见[审计与流量设计](../design/audit-and-traffic.md)。
+## 2. 用 Docker Compose 启动 Server
 
-先运行 `scripts/new-admin-password-hash.ps1` 生成管理员密码哈希，填入配置的 `dashboard.admin.passwordHash`。将 `tunnel.agentServerHost` 设为 Agent 可达的服务端 DNS 名称或 IP，管理端添加客户端时会自动预填该地址；不要填经 SSH 转发访问管理页时浏览器中的 `127.0.0.1`。分别设置 `tunnel.port`（控制）和 `tunnel.dataPort`（数据），并只向需要连接的 Agent 开放这两个端口；缺省数据端口为控制端口加一。若启用控制 TLS，配置服务端证书及私钥，并将仅含 CA 公钥证书的 PEM 路径填入服务端 `tunnel.trustedCaPemPath`；下载的 Agent 配置会内嵌其 Base64 内容。客户端安全互访必须启用控制 TLS。普通数据通道当前是明文 TCP，生产部署须提供受信隔离链路或网络层加密，敏感业务还应使用自身的端到端 TLS；安全组本身不提供加密。真实配置、密钥和证书私钥应放在受保护的部署目录，不提交到仓库。启动前用服务端可执行文件的 `--config <配置路径> --check-config` 检查配置，再按对应平台部署文档启动服务。管理页面和普通业务代理端口限制在受信任网络。
+### 2.1 前置条件
 
-## 2. 创建并安装 Agent
+- Linux Docker Engine。
+- Docker Compose v2。
+- PowerShell 7，用于首次生成配置和安全的管理员密码哈希。
+- Agent 能访问 Docker 主机的控制端口和数据端口。
 
-在服务端管理页面登录，创建客户端并下载其专属 Agent 配置。客户端 ID 使用 1–64 位小写字母、数字、下划线或连字符，首位为字母或数字；管理页面会把输入的大写字母转成小写。每个客户端使用独立 ID 和密钥，不要让多个 Agent 共用同一份配置。若启用 TLS，CA 公钥证书已内嵌在下载的 JSON 中，不需在目标 Windows 主机另放 CA 文件。
+### 2.2 启动
 
-Windows 推荐按 [Windows Agent 安装包说明](../../deploy/windows/README.md#agent) 构建并运行安装包，在首次安装时选择下载的 JSON 配置；没有配置文件不能安装。检测到已有安装时，“仅更新”保留现有配置和日志，“重新配置”要求新的 JSON 并清除 Agent 管理的本地配置、身份、端口状态与诊断日志。安装程序检查配置、注册自动启动的 Windows Service 并启动，在桌面创建通过系统默认浏览器打开本机状态页的快捷方式。Linux 使用 `linux-x64` 自包含包和 [systemd 部署步骤](../../deploy/linux/README.md#agent)。macOS 根据 `uname -m` 选择 `osx-x64`（Intel）或 `osx-arm64`（Apple Silicon）包，并按 [launchd 部署步骤](../../deploy/macos/README.md)安装。Linux 和 macOS 均把配置及 Agent 生成状态放在仅服务账号可读写的目录。安装后在管理页面确认客户端显示在线，并在 Agent 主机通过默认地址 `http://127.0.0.1:18081/` 查看只读状态页；端口可由 Agent 配置调整，设为 0 时状态页和本机 API 一并关闭。
+在仓库根目录执行：
 
-同一地址还提供供本机第三方软件读取的 JSON API：`GET /api/v1/status` 返回完整快照，`GET /api/v1/channels` 返回被访问通道，`GET /api/v1/mappings` 返回端到端访问入口。例如可请求 `http://127.0.0.1:18081/api/v1/mappings` 获取当前实际入口地址。接口只读、禁止缓存且不返回密钥或目标证书指纹；它没有跨域授权，并且只监听 `127.0.0.1`，需要由远程软件读取时应在 Agent 主机部署受控的本地集成进程，不要将该端口转发到 LAN 或公网。
+```powershell
+pwsh ./scripts/start-server-compose.ps1 -AgentServerHost tunnel.example.com
+```
 
-## 3. 配置通道并使用
+把 `tunnel.example.com` 换成 Agent 实际能够访问的 DNS 名称或 IP。脚本会提示输入管理密码，然后完成以下操作：
 
-在管理页面为在线客户端添加通道，设置通道 ID、目标主机与端口。普通通道默认以 `0.0.0.0` 监听全部 IPv4 网卡，云端监听端口会自动填入服务端从 19000 起找到的下一个可绑定端口，也可手动修改；若打开表单后端口被别的进程占用，保存会报错，需要重新打开新增表单获取建议值。`0.0.0.0` 不是可供调用方连接的地址，调用方应使用服务端实际可达的 IP 或域名及该端口。只需在特定网卡监听时可改填具体内网地址。务必通过安全组或防火墙将业务端口限制在受信任网络；已有通道不会因默认值变化而自动改写。保存后配置由服务端下发；待通道显示可接入，业务字节流便通过 Agent 转发到目标服务。确认目标服务在 Agent 所在主机可达，并使用目标服务自己的认证凭据。
+- 在 `.local/docker-server` 创建配置、客户端和数据库目录。
+- 生成只含密码哈希的 `server.json`。
+- 构建 Server 和管理前端镜像。
+- 在临时容器中完成配置预检，再后台启动 `relaylink-server` 容器。
 
-如需从一台内网 Agent 访问另一台，在被访问方添加并启用“仅允许授权客户端互访”的通道。页面默认勾选“启用 Agent 间端到端加密”，建议保持默认；只有数据链路处于受信隔离网络，或业务协议自身已经提供端到端加密和认证时，才应取消勾选。关闭后访问密钥证明仍会执行，但证明成功后的业务流由服务端以明文中继，服务端和链路观察者可以读取或篡改内容。
+默认端点：
 
-目标 Agent 首次认证上线时自动上报证书指纹并固定到客户端配置，通道无需填写指纹。加密通道建议将管理页显示的客户端指纹与目标机 `RelayLink.Agent --config <配置路径> --show-e2e-fingerprint` 的输出带外核对，再为访问方添加指向该客户端和通道的端到端访问入口；目标客户端尚未登记时不能创建入口。证书重装或轮换不会自动覆盖固定值，参见 [安全互访设计](../design/agent-to-agent.md)。升级前必须人工删除客户端文件内所有 `channels[].e2eCertificateSha256` 旧字段；旧字段不会自动迁移。若现有访问入口仍引用该目标，应先核对并处理其固定指纹与目标客户端身份，避免重启时配置校验失败。入口 ID 由服务端按“目标客户端 ID-目标通道 ID”生成；创建后不可修改，调整时须删除并重建。访问方 Agent 会在本机自动选取 `127.0.0.1` 端口；实际地址可在 Agent 本机状态页或服务端管理页面查看。此模式不开放被访问通道的云端业务代理端口。修改加密开关会下发新配置并断开该通道已有连接。
+| 用途 | 地址或端口 |
+|---|---|
+| 管理页面 | `http://127.0.0.1:18080/` |
+| Agent 控制连接 | `7443/tcp` |
+| Agent 数据连接 | `7444/tcp` |
 
-若目标是安全访问服务端自身管理页，在服务端同机部署一个标准 Linux Agent，把管理页仅绑定 `127.0.0.1:18080`，并为该 Agent 创建目标为该地址的授权互访通道；然后只给指定访问方创建入口。访问方在本机浏览器打开其 Agent 状态页显示的 loopback 入口。该方案完全复用普通互访，不需要对外开放管理端口或使用管理页面专用协议，完整命令见 [Linux 部署说明](../../deploy/linux/README.md#通过互访通道访问服务端管理页)。
+生成的入门配置关闭了隧道 TLS，只用于受控环境验证普通代理。生产使用或 Agent 互访前，按照 [Docker TLS 配置](../../deploy/docker/README.md#启用-tls)挂载证书并启用 TLS。
 
-## 4. 普通代理连接诊断
+### 2.3 查看与停止
 
-服务端在系统日志中按连接 ID 记录 `Open`、数据绑定、目标就绪、开始转发、每 10 秒双向字节累计与最后活动间隔、单向 EOF/取消及最终结果。Linux 使用 `sudo journalctl -u relaylink-server --since '30 minutes ago' -o cat` 查看；可用连接 ID 关联同一条连接。Windows Agent 服务将相应阶段与进度写在配置目录下的 `relaylink-diagnostics.jsonl`；默认安装路径为 `C:\ProgramData\RelayLink\Agent\relaylink-diagnostics.jsonl`，超过 4 MiB 时轮换到同目录 `.1` 文件，查看需要管理员权限。日志只记录连接 ID、通道 ID、阶段、耗时、字节数和错误类型，不记录业务载荷、密钥或令牌，但仍应按运维敏感数据保护。
+```powershell
+docker compose -f deploy/docker/compose.yaml ps
+docker compose -f deploy/docker/compose.yaml logs -f --tail 200
+pwsh ./scripts/stop-server-compose.ps1
+```
 
-排查 RDP 黑屏时，先记录复现时间与服务端连接 ID，观察服务端 `to agent`/`to caller` 和 Agent `toTargetBytes`/`toServerBytes` 是否继续增长，再看哪个方向先 EOF、取消或超时。初始协商成功或两个方向有字节流，都不能单独证明图形会话正常；需结合实际登录画面验证。
+停止脚本不会删除 `.local/docker-server` 中的配置和数据库。
+
+## 3. 原生部署 Server
+
+构建机需要 .NET 10 SDK、Node.js、pnpm 和 PowerShell。
+
+```powershell
+# Linux Server
+./scripts/publish.ps1 -RuntimeIdentifier linux-x64 -Component Server
+
+# Windows Server
+./scripts/publish.ps1 -RuntimeIdentifier win-x64 -Component Server
+```
+
+发布后按目标平台安装服务：
+
+- Linux：程序放在 `/opt/relaylink/server`，配置放在 `/etc/relaylink`。
+- Windows：使用 `deploy/windows/install-server-service.ps1` 注册服务。
+
+启动前必须检查配置：
+
+```text
+RelayLink.Server --config <server.json> --check-config
+```
+
+## 4. Server 配置清单
+
+参考 [Linux 示例](../../config/examples/server.example.json) 或 [Windows 示例](../../config/examples/server.windows.example.json)。不要把真实配置、密钥、证书私钥或密码哈希提交到仓库。
+
+### 4.1 必填设置
+
+| 配置 | 作用 | 建议 |
+|---|---|---|
+| `tunnel.agentServerHost` | 下载的 Agent 配置所使用的服务端地址 | 填 Agent 可达的 DNS 或 IP，不能填 `0.0.0.0` |
+| `tunnel.port` | 控制连接端口 | 默认示例为 `7443` |
+| `tunnel.dataPort` | 数据连接端口 | 默认示例为 `7444`；不能与控制端口相同 |
+| `dashboard.listenAddress` | 管理页面绑定地址 | 优先绑定内网地址或 `127.0.0.1` |
+| `dashboard.admin.passwordHash` | 管理员密码哈希 | 使用 `scripts/new-admin-password-hash.ps1` 生成 |
+| `clientsDirectory` | 客户端配置目录 | 服务账号必须可读写 |
+
+### 4.2 TLS 与网络边界
+
+- 控制和数据端口只向 Agent 来源开放。
+- 管理页面和普通业务代理端口只向受信任网络开放。
+- Agent 互访要求控制 TLS；`trustedCaPemPath` 只能包含 CA 公钥证书。
+- 普通代理数据当前是明文 TCP。敏感业务应使用业务自身 TLS、受信隔离链路或网络层加密。
+- 应用层安全组限制来源地址，但不提供链路加密。
+
+### 4.3 SQLite 数据
+
+流量历史和审计日志默认可共用一个 SQLite 数据库，建议保留 90 天。
+
+- 数据库目录必须允许服务账号写入，否则服务可能无法启动，登录或建连也可能被拒绝。
+- WAL 模式会产生 `-wal` 和 `-shm` 文件。运行中备份时不能只复制主 `.db` 文件。
+- 旧 `.jsonl` 历史路径会在首次启动时迁移到同名 `.db`；确认迁移结果前不要删除旧文件。
+
+## 5. 创建并安装 Agent
+
+### 5.1 下载专属配置
+
+1. 打开管理页面并登录。
+2. 创建客户端。
+3. 下载该客户端的 Agent JSON 配置。
+4. 每台 Agent 使用独立客户端 ID 和密钥，不得共用配置。
+
+客户端 ID 使用 1–64 位小写字母、数字、下划线或连字符，首位必须是字母或数字。页面会自动把大写字母转换为小写。
+
+### 5.2 安装
+
+| 平台 | 操作 | 注意事项 |
+|---|---|---|
+| Windows | 运行 Agent 安装包并选择下载的 JSON | 需要 x64、VC++ 2015–2022 x64 和 .NET 10 ASP.NET Core Runtime x64 |
+| Linux | 发布 `linux-x64`，按 systemd 文档安装 | 程序目录只读，状态目录仅服务账号可写 |
+| macOS Intel | 使用 `osx-x64` 包 | 按 launchd 文档创建服务账号和状态目录 |
+| macOS Apple Silicon | 使用 `osx-arm64` 包 | 不要混用 Intel 包 |
+
+Windows 已有安装时：
+
+- “仅更新”保留配置、身份、端口状态和日志。
+- “重新配置”要求新的 JSON，并清除 Agent 管理的旧状态。
+- 服务注册失败会中止安装并显示底层原因，不会静默成功。
+
+### 5.3 确认在线
+
+- 管理页面中客户端应显示“在线”。
+- Agent 本机状态页默认为 `http://127.0.0.1:18081/`。
+- `dashboardPort` 设为 `0` 时，状态页和本机 API 均关闭。
+
+本机只读 API：
+
+| 路径 | 返回内容 |
+|---|---|
+| `/api/v1/status` | 完整状态快照 |
+| `/api/v1/channels` | 被访问通道 |
+| `/api/v1/mappings` | Agent 互访入口及实际本机端口 |
+
+这些接口仅监听 `127.0.0.1`，不返回密钥或证书指纹。不要把它们转发到 LAN 或公网。
+
+## 6. 创建普通代理通道
+
+1. 在管理页面选择已在线的目标客户端。
+2. 新增通道，填写目标主机和目标端口。
+3. 保持“仅允许授权客户端互访”关闭。
+4. 选择服务端监听地址和端口。
+5. 按需绑定应用层安全组并保存。
+6. 等待通道显示可接入，再从调用方连接服务端地址。
+
+默认监听地址 `0.0.0.0` 表示全部 IPv4 网卡，不是调用方使用的连接地址。调用方应连接服务端真实 IP 或域名。管理页会从 `19000` 起建议可用端口；若保存前端口已被占用，重新打开新增表单获取建议值。
+
+目标服务必须能从 Agent 主机访问，并继续使用目标服务自己的认证凭据。
+
+## 7. 创建 Agent 互访入口
+
+1. 在被访问方新增通道并启用“仅允许授权客户端互访”。
+2. 保持“启用 Agent 间端到端加密”开启。
+3. 等待目标 Agent 首次上线并自动登记证书指纹。
+4. 将管理页指纹与目标机命令输出带外核对：
+
+   ```text
+   RelayLink.Agent --config <agent.json> --show-e2e-fingerprint
+   ```
+
+5. 在访问方客户端中创建指向目标客户端和通道的访问入口。
+6. 从访问方状态页或 `/api/v1/mappings` 读取实际 `127.0.0.1:<端口>`。
+
+互访通道不会开放云端业务代理端口。只有链路已受信隔离，或业务协议自身提供端到端加密和认证时，才考虑关闭 Agent 间加密；关闭后服务端及链路观察者可以读取或篡改业务内容。
+
+证书重装或轮换不会自动覆盖已固定的身份。入口 ID 由目标客户端 ID 和通道 ID 生成，不可修改；需要调整时删除并重建。升级旧配置前应移除 `channels[].e2eCertificateSha256`，客户端级身份规则详见[安全互访设计](../design/agent-to-agent.md)。
+
+## 8. 通过互访访问 Server 管理页
+
+推荐把管理页绑定到 `127.0.0.1:18080`，再在 Server 同机部署一个 Linux Agent：
+
+1. 为同机 Agent 创建目标为 `127.0.0.1:18080` 的授权互访通道。
+2. 只给指定访问方创建入口。
+3. 在访问方浏览器打开其本机 `127.0.0.1:<入口端口>`。
+
+该方案复用标准 Agent 互访，不需要把管理端口暴露到公网。完整步骤见 [Linux 部署说明](../../deploy/linux/README.md#通过互访通道访问服务端管理页)。
+
+## 9. 日志与故障定位
+
+| 位置 | 查看方式 |
+|---|---|
+| Docker Server | `docker compose -f deploy/docker/compose.yaml logs -f --tail 200` |
+| Linux Server | `sudo journalctl -u relaylink-server --since '30 minutes ago' -o cat` |
+| Linux Agent | `sudo journalctl -u relaylink-agent --since '30 minutes ago' -o cat` |
+| Windows Agent | `C:\ProgramData\RelayLink\Agent\relaylink-diagnostics.jsonl` |
+
+服务端日志按连接 ID 记录打开、数据绑定、目标就绪、转发进度、EOF、取消和最终结果。Windows Agent 诊断日志超过 4 MiB 后轮换到 `.1` 文件。
+
+排查步骤：
+
+1. 记录故障发生时间和服务端连接 ID。
+2. 对照 Server 与 Agent 日志中的同一连接 ID。
+3. 检查 `to agent` / `to caller` 与 `toTargetBytes` / `toServerBytes` 是否增长。
+4. 找出哪个方向先出现 EOF、取消或超时。
+5. 再结合业务服务日志判断认证、协议或应用层故障。
+
+RDP 初始协商成功或双向已有字节，不代表图形会话已经正常，仍需实际登录验证。
+
+## 10. 升级与备份
+
+- 升级 Server 或 Agent 会断开现有连接，安排维护窗口。
+- Server 与 Agent 应一起升级，不保证新旧版本混用。
+- Docker 升级前备份 `.local/docker-server/config` 和完整 SQLite 数据目录。
+- 原生部署升级前备份服务端配置、客户端目录、证书及完整 SQLite 数据目录。
+- Agent 升级只替换程序，保留配置、身份和端口状态目录。
+- 不要在服务运行时只复制 SQLite 主文件作为备份。

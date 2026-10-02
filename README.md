@@ -26,7 +26,7 @@ RelayLink 不提供 UDP、VPN/IP 层组网或 P2P 打洞，也不替代目标服
 
 ## 快速开始
 
-发布并启动 Linux 或 Windows 服务端，准备服务端配置、管理账号及所需的 TLS 证书；在管理页面登录后创建客户端并下载其 Agent 配置。随后在目标 Windows、Linux 或 macOS 主机部署 Agent，待管理页面显示客户端在线后添加通道，便可从受信任网络连接通道的服务端监听地址。安装步骤、配置准备和客户端互访用法见[安装与使用指南](docs/operations/installation-and-usage.md)。
+Linux Docker 主机可使用 `pwsh ./scripts/start-server-compose.ps1 -AgentServerHost <Agent 可达地址>` 一键构建并启动服务端；也可原生部署到 Linux 或 Windows。随后在管理页面创建客户端、下载专属 Agent 配置并安装 Agent，待客户端在线后添加通道。完整步骤见[安装与使用指南](docs/operations/installation-and-usage.md)，Compose 参数和数据目录见 [Docker Compose 部署说明](deploy/docker/README.md)。
 
 ## 仓库结构
 
@@ -43,7 +43,7 @@ RelayLink/
 ├── tests/                  单元与集成测试
 ├── tools/                  模拟目标与模拟调用方
 ├── config/examples/        脱敏配置示例
-├── deploy/                 Linux、Windows、macOS 部署资源
+├── deploy/                 Docker、Linux、Windows、macOS 部署资源
 ├── scripts/                构建与开发脚本
 └── docs/                   需求、设计及开发文档
 ```
@@ -64,12 +64,14 @@ RelayLink/
 
 ## 文档
 
+- [产品网站](https://deronqi.github.io/RelayLink/)
 - [文档索引](docs/README.md)
 - [需求与功能边界](docs/requirements/README.md)
 - [技术设计](docs/design/technical-design.md)
 - [客户端安全互访设计](docs/design/agent-to-agent.md)
 - [配置示例](config/examples/)
 - [安装与使用指南](docs/operations/installation-and-usage.md)
+- [Docker Compose 部署](deploy/docker/README.md)
 - [Linux 部署说明](deploy/linux/README.md)
 - [Windows 部署与 Agent 安装包](deploy/windows/README.md)
 - [macOS Agent 部署](deploy/macos/README.md)

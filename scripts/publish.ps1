@@ -23,7 +23,8 @@ function Publish-RelayLinkComponent {
     $output = Join-Path $OutputRoot (Join-Path $Rid $name)
     dotnet restore (Join-Path $repositoryRoot $Project) --runtime $Rid --configfile (Join-Path $repositoryRoot 'NuGet.Config')
     if ($LASTEXITCODE -ne 0) { throw "Restore failed: $Project ($Rid)" }
-    dotnet publish (Join-Path $repositoryRoot $Project) --configuration Release --runtime $Rid --self-contained true --no-restore --output $output
+    $selfContained = -not ($Component -eq 'Agent' -and $Rid -eq 'win-x64')
+    dotnet publish (Join-Path $repositoryRoot $Project) --configuration Release --runtime $Rid --self-contained $selfContained --no-restore --output $output
     if ($LASTEXITCODE -ne 0) { throw "Publish failed: $Project ($Rid)" }
 }
 

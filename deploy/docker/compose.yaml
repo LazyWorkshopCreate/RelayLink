@@ -1,0 +1,28 @@
+name: relaylink
+
+services:
+  relaylink-server:
+    image: ${RELAYLINK_SERVER_IMAGE:-relaylink-server:local}
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    network_mode: host
+    init: true
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    volumes:
+      - type: bind
+        source: ${RELAYLINK_DOCKER_ROOT:-../../.local/docker-server}/config
+        target: /etc/relaylink
+      - type: bind
+        source: ${RELAYLINK_DOCKER_ROOT:-../../.local/docker-server}/data
+        target: /var/lib/relaylink
+    command: ["--config", "/etc/relaylink/server.json"]
+    stop_grace_period: 45s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"

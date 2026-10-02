@@ -2,10 +2,18 @@
 
 文档 ID：TST-001\
 状态：Active\
-版本：v1.25.0\
-更新日期：2026-09-22
+版本：v1.28.0\
+更新日期：2026-09-23
 
 本文记录当前仓库可重复执行的验证证据，不替代 [需求文档](../requirements/README.md) 的验收标准，也不把未在目标环境运行的项目标记为通过。
+
+2026-09-23 增加 Linux Server Docker Compose 交付：多阶段镜像构建 Server 与 React 管理前端，Compose 使用 host 网络支持运行时动态业务端口，并把配置、客户端文件和 SQLite 数据挂载到 `.local/docker-server`；容器根文件系统只读，Docker JSON 日志启用大小和数量轮换。首次启动脚本交互生成管理员密码哈希、保留既有配置、先执行配置预检再启动，停止脚本默认保留数据。PowerShell 语法、Docker JSON 示例、`docker compose config --quiet`、`git diff --check` 和 Server Release 构建通过；构建机使用 .NET 10 预览 SDK。当前 Docker Engine 未运行，因此镜像实际构建、Linux 容器启动、重启持久化和动态通道转发仍需在 Linux Docker 主机完成，A60 尚未通过。
+
+2026-09-23 修复 Windows Agent 安装包在已安装 .NET 10 ASP.NET Core Runtime x64 时仍显示未安装的问题。官方 x64 .NET 安装器将 `InstalledVersions\x64\sharedfx` 写入 32 位注册表视图（物理路径为 `WOW6432Node`），原检查误用 `HKLM64`。安装包现优先检查 `HKLM32` 并兼容回退 `HKLM64`；本机注册表和 `dotnet --list-runtimes` 均确认存在 `Microsoft.NETCore.App` 与 `Microsoft.AspNetCore.App` 10.x。Inno Setup 编译验证见本次改动记录，Server 2012 R2 目标机仍需用新安装包复验页面结果。
+
+同日修复依赖检查页点击取消时报 `Runtime error ... Type Mismatch`：错误发生在退出向导调用的日志持久化路径。现为 `GetDateTimeString` 提供明确的有效分隔符，并在复制前确认 `{log}` 路径非空且文件存在。使用相同 `DeinitializeSetup` 代码构建无需管理员权限的最小安装器，实际运行退出码为 0 且日志副本生成；完整安装包重新编译通过。目标机仍需用新安装包复验交互式取消操作。
+
+2026-09-22 新增 Windows Agent 安装与依赖需求 REQ-001H，并完成首轮实现，随后按用户决定改为框架依赖发布：安装包新增操作系统、x64、VC++ 与 .NET 10 ASP.NET Core Runtime x64 检查页，失败依赖显示红叉和官方下载链接；交互及静默安装均以依赖结果为门槛。主安装、预检及卸载脚本改用 Windows PowerShell 4.0 可用语法，服务创建改走 `Win32_Service.Create`，避免 Server 2012 R2 上 `sc.exe create` 的带空格参数解析错误；安装/卸载脚本通过错误报告文件把底层原因返回向导。Inno Setup 默认记录详细日志并尝试持久化至 ProgramData。PowerShell 脚本语法检查与 Inno Setup 6.7.3 测试安装包编译通过，发布目录确认含 runtimeconfig 且不含 `coreclr.dll`、`hostfxr.dll`、`hostpolicy.dll` 和 `System.Private.CoreLib.dll`；依赖页实际显示、失败注入、静默返回码、日志持久化及完整安装卸载仍需在干净目标机复验，因此 A54–A57 尚未标记完成。
 
 2026-09-22 完成互访业务流按通道可选加密。配置字段 `endToEndEncryptionEnabled` 缺失和新建均默认 `true`；管理页面仅在“仅允许授权客户端互访”模式显示加密勾选，并明确标识加密/明文。协议版本升为 3，服务端把模式同时通知两端；加密路径保留内层 TLS，明文路径仍执行绑定到模式的 HMAC 访问证明，成功后直接复制 `Data/Fin/Reset`。真实双 Agent 进程测试验证 4096 字节随机流、目标标记回包与半关闭；服务端明文转发计数精确为业务载荷加 32 字节证明（反向另含 32 字节挑战和 1 字节状态），排除 TLS 握手记录。加密和明文错误证明均在目标 TCP Connect 前拒绝；在线切换模式只撤销对应通道连接。Release 配置下单元测试 40/40、启用完整互访测试的集成测试 29/29、前端组件测试 8/8、TypeScript/Vite 构建、Prettier 和 `git diff --check` 全部通过。构建机使用 .NET SDK 10.0.200 preview，尚未在跨主机或正式稳定版运行时复验。
 
@@ -106,7 +114,7 @@ Agent 安装包新增桌面监控快捷方式后，使用 Windows PowerShell 5.1
 | A17（安全组） | 未执行 | 云网络安全组和内外网端口实机验证 |
 | A18–A22（Agent 安全互访） | 双 Agent 本机 Linux 与 Windows 集成通过；跨主机部分待验 | Windows 稳定版运行时及服务身份、两台真实内网主机经服务端中继、错误指纹/慢读/断线资源回收、长时压力与容量基线 |
 | A23–A24（Agent 自选端口与本机网页） | Windows 和 Linux 单元与双 Agent 本机集成通过：首次分配、重启复用、占用轮换；网页显示地址且不含密钥，服务端上报断言通过；两平台均执行真实 Agent 进程重启、端口冲突轮换及新地址连通 | Windows Service 实际权限、跨主机及重启现场验证 |
-| A25–A26（Windows Agent 安装包） | win-x64 自包含发布和 Inno Setup 6.7.3 安装包编译成功；PowerShell 安装/卸载脚本语法检查与 `git diff --check` 通过，发布目录未发现真实配置或证书 | 本机静默缺配置测试被 UAC 挡住，未进入安装阶段；需在管理员会话实测无配置/无效配置拒绝、有效配置安装后 Online、重启自启及卸载保留状态；当前构建机 SDK 为 .NET 10 预览版，正式发布需稳定版复验并签名安装包 |
+| A25–A26（Windows Agent 安装包） | win-x64 框架依赖发布和 Inno Setup 6.7.3 安装包编译成功；产物确认不含 `coreclr.dll`、`hostfxr.dll`、`hostpolicy.dll` 与 `System.Private.CoreLib.dll`，包含 runtimeconfig；PowerShell 安装/卸载脚本语法检查与 `git diff --check` 通过 | 需在管理员会话实测依赖缺失、无配置/无效配置拒绝、有效配置安装后 Online、重启自启及卸载保留状态；当前构建机 SDK 为 .NET 10 预览版，正式发布需稳定版复验并签名安装包 |
 | A27（桌面监控快捷方式） | Windows PowerShell 5.1 本地验证默认端口、自定义端口、状态页关闭、卸载移除和同名冲突保护；`1.0.3` 安装包编译成功 | 在目标 Windows 管理员会话中完整安装，双击确认由默认浏览器打开正确地址，并验证卸载清理 |
 | A28–A29（独立控制/数据与原始流） | 本机错误入口/无授权令牌拒绝、正确绑定后原始字节、32 路每路 1 MiB 半关闭模拟通过；互访端到端实验 9/9 通过；云端与本机 Agent 已部署；跨公网 RDP 已在自有服务器连续运行一天（生产使用），登录后数十秒才出画面的现象根因未确认 | 访问端关闭 UDP 后 A/B 复测延迟与图形交互；SQL TLS、受信网络或网络层加密、持续大流量和资源压测 |
 | A42–A43（Linux Agent 与管理页互访） | `linux-x64` 自包含发布、WSL 配置检查及真实进程集成测试通过；测试服务器已按最小文件权限安装 systemd 服务，重启后复用身份并自动上线；指定 Windows 客户端经标准授权互访入口访问 Server loopback 管理页，API 与内置浏览器实测通过 | 未授权真实客户端负向访问、断网/停止时连接与资源释放、长时压力及正式稳定版运行时复验 |

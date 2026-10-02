@@ -27,6 +27,18 @@ if ($Version -notmatch '^\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$') { throw 'Version m
 & (Join-Path $PSScriptRoot 'publish.ps1') -RuntimeIdentifier win-x64 -Component Agent -OutputRoot $publishRoot
 if ($LASTEXITCODE -ne 0) { throw 'Agent publish failed.' }
 if (-not (Test-Path -LiteralPath (Join-Path $publishDirectory 'RelayLink.Agent.exe'))) { throw 'Agent executable is missing from publish output.' }
+$runtimeConfigurationPath = Join-Path $publishDirectory 'RelayLink.Agent.runtimeconfig.json'
+if (-not (Test-Path -LiteralPath $runtimeConfigurationPath)) { throw 'Framework-dependent Agent runtimeconfig is missing.' }
+foreach ($runtimeFile in @('coreclr.dll', 'hostfxr.dll', 'hostpolicy.dll', 'System.Private.CoreLib.dll')) {
+    if (Test-Path -LiteralPath (Join-Path $publishDirectory $runtimeFile)) {
+        throw "Windows Agent publish must be framework-dependent but contains runtime file '$runtimeFile'."
+    }
+}
+$runtimeConfiguration = Get-Content -LiteralPath $runtimeConfigurationPath -Raw | ConvertFrom-Json
+$frameworkNames = @($runtimeConfiguration.runtimeOptions.frameworks | ForEach-Object { $_.name })
+if ('Microsoft.NETCore.App' -notin $frameworkNames -or 'Microsoft.AspNetCore.App' -notin $frameworkNames) {
+    throw 'Windows Agent runtimeconfig must require both Microsoft.NETCore.App and Microsoft.AspNetCore.App.'
+}
 
 & $InnoCompiler "/DPublishDir=$publishDirectory" "/DPackageVersion=$Version" $installerScript
 if ($LASTEXITCODE -ne 0) { throw 'Inno Setup compilation failed.' }

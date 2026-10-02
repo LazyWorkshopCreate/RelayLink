@@ -1,0 +1,390 @@
+<!doctype html>
+<html lang="zh-CN">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <meta
+            name="description"
+            content="RelayLink 是一个基于 .NET 的开源反向 TCP 代理，让云端应用在内网无需开放公网入站端口的情况下访问 TCP 服务。"
+        />
+        <meta name="theme-color" content="#08111f" />
+        <title>RelayLink · 让内网 TCP 服务可控地被访问</title>
+        <link rel="alternate" hreflang="zh-CN" href="./" />
+        <link rel="alternate" hreflang="en" href="./en/" />
+        <link rel="alternate" hreflang="x-default" href="./" />
+        <link rel="icon" type="image/svg+xml" href="./assets/relaylink-icon.svg" />
+        <link rel="stylesheet" href="./assets/styles.css?v=20260923-6" />
+        <script src="./assets/locale.js?v=20260923-6" defer></script>
+        <script src="./assets/releases.js?v=20260923-6" defer></script>
+        <script src="./assets/app.js?v=20260923-6" defer></script>
+    </head>
+    <body>
+        <a class="skip-link" href="#main">跳到正文</a>
+        <header class="site-header" data-header>
+            <div class="shell header-inner">
+                <a class="brand" href="#top" aria-label="RelayLink 首页">
+                    <img src="./assets/relaylink-icon.svg" alt="" width="36" height="36" />
+                    <span>RelayLink</span>
+                </a>
+                <nav class="main-nav" aria-label="主导航">
+                    <a href="#product">产品</a>
+                    <a href="#guide">使用</a>
+                    <a href="#docs">文档</a>
+                    <a href="#updates">动态</a>
+                </nav>
+                <a class="language-link" href="./en/" aria-label="Switch to English">EN</a>
+                <a
+                    class="header-link"
+                    href="https://github.com/DeronQi/RelayLink"
+                    target="_blank"
+                    rel="noreferrer"
+                >
+                    GitHub
+                    <svg aria-hidden="true" viewBox="0 0 16 16"><path d="m5.5 3.5 5 5m0-5v5h-5" /></svg>
+                </a>
+            </div>
+        </header>
+
+        <main id="main">
+            <section class="hero" id="top" aria-labelledby="hero-title">
+                <div class="shell hero-grid">
+                    <div class="hero-copy">
+                        <p class="eyebrow"><span></span> 开源 · .NET · TCP</p>
+                        <h1 id="hero-title">内网不开放<br />入站端口，<br /><em>服务仍然可达。</em></h1>
+                        <p class="hero-lead">
+                            RelayLink 让 Agent 主动连接服务端，把分散在不同内网中的 SQL Server、RDP
+                            与其他 TCP 服务，变成可集中配置、可授权、可审计的连接。
+                        </p>
+                        <div class="hero-actions">
+                            <a class="button primary" href="#guide">开始部署</a>
+                            <a class="button secondary" href="#product">了解工作方式</a>
+                        </div>
+                        <ul class="hero-facts" aria-label="支持范围">
+                            <li><strong>Server</strong><span>Linux / Windows</span></li>
+                            <li><strong>Agent</strong><span>Windows / Linux / macOS</span></li>
+                            <li><strong>协议</strong><span>首期仅 TCP</span></li>
+                        </ul>
+                    </div>
+
+                    <div class="topology" aria-label="RelayLink 连接拓扑示意图">
+                        <div class="topology-label">连接永远由 Agent 发起</div>
+                        <div class="node cloud-node">
+                            <span class="node-kicker">Cloud</span>
+                            <strong>RelayLink Server</strong>
+                            <small>认证 · 配置 · 中继</small>
+                        </div>
+                        <div class="route route-a"><span>控制 / 数据</span></div>
+                        <div class="route route-b"><span>控制 / 数据</span></div>
+                        <div class="node agent-node agent-a">
+                            <span class="status-dot"></span>
+                            <span class="node-kicker">Branch A</span>
+                            <strong>Agent</strong>
+                            <small>SQL Server :1433</small>
+                        </div>
+                        <div class="node agent-node agent-b">
+                            <span class="status-dot"></span>
+                            <span class="node-kicker">Branch B</span>
+                            <strong>Agent</strong>
+                            <small>RDP :3389</small>
+                        </div>
+                        <p class="topology-note">内网侧只需具备出站连接能力</p>
+                    </div>
+                </div>
+            </section>
+
+            <section class="section product-section" id="product" aria-labelledby="product-title">
+                <div class="shell">
+                    <div class="section-heading split-heading">
+                        <div>
+                            <p class="section-number">01 / 产品介绍</p>
+                            <h2 id="product-title">不是另一张网络，<br />只是那根<br />可靠的管子。</h2>
+                        </div>
+                        <p>
+                            RelayLink 不做 VPN、P2P 打洞，也不解析业务协议。它只负责建立受控的 TCP
+                            字节流，让应用继续使用原来的地址、账号、权限和 TLS。
+                        </p>
+                    </div>
+
+                    <div class="flow" aria-label="一次普通代理连接的流程">
+                        <article>
+                            <span class="flow-index">01</span>
+                            <h3>主动上线</h3>
+                            <p>每台 Agent 使用独立客户端 ID 和密钥，从内网主动建立控制连接。</p>
+                        </article>
+                        <div class="flow-arrow" aria-hidden="true">→</div>
+                        <article>
+                            <span class="flow-index">02</span>
+                            <h3>集中下发</h3>
+                            <p>Server 统一管理客户端、通道和访问映射，认证后下发运行配置。</p>
+                        </article>
+                        <div class="flow-arrow" aria-hidden="true">→</div>
+                        <article>
+                            <span class="flow-index">03</span>
+                            <h3>按需转发</h3>
+                            <p>访问到来时建立独立数据隧道，双向复制字节并正确处理背压与半关闭。</p>
+                        </article>
+                    </div>
+
+                    <div class="capability-grid">
+                        <article class="capability feature-card">
+                            <div class="icon-box" aria-hidden="true">
+                                <svg viewBox="0 0 24 24"><path d="M4 8h16M7 4 3 8l4 4M20 16H4m13-4 4 4-4 4" /></svg>
+                            </div>
+                            <p class="card-kicker">连接模式</p>
+                            <h3>云端访问内网目标</h3>
+                            <p>云端应用连接 Server 的代理端口，Server 经已认证 Agent 转发到内网目标。</p>
+                            <div class="mini-route"><span>Cloud app</span><i></i><span>Server</span><i></i><span>Agent</span></div>
+                        </article>
+                        <article class="capability">
+                            <div class="icon-box" aria-hidden="true">
+                                <svg viewBox="0 0 24 24"><path d="M12 3 5 6v5c0 4.6 2.8 8.1 7 10 4.2-1.9 7-5.4 7-10V6l-7-3Z" /><path d="m9 12 2 2 4-4" /></svg>
+                            </div>
+                            <p class="card-kicker">安全模型</p>
+                            <h3>授权的 Agent 互访</h3>
+                            <p>访问方使用本机回环入口；业务流默认端到端 TLS，Server 只中继密文。</p>
+                        </article>
+                        <article class="capability boundary-card">
+                            <p class="card-kicker">明确边界</p>
+                            <h3>透明转发，不碰业务数据</h3>
+                            <ul class="check-list">
+                                <li>不解析 SQL / TDS 等业务协议</li>
+                                <li>不替代目标服务身份认证</li>
+                                <li>不提供 UDP、VPN 或 IP 层组网</li>
+                            </ul>
+                        </article>
+                    </div>
+
+                    <aside class="security-note">
+                        <span class="note-mark">!</span>
+                        <div>
+                            <strong>安全边界要先看清</strong>
+                            <p>
+                                普通代理数据通道完成绑定后直接复制原始 TCP 字节，不提供链路加密。敏感业务应启用业务自身
+                                TLS，或部署在受保护的网络链路中；应用层安全组不能替代加密。
+                            </p>
+                        </div>
+                    </aside>
+                </div>
+            </section>
+
+            <section class="section guide-section" id="guide" aria-labelledby="guide-title">
+                <div class="shell">
+                    <div class="section-heading split-heading">
+                        <div>
+                            <p class="section-number">02 / 使用说明</p>
+                            <h2 id="guide-title">从一台 Server，<br />到第一条可用通道。</h2>
+                        </div>
+                        <p>
+                            Linux Docker 主机是最快的起点。下面保留关键路径；生产部署前请完整阅读安装指南并配置
+                            TLS、网络访问控制与备份。
+                        </p>
+                    </div>
+
+                    <div class="quickstart-grid">
+                        <div class="steps" aria-label="部署步骤">
+                            <article class="step active" data-step="1">
+                                <button type="button" aria-expanded="true" aria-controls="step-1-panel">
+                                    <span>01</span>
+                                    <span><strong>启动 Server</strong><small>Docker Compose · Linux</small></span>
+                                    <svg aria-hidden="true" viewBox="0 0 16 16"><path d="m4 6 4 4 4-4" /></svg>
+                                </button>
+                                <div class="step-panel" id="step-1-panel">
+                                    <p>准备 Linux Docker Engine、Compose v2 与 PowerShell 7，然后在仓库根目录执行：</p>
+                                    <div class="code-block">
+                                        <code>pwsh ./scripts/start-server-compose.ps1 -AgentServerHost tunnel.example.com</code>
+                                        <button class="copy-button" type="button" data-copy="pwsh ./scripts/start-server-compose.ps1 -AgentServerHost tunnel.example.com">复制</button>
+                                    </div>
+                                    <p class="hint">将域名替换为 Agent 实际可达的 DNS 名称或 IP。</p>
+                                </div>
+                            </article>
+                            <article class="step" data-step="2">
+                                <button type="button" aria-expanded="false" aria-controls="step-2-panel">
+                                    <span>02</span>
+                                    <span><strong>创建客户端</strong><small>管理页面 · 独立凭据</small></span>
+                                    <svg aria-hidden="true" viewBox="0 0 16 16"><path d="m4 6 4 4 4-4" /></svg>
+                                </button>
+                                <div class="step-panel" id="step-2-panel" hidden>
+                                    <p>打开管理页面并登录，为每台 Agent 创建独立客户端，再下载专属 JSON 配置。</p>
+                                    <p class="hint">客户端配置含访问密钥，不得共用，也不要提交到仓库。</p>
+                                </div>
+                            </article>
+                            <article class="step" data-step="3">
+                                <button type="button" aria-expanded="false" aria-controls="step-3-panel">
+                                    <span>03</span>
+                                    <span><strong>安装 Agent</strong><small>Windows / Linux / macOS</small></span>
+                                    <svg aria-hidden="true" viewBox="0 0 16 16"><path d="m4 6 4 4 4-4" /></svg>
+                                </button>
+                                <div class="step-panel" id="step-3-panel" hidden>
+                                    <p>Windows 使用安装包；Linux 使用 systemd；macOS 使用 launchd。安装时使用刚下载的配置。</p>
+                                    <p class="hint">Agent 本机状态页默认位于 <code>http://127.0.0.1:18081/</code>。</p>
+                                </div>
+                            </article>
+                            <article class="step" data-step="4">
+                                <button type="button" aria-expanded="false" aria-controls="step-4-panel">
+                                    <span>04</span>
+                                    <span><strong>添加通道</strong><small>目标地址 · 授权范围</small></span>
+                                    <svg aria-hidden="true" viewBox="0 0 16 16"><path d="m4 6 4 4 4-4" /></svg>
+                                </button>
+                                <div class="step-panel" id="step-4-panel" hidden>
+                                    <p>确认客户端在线后创建通道，填写 Agent 所在内网可达的目标主机和端口。</p>
+                                    <p class="hint">普通通道可配置来源 IP 安全组；Agent 互访则创建访问映射。</p>
+                                </div>
+                            </article>
+                        </div>
+
+                        <aside class="endpoint-card">
+                            <div class="terminal-title"><span></span><span></span><span></span><strong>默认端点</strong></div>
+                            <dl>
+                                <div><dt>管理页面</dt><dd>127.0.0.1:18080</dd></div>
+                                <div><dt>控制连接</dt><dd>7443 / TCP</dd></div>
+                                <div><dt>数据连接</dt><dd>7444 / TCP</dd></div>
+                                <div><dt>Agent 状态</dt><dd>127.0.0.1:18081</dd></div>
+                            </dl>
+                            <div class="endpoint-warning">
+                                <strong>投产前检查</strong>
+                                <p>限制端口来源、启用控制 TLS、备份配置和 SQLite 数据，并在目标环境完成验证。</p>
+                            </div>
+                        </aside>
+                    </div>
+
+                    <div class="doc-links" aria-label="部署文档">
+                        <a href="https://github.com/DeronQi/RelayLink/blob/main/docs/operations/installation-and-usage.md" target="_blank" rel="noreferrer">
+                            <span>完整安装与使用指南</span><b>总览 →</b>
+                        </a>
+                        <a href="https://github.com/DeronQi/RelayLink/blob/main/deploy/docker/README.md" target="_blank" rel="noreferrer">
+                            <span>Docker Compose 部署</span><b>Linux →</b>
+                        </a>
+                        <a href="https://github.com/DeronQi/RelayLink/blob/main/deploy/windows/README.md" target="_blank" rel="noreferrer">
+                            <span>Windows 部署</span><b>Service →</b>
+                        </a>
+                        <a href="https://github.com/DeronQi/RelayLink/blob/main/deploy/macos/README.md" target="_blank" rel="noreferrer">
+                            <span>macOS Agent</span><b>launchd →</b>
+                        </a>
+                    </div>
+                </div>
+            </section>
+
+            <section class="section docs-section" id="docs" aria-labelledby="docs-title">
+                <div class="shell">
+                    <div class="section-heading docs-heading">
+                        <div>
+                            <p class="section-number">03 / 文档中心</p>
+                            <h2 id="docs-title">从第一次部署，<br />到看懂每个取舍。</h2>
+                        </div>
+                        <p>按任务进入文档。操作指南描述已经可以执行的路径；设计文档和 ADR 记录协议、安全边界及重要架构决定。</p>
+                    </div>
+
+                    <div class="docs-grid">
+                        <article class="docs-group docs-group-primary">
+                            <div class="docs-group-head">
+                                <span>01</span>
+                                <div><p>START HERE</p><h3>入门</h3></div>
+                            </div>
+                            <a href="https://github.com/DeronQi/RelayLink/blob/main/docs/operations/installation-and-usage.md" target="_blank" rel="noreferrer">
+                                <span><strong>安装与使用指南</strong><small>选择部署方式、启动 Server、安装 Agent、创建通道</small></span><b>→</b>
+                            </a>
+                            <a href="https://github.com/DeronQi/RelayLink/blob/main/README.md" target="_blank" rel="noreferrer">
+                                <span><strong>项目概览</strong><small>定位、连接模式、能力边界与仓库入口</small></span><b>→</b>
+                            </a>
+                        </article>
+
+                        <article class="docs-group">
+                            <div class="docs-group-head">
+                                <span>02</span>
+                                <div><p>DEPLOY</p><h3>部署</h3></div>
+                            </div>
+                            <a href="https://github.com/DeronQi/RelayLink/blob/main/deploy/docker/README.md" target="_blank" rel="noreferrer">
+                                <span><strong>Docker Compose</strong><small>Linux Server 容器化启动与数据目录</small></span><b>→</b>
+                            </a>
+                            <a href="https://github.com/DeronQi/RelayLink/blob/main/deploy/linux/README.md" target="_blank" rel="noreferrer">
+                                <span><strong>Linux</strong><small>Server 与 Agent 的 systemd 部署</small></span><b>→</b>
+                            </a>
+                            <a href="https://github.com/DeronQi/RelayLink/blob/main/deploy/windows/README.md" target="_blank" rel="noreferrer">
+                                <span><strong>Windows</strong><small>Windows Service 与 Agent 安装包</small></span><b>→</b>
+                            </a>
+                            <a href="https://github.com/DeronQi/RelayLink/blob/main/deploy/macos/README.md" target="_blank" rel="noreferrer">
+                                <span><strong>macOS</strong><small>Intel / Apple Silicon Agent 与 launchd</small></span><b>→</b>
+                            </a>
+                        </article>
+
+                        <article class="docs-group">
+                            <div class="docs-group-head">
+                                <span>03</span>
+                                <div><p>DESIGN</p><h3>架构与安全</h3></div>
+                            </div>
+                            <a href="https://github.com/DeronQi/RelayLink/blob/main/docs/design/technical-design.md" target="_blank" rel="noreferrer">
+                                <span><strong>技术设计</strong><small>总体架构、协议、配置与故障处理</small></span><b>→</b>
+                            </a>
+                            <a href="https://github.com/DeronQi/RelayLink/blob/main/docs/design/agent-to-agent.md" target="_blank" rel="noreferrer">
+                                <span><strong>Agent 安全互访</strong><small>访问授权、内层 TLS 与身份校验</small></span><b>→</b>
+                            </a>
+                            <a href="https://github.com/DeronQi/RelayLink/tree/main/docs/adr" target="_blank" rel="noreferrer">
+                                <span><strong>架构决策记录</strong><small>理解关键方案为何这样设计</small></span><b>→</b>
+                            </a>
+                        </article>
+
+                        <article class="docs-group">
+                            <div class="docs-group-head">
+                                <span>04</span>
+                                <div><p>BUILD &amp; VERIFY</p><h3>开发与验证</h3></div>
+                            </div>
+                            <a href="https://github.com/DeronQi/RelayLink/blob/main/docs/development/repository-layout.md" target="_blank" rel="noreferrer">
+                                <span><strong>仓库目录</strong><small>项目职责、文件归属与命名规则</small></span><b>→</b>
+                            </a>
+                            <a href="https://github.com/DeronQi/RelayLink/blob/main/docs/testing/verification-status.md" target="_blank" rel="noreferrer">
+                                <span><strong>验证状态</strong><small>已经执行的检查与仍待补齐的证据</small></span><b>→</b>
+                            </a>
+                            <a href="https://github.com/DeronQi/RelayLink/blob/main/CONTRIBUTING.md" target="_blank" rel="noreferrer">
+                                <span><strong>贡献指南</strong><small>本地检查与协作约定</small></span><b>→</b>
+                            </a>
+                        </article>
+                    </div>
+
+                    <a class="docs-index-link" href="https://github.com/DeronQi/RelayLink/blob/main/docs/README.md" target="_blank" rel="noreferrer">
+                        <span>找不到需要的内容？</span><strong>打开完整文档索引 →</strong>
+                    </a>
+                </div>
+            </section>
+
+            <section class="section updates-section" id="updates" aria-labelledby="updates-title">
+                <div class="shell">
+                    <div class="section-heading updates-heading">
+                        <div>
+                            <p class="section-number">04 / 发布日志与动态</p>
+                            <h2 id="updates-title">版本在前进，<br />边界也写在同一页。</h2>
+                        </div>
+                        <div class="release-summary" data-release-summary aria-live="polite">
+                            <span>读取发布说明…</span>
+                        </div>
+                    </div>
+                    <div class="release-feed" data-release-feed aria-live="polite">
+                        <p class="release-loading">正在从仓库发布说明生成时间线…</p>
+                    </div>
+                    <div class="updates-footer">
+                        <p>候选版本不等同于容量或长期稳定性验收结论。</p>
+                        <a href="https://github.com/DeronQi/RelayLink/releases" target="_blank" rel="noreferrer">查看 GitHub Releases →</a>
+                    </div>
+                </div>
+            </section>
+
+            <section class="closing" aria-labelledby="closing-title">
+                <div class="shell closing-inner">
+                    <p class="section-number">OPEN SOURCE</p>
+                    <h2 id="closing-title">让连接先成立。<br /><em>剩下的，交给业务本身。</em></h2>
+                    <div class="closing-actions">
+                        <a class="button light" href="https://github.com/DeronQi/RelayLink" target="_blank" rel="noreferrer">在 GitHub 查看源码</a>
+                        <a class="text-link" href="https://github.com/DeronQi/RelayLink/tree/main/docs" target="_blank" rel="noreferrer">阅读设计与 ADR →</a>
+                    </div>
+                </div>
+            </section>
+        </main>
+
+        <footer class="site-footer">
+            <div class="shell footer-inner">
+                <a class="brand" href="#top"><img src="./assets/relaylink-icon.svg" alt="" width="30" height="30" /><span>RelayLink</span></a>
+                <p>开源反向 TCP 代理 · Built with .NET</p>
+                <div><a href="https://github.com/DeronQi/RelayLink" target="_blank" rel="noreferrer">GitHub</a><a href="https://github.com/DeronQi/RelayLink/tree/main/docs" target="_blank" rel="noreferrer">Docs</a></div>
+            </div>
+        </footer>
+    </body>
+</html>
