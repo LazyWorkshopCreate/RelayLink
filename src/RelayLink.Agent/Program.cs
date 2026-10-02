@@ -1,6 +1,10 @@
 using RelayLink.Agent;
+using Serilog;
 
 var parsed = ParseArguments(args);
+Serilog.Debugging.SelfLog.Enable(message => Console.Error.WriteLine(message));
+// Installer validation commands must not create files before service ACLs are set.
+using var logger = parsed.CheckOnly || parsed.ShowE2eFingerprint ? null : AgentFileLogging.Create(parsed.ConfigurationPath);
 AgentProcessConfiguration configuration;
 try
 {
@@ -8,6 +12,7 @@ try
 }
 catch (AgentConfigurationException exception)
 {
+    logger?.Error("Agent configuration validation failed: {Reason}", exception.Message);
     Console.Error.WriteLine($"Agent configuration validation failed: {exception.Message}");
     return 2;
 }
@@ -37,19 +42,28 @@ if (parsed.ShowE2eFingerprint)
     return 0;
 }
 
-var builder = Host.CreateApplicationBuilder(args);
-builder.Logging.ClearProviders();
-builder.Logging.AddJsonConsole(console => console.IncludeScopes = true);
-builder.Services.AddSystemd();
-builder.Services.AddWindowsService(options => options.ServiceName = "RelayLink Agent");
-builder.Services.AddSingleton(configuration);
-builder.Services.AddSingleton(new AgentConfigurationPath(parsed.ConfigurationPath));
-builder.Services.AddSingleton<AgentLocalWriteSession>();
-builder.Services.AddSingleton<AgentProcessRuntime>();
-builder.Services.AddHostedService(provider => provider.GetRequiredService<AgentProcessRuntime>());
-builder.Services.AddHostedService<AgentLocalDashboard>();
-await builder.Build().RunAsync();
-return 0;
+try
+{
+    logger!.Information("Agent starting.");
+    var builder = Host.CreateApplicationBuilder(args);
+    builder.Services.AddSystemd();
+    builder.Services.AddWindowsService(options => options.ServiceName = "RelayLink Agent");
+    builder.Logging.ClearProviders();
+    builder.Services.AddSerilog(logger, dispose: false);
+    builder.Services.AddSingleton(configuration);
+    builder.Services.AddSingleton(new AgentConfigurationPath(parsed.ConfigurationPath));
+    builder.Services.AddSingleton<AgentLocalWriteSession>();
+    builder.Services.AddSingleton<AgentProcessRuntime>();
+    builder.Services.AddHostedService(provider => provider.GetRequiredService<AgentProcessRuntime>());
+    builder.Services.AddHostedService<AgentLocalDashboard>();
+    await builder.Build().RunAsync();
+    return 0;
+}
+catch (Exception exception)
+{
+    logger!.Fatal(exception, "Agent host terminated unexpectedly.");
+    return 1;
+}
 
 static (string ConfigurationPath, bool CheckOnly, bool ShowE2eFingerprint) ParseArguments(string[] arguments)
 {

@@ -2,8 +2,8 @@
 
 文档 ID：DEV-001\
 状态：Active\
-版本：v1.8.0\
-更新日期：2026-09-29
+版本：v1.9.0\
+更新日期：2026-09-30
 
 ```text
 RelayLink/
@@ -27,6 +27,7 @@ RelayLink/
 ├── src/
 │   ├── RelayLink.Protocol/   帧协议、DTO、错误码
 │   ├── RelayLink.Transport/  TLS、转发和连接生命周期
+│   ├── RelayLink.Logging/    Serilog 文件日志、级别分流与轮转保留策略
 │   ├── RelayLink.AdminWeb/   React/TypeScript 管理端源码和构建配置
 │   ├── RelayLink.AgentWeb/   React/TypeScript Agent 本机页面源码和构建配置
 │   ├── RelayLink.Agent.ConfigMigrator/ Agent 启动前独立配置转换器
@@ -47,6 +48,7 @@ RelayLink/
 ## 目录职责
 
 - 当前已进入开发阶段，根目录使用 `RelayLink.slnx` 与各项目 csproj。共享库不得依赖 Server 或 Agent；Protocol 不依赖宿主和配置文件 I/O。
+- Server 与 Agent 通过 `RelayLink.Logging` 复用文件日志策略；组件分别决定日志目录与名称，日志库不依赖协议、运行配置或业务载荷。
 - 各目录剩余的 `.gitkeep` 仅标识尚未放入对应类别的实际文件；出现实际内容时应删除该占位。
 - config/examples 仅存脱敏示例，命名 `*.example.json`。真实部署配置放仓库外；临时本地配置如必须留在仓库目录，放被忽略的 `.local/`。
 - deploy 保存实际部署模板；docs/design 解释策略。模板形成后，设计文档链接它，避免长期维护两份相同模板。

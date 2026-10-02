@@ -14,7 +14,9 @@ public sealed record BindDataMessage(Guid SessionId, Guid ConnectionId, string C
 public sealed record BindAcceptedMessage(Guid ConnectionId);
 public sealed record TargetReadyMessage(Guid ConnectionId, int TargetConnectDurationMs);
 public sealed record StartMessage(Guid ConnectionId);
-public sealed record ErrorMessage(ErrorCode Code);
+public sealed record ErrorMessage(ErrorCode Code,
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    ControlRejectionReason? Reason = null);
 public sealed record ResetMessage(ErrorCode Code);
 public sealed record PeerOpenRequestMessage(Guid RequestId, string MappingId);
 public sealed record PeerOpenGrantedMessage(Guid RequestId, Guid ConnectionId, Guid SessionId, string Token, bool EndToEndEncryptionEnabled = true);

@@ -12,11 +12,136 @@ using System.Text;
 using Microsoft.Data.Sqlite;
 using RelayLink.Protocol;
 using RelayLink.Transport;
+using RelayLink.Agent;
+using Microsoft.Extensions.Logging;
+using Serilog;
 
 namespace RelayLink.IntegrationTests;
 
 public sealed class ServerTunnelTests
 {
+    [Theory]
+    [InlineData(ControlRejectionReason.ClientNotFound)]
+    [InlineData(ControlRejectionReason.ClientDisabled)]
+    [InlineData(ControlRejectionReason.InvalidSecret)]
+    [InlineData(ControlRejectionReason.IdentityInvalid)]
+    [InlineData(ControlRejectionReason.IdentityMismatch)]
+    public async Task Registration_rejection_returns_exact_reason_and_writes_safe_server_log(ControlRejectionReason reason)
+    {
+        using var fixture = new TunnelFixture();
+        await fixture.StartAsync(reason == ControlRejectionReason.IdentityMismatch ? new string('B', 64) : null,
+            enabled: reason != ControlRejectionReason.ClientDisabled);
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var token = deadline.Token;
+        using var connection = new TcpClient();
+        await connection.ConnectAsync(IPAddress.Loopback, fixture.TunnelPort, token);
+        var writer = new FrameWriter(connection.GetStream());
+        var reader = new FrameReader(connection.GetStream());
+        var submittedSecret = reason == ControlRejectionReason.InvalidSecret ? "test-invalid-secret-marker" : fixture.Secret;
+        await writer.WriteAsync(new Frame(FrameType.Register, JsonProtocolSerializer.Serialize(new RegisterMessage(
+            reason == ControlRejectionReason.ClientNotFound ? "unknown-client" : "test-agent", submittedSecret,
+            "integration-test", reason == ControlRejectionReason.IdentityInvalid ? null : new string('A', 64)))), token);
+        var frame = await reader.ReadAsync(ProtocolConstants.MaxErrorPayloadLength, token);
+        Assert.Equal(FrameType.Error, frame?.Type);
+        var error = JsonProtocolSerializer.Deserialize<ErrorMessage>(frame!.Payload.Span);
+        Assert.Equal(ErrorCode.AuthFailed, error.Code);
+        Assert.Equal(reason, error.Reason);
+        var agentFailure = AgentPermanentException.FromServerError(frame, "registration");
+        Assert.Contains(reason.Describe(), agentFailure.Message);
+        var logs = fixture.ReadLogs();
+        Assert.Contains(reason.ToString(), logs);
+        Assert.DoesNotContain(fixture.Secret, logs);
+        Assert.DoesNotContain("test-invalid-secret-marker", logs);
+    }
+
+    [Fact]
+    public async Task Duplicate_session_and_invalid_acknowledgement_return_distinct_reasons()
+    {
+        using var fixture = new TunnelFixture();
+        await fixture.StartAsync();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var token = deadline.Token;
+        async Task<(TcpClient Client, FrameReader Reader, FrameWriter Writer, RegisterAcceptedMessage Accepted)> RegisterAsync()
+        {
+            var client = new TcpClient();
+            await client.ConnectAsync(IPAddress.Loopback, fixture.TunnelPort, token);
+            var reader = new FrameReader(client.GetStream());
+            var writer = new FrameWriter(client.GetStream());
+            await writer.WriteAsync(new Frame(FrameType.Register, JsonProtocolSerializer.Serialize(new RegisterMessage("test-agent", fixture.Secret, "test", new string('A', 64)))), token);
+            var accepted = await reader.ReadAsync(ProtocolConstants.MaxControlPayloadLength, token);
+            Assert.Equal(FrameType.RegisterAccepted, accepted?.Type);
+            return (client, reader, writer, JsonProtocolSerializer.Deserialize<RegisterAcceptedMessage>(accepted!.Payload.Span));
+        }
+        var first = await RegisterAsync();
+        using var firstClient = first.Client;
+        using var duplicate = new TcpClient();
+        await duplicate.ConnectAsync(IPAddress.Loopback, fixture.TunnelPort, token);
+        await new FrameWriter(duplicate.GetStream()).WriteAsync(new Frame(FrameType.Register,
+            JsonProtocolSerializer.Serialize(new RegisterMessage("test-agent", fixture.Secret, "test", new string('A', 64)))), token);
+        var duplicateFrame = await new FrameReader(duplicate.GetStream()).ReadAsync(ProtocolConstants.MaxErrorPayloadLength, token);
+        Assert.Equal(FrameType.Error, duplicateFrame?.Type);
+        var duplicateError = JsonProtocolSerializer.Deserialize<ErrorMessage>(duplicateFrame!.Payload.Span);
+        Assert.Equal(ErrorCode.DuplicateSession, duplicateError.Code);
+        Assert.Equal(ControlRejectionReason.DuplicateSession, duplicateError.Reason);
+        await first.Writer.WriteAsync(new Frame(FrameType.ConfigAck,
+            JsonProtocolSerializer.Serialize(new ConfigAckMessage(first.Accepted.SessionId, "invalid-hash"))), token);
+        var ackFrame = await first.Reader.ReadAsync(ProtocolConstants.MaxErrorPayloadLength, token);
+        Assert.Equal(FrameType.Error, ackFrame?.Type);
+        Assert.Equal(ControlRejectionReason.ConfigurationMismatch, JsonProtocolSerializer.Deserialize<ErrorMessage>(ackFrame!.Payload.Span).Reason);
+        Assert.Contains("DuplicateSession", fixture.ReadLogs());
+        Assert.Contains("ConfigurationMismatch", fixture.ReadLogs());
+    }
+
+    [Fact]
+    public async Task Agent_records_server_rejection_code_reason_and_profile_in_file()
+    {
+        using var fixture = new TunnelFixture();
+        await fixture.StartAsync();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var token = deadline.Token;
+        var directory = Directory.CreateTempSubdirectory("relaylink-agent-rejection-");
+        try
+        {
+            var configPath = Path.Combine(directory.FullName, "agent.json");
+            var profile = new AgentServerProfile
+            {
+                ProfileId = "rejected", ClientId = "test-agent", ServerHost = "127.0.0.1",
+                ServerPort = fixture.TunnelPort, DataPort = fixture.DataPort,
+                Secret = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)), Reconnect = new ReconnectConfiguration(1, 2, 3)
+            };
+            var config = new AgentProcessConfiguration { DashboardPort = 0, Servers = [profile] };
+            await File.WriteAllTextAsync(configPath, JsonSerializer.Serialize(config, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }), token);
+            using var sink = AgentFileLogging.Create(configPath);
+            using var factory = LoggerFactory.Create(builder => builder.AddSerilog(sink, dispose: false));
+            var runtime = new AgentProcessRuntime(config, new AgentConfigurationPath(configPath), factory);
+            await runtime.StartAsync(token);
+            string logs = string.Empty;
+            try
+            {
+                while (!logs.Contains("InvalidSecret", StringComparison.Ordinal))
+                {
+                    token.ThrowIfCancellationRequested();
+                    logs = string.Concat(Directory.GetFiles(Path.Combine(directory.FullName, "logs"), "agent-*.jsonl").Select(ReadActiveLog));
+                    await Task.Delay(50, token);
+                }
+            }
+            finally { await runtime.StopAsync(CancellationToken.None); }
+            Assert.Contains("AuthFailed", logs);
+            Assert.Contains("rejected", logs);
+            Assert.Contains("test-agent", logs);
+            Assert.DoesNotContain(profile.Secret, logs);
+            Assert.DoesNotContain(fixture.Secret, logs);
+        }
+        finally { directory.Delete(recursive: true); }
+    }
+
+    private static string ReadActiveLog(string path)
+    {
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        using var reader = new StreamReader(stream);
+        return reader.ReadToEnd();
+    }
+
     [Fact]
     public async Task Admin_can_update_tags_and_delete_an_unreferenced_client()
     {
@@ -656,16 +781,18 @@ public sealed class ServerTunnelTests
         public string ServerPath => Path.Combine(directory, "server.json");
         public string AuditPath => Path.Combine(directory, "audit.db");
 
-        public async Task StartAsync()
+        public string ReadLogs() => string.Concat(Directory.GetFiles(Path.Combine(directory, "logs"), "*.jsonl").Select(ReadActiveLog));
+
+        public async Task StartAsync(string? pinnedIdentity = null, bool enabled = true)
         {
             Directory.CreateDirectory(Path.Combine(directory, "clients"));
             targetListener.Start();
             echoTask = EchoOnceAsync();
             await File.WriteAllTextAsync(Path.Combine(directory, "clients", "test-agent.json"), JsonSerializer.Serialize(new
             {
-                schemaVersion = 1, clientId = "test-agent", displayName = "Test Agent", enabled = true, secret = Secret, maxConnections = 10, maxPendingConnections = 5,
+                schemaVersion = 1, clientId = "test-agent", displayName = "Test Agent", enabled, secret = Secret, e2eCertificateSha256 = pinnedIdentity, maxConnections = 10, maxPendingConnections = 5,
                 channels = new[] { new { channelId = "echo", displayName = "Echo", enabled = true, listenAddress = "127.0.0.1", listenPort = ProxyPort, targetHost = "127.0.0.1", targetPort = TargetPort, maxConnections = 5, targetConnectTimeoutSeconds = 5 } }
-            }));
+            }, new JsonSerializerOptions { DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull }));
             var configPath = Path.Combine(directory, "server.json");
             await File.WriteAllTextAsync(configPath, JsonSerializer.Serialize(new
             {

@@ -19,7 +19,7 @@ services:
       - type: bind
         source: ${RELAYLINK_DOCKER_ROOT:-../../.local/docker-server}/data
         target: /var/lib/relaylink
-    command: ["--config", "/etc/relaylink/server.json"]
+    command: ["--config", "/etc/relaylink/server.json", "--log-directory", "/var/lib/relaylink/logs"]
     stop_grace_period: 45s
     logging:
       driver: json-file

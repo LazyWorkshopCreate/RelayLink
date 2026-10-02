@@ -2,8 +2,8 @@
 
 文档 ID：DES-004\
 状态：Draft\
-版本：v1.6.0\
-更新日期：2026-09-29\
+版本：v1.8.0\
+更新日期：2026-09-30\
 配套需求：[Agent 多服务端连接需求](../requirements/2026-09-28-multi-server-agent.md)\
 架构取舍：[ADR-0018](../adr/0018-agent-multi-server-isolation.md)
 
@@ -77,6 +77,8 @@ Agent 为每个 `profileId` 创建一个 `ServerContext`，包含本项只读连
 每项默认 `maxConnections=100`、`maxPendingConnections=20`，可显式调整；进程级默认 `maxConnections=2000`。配置检查要求各项最大值之和不超过进程总额度，Pending 上限不超过本项总额度。每项先获取自己的额度，再申请本项缓冲和任务；释放使用一次性租约。进程总额度只作为防止错误配置的上界，正常运行时某项无法占用其他项的预留额度。控制发送队列、单连接缓冲和目标拨号任务仍保持有界；一个服务端持续推送或慢读不能建立无限工作队列。共享 CPU、磁盘、网络出口与操作系统句柄仍可能形成主机级瓶颈，运行时应按配置项记录限额拒绝与资源占用，不能承诺主机故障下的独立性。
 
 日志和诊断事件包含 `profileId`、对应的 `clientId` 和必要的会话/连接 ID；不得记录任一配置项的密钥、令牌、CA 正文、证书私钥或业务载荷。对于单项认证拒绝、无效更新、端口冲突、服务端断网与目标故障，应分别报告本项错误并继续监督其他项。
+
+Agent 通过 `RelayLink.Logging` 使用统一文件策略，本机 Web 宿主复用进程 `ILoggerFactory`。各服务端工作线程在 scope 中携带 `profileId`、`clientId`，读取拒绝错误帧后记录错误码、原因与阶段；单项拒绝继续按自身慢速重试，不影响其他项。日志格式、保留、工具模式、拒绝协议兼容和业务诊断文件边界统一见[日志与诊断技术设计](logging-and-diagnostics.md)，标准路径与排障方式见[安装指南](../operations/installation-and-usage.md#9-日志与故障定位)。
 
 ## 6. 本机监控页面与管理 API
 

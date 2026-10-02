@@ -2,8 +2,8 @@
 
 文档 ID：OPS-001\
 状态：Active\
-版本：v2.2.0\
-更新日期：2026-09-29
+版本：v2.4.0\
+更新日期：2026-09-30
 
 RelayLink 只转发 TCP 字节流，不替代目标服务自身的账号、权限、TLS 和网络访问控制。
 
@@ -141,6 +141,7 @@ Windows 已有安装时：
 - “仅更新”保留配置、身份、端口状态和日志。
 - 对旧单服务端安装，“仅更新”会在启动新 Agent 前运行独立转换器；原配置和状态留作受保护的回退材料。
 - “重新配置”要求新的 JSON，并清除 Agent 管理的旧状态。
+- 安装器会授予 Agent 服务账号对 `C:\ProgramData\RelayLink\Agent\agent.json` 的修改权限，供本机页面增删、停用和更新服务端配置；“仅更新”也会修复旧安装的只读权限。
 - 服务注册失败会中止安装并显示底层原因，不会静默成功。
 
 ### 5.3 确认在线
@@ -207,12 +208,40 @@ Windows 已有安装时：
 
 | 位置 | 查看方式 |
 |---|---|
-| Docker Server | `docker compose -f deploy/docker/compose.yaml logs -f --tail 200` |
-| Linux Server | `sudo journalctl -u relaylink-server --since '30 minutes ago' -o cat` |
-| Linux Agent | `sudo journalctl -u relaylink-agent --since '30 minutes ago' -o cat` |
-| Windows Agent | `C:\ProgramData\RelayLink\Agent\relaylink-diagnostics.jsonl` |
+| Docker Server 运行日志 | 宿主 `.local/docker-server/data/logs/server-*.jsonl`、`server-error-*.jsonl`，容器内 `/var/lib/relaylink/logs/` |
+| Linux Server 运行日志 | systemd 模板指定 `/var/lib/relaylink/logs/server-*.jsonl`、`server-error-*.jsonl` |
+| Windows Server 运行日志 | 配置目录的 `logs/`；配置为 `C:\ProgramData\RelayLink\server.json` 时，目录为 `C:\ProgramData\RelayLink\logs` |
+| Linux Agent 运行日志 | `/var/lib/relaylink-agent/logs/agent-*.jsonl`、`error-*.jsonl` |
+| Windows Agent 运行日志 | `C:\ProgramData\RelayLink\Agent\logs\agent-*.jsonl`、`error-*.jsonl` |
+| macOS Agent 运行日志 | `/Library/Application Support/RelayLink/Agent/logs/agent-*.jsonl`、`error-*.jsonl` |
+| Windows Agent 业务连接诊断 | `C:\ProgramData\RelayLink\Agent\state\<profileId>\relaylink-diagnostics.jsonl` |
 
-服务端日志按连接 ID 记录打开、数据绑定、目标就绪、转发进度、EOF、取消和最终结果。Windows Agent 诊断日志超过 4 MiB 后轮换到 `.1` 文件。
+服务端与 Agent 通过 `RelayLink.Logging` 使用相同的 Serilog 文件策略。服务端默认写入配置目录的 `logs/`，可用 `RelayLink.Server --config <server.json> --log-directory <目录>` 指定独立目录；相对路径按启动工作目录解析。服务账号必须可写该目录。Docker 与 systemd 模板使用 `/var/lib/relaylink/logs/`，升级与重启时保留数据目录；原有 systemd 安装须应用新版模板，或在现有启动参数中增加日志目录。
+
+服务端日志按连接 ID 记录打开、数据绑定、目标就绪、转发进度、EOF、取消和最终结果。Agent 运行日志继续写入配置目录的 `logs/`。两端运行日志不再使用控制台或 Windows Event Log 提供器；控制台保留配置预检及日志库自身写入失败的错误，因此 `docker compose logs` 与 `journalctl` 主要用于这些启动诊断。文件为 UTF-8 JSONL，包含时间、级别、消息、异常及可用的 `profileId`、`clientId`、会话或连接标识；不记录配置正文、密钥、令牌或业务载荷。本机页面后端与 Agent 共用同一日志管道，配置保存失败记为 Error，并保留底层文件系统异常，页面仍只返回通用错误。服务端 SQLite 审计及其成功前持久化门槛保持原样，不由运行日志替代。
+
+- `agent-YYYYMMDD[_NNN].jsonl`：Info/Warning，按天或单文件达到 10 MiB 时轮转，保留 14 天；过期文件在后续打开或轮转时清理，停机期间不执行清理。默认不启用 Debug/Trace，Microsoft 框架默认 Warning，宿主生命周期保留 Info。
+- `error-YYYYMMDD[_NNN].jsonl`：Error/Critical，采用相同轮转规则，但不按数量或时间自动删除。永久保留指程序不自动清理；升级、重新配置及卸载也保留此目录。
+- 服务端对应文件名为 `server-YYYYMMDD[_NNN].jsonl` 与 `server-error-YYYYMMDD[_NNN].jsonl`，分别采用相同的普通与错误保留策略；请备份错误日志，避免手工清理数据目录。
+- 控制连接 TCP、TLS、认证失败与自动重连沿用 Warning，写入普通日志并保留 14 天；配置校验失败、配置保存失败及宿主意外退出写入错误日志。`--check-config` 与 `--show-e2e-fingerprint` 工具模式仍使用控制台，不创建运行日志。
+- 现有逐业务连接诊断文件仍位于 `state/<profileId>/`，超过 4 MiB 后轮换到 `.1`，用于字节计数与阶段分析。
+
+文件日志默认每条写入刷新，正常退出时关闭并刷新文件。日志目录继承父目录的 Windows ACL，应放在受保护的数据目录；Unix 日志目录为 `0700`。文件系统拒绝写入或磁盘已满时，日志库的内部错误输出到标准错误，不保证持久化；Error 文件需由运维备份并监控磁盘空间。Server 的 `--check-config` 同样不创建日志目录。
+
+### 9.1 注册被拒绝
+
+Agent 告警包含 `ErrorCode`、`RejectionReason`，异常消息包含注册/配置确认/控制会话阶段及固定说明；服务端记录相同原因和客户端 ID、来源 IP。常见原因如下：
+
+| RejectionReason | 排查方向 |
+|---|---|
+| ClientNotFound | 配置连接到了错误服务端，或客户端 ID 已被删除；核对并重新下载正确配置 |
+| ClientDisabled | 在服务端明确重新启用该客户端 |
+| InvalidSecret | 重新下载当前客户端配置，通过 Agent 导入修改；不要在日志中粘贴密钥 |
+| IdentityInvalid / IdentityMismatch | 本机身份无效或不匹配服务端固定身份；核对身份迁移或轮换，另一台 PC 使用独立客户端 ID |
+| DuplicateSession | 另一实例使用了同一客户端 ID；核对运行实例与服务状态 |
+| ConfigurationMismatch / ClientConfigurationChanged | 核对服务端配置与两端版本，重新获取当前配置后重试 |
+
+新字段兼容旧 v3 错误帧。只有新版服务端与新版 Agent 均生效时，Agent 才能显示精确原因；旧服务端仅返回错误码，新 Agent 会提示到服务端拒绝审计查看详细原因。拒绝仍为 Warning、保留 14 天；日志不包含提交或期望的密钥、身份指纹。TLS 未建立、协议帧头无效或认证前配额饱和时可能直接断开，客户端应查看本地网络/TLS 异常并结合服务端日志定位。
 
 排查步骤：
 

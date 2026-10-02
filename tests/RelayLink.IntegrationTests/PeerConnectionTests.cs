@@ -322,7 +322,11 @@ public sealed class PeerConnectionTests
             using var history = await http.GetFromJsonAsync<JsonDocument>(
                 $"http://{fixture.DashboardAddress}/api/v1/history?clientId=visited&hours=24", deadline.Token);
             var samples = history!.RootElement.GetProperty("samples").EnumerateArray().ToArray();
-            if (samples.Length == 2 && samples.All(sample => sample.GetProperty("peerCiphertextToTarget").GetInt64() >= 8L * 1024 * 1024))
+            // History contains minute buckets, so a flow crossing a minute boundary has multiple samples.
+            var channelTotals = samples.GroupBy(sample => sample.GetProperty("channelId").GetString())
+                .ToDictionary(group => group.Key!, group => group.Sum(sample => sample.GetProperty("peerCiphertextToTarget").GetInt64()));
+            if (channelTotals.Count == 2 && new[] { "private", "private-b" }.All(channelId =>
+                channelTotals.TryGetValue(channelId, out var total) && total >= 8L * 1024 * 1024))
             {
                 Assert.All(samples, sample => Assert.Equal(0, sample.GetProperty("bytesToTarget").GetInt64() - sample.GetProperty("peerCiphertextToTarget").GetInt64()));
                 break;

@@ -3,6 +3,7 @@
     <Project Path="src/RelayLink.Agent/RelayLink.Agent.csproj" />
     <Project Path="src/RelayLink.Agent.ConfigMigrator/RelayLink.Agent.ConfigMigrator.csproj" />
     <Project Path="src/RelayLink.Protocol/RelayLink.Protocol.csproj" />
+    <Project Path="src/RelayLink.Logging/RelayLink.Logging.csproj" />
     <Project Path="src/RelayLink.Server/RelayLink.Server.csproj" />
     <Project Path="src/RelayLink.Transport/RelayLink.Transport.csproj" />
   </Folder>

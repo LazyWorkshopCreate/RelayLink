@@ -67,8 +67,9 @@ docker compose -f deploy/docker/compose.yaml up -d --build
 | 普通通道 | 动态端口 | 由管理页中的通道配置决定，按需配置主机防火墙 |
 | 配置和客户端 | `.local/docker-server/config` | 容器内路径 `/etc/relaylink`，可由管理页面更新客户端文件 |
 | SQLite 数据 | `.local/docker-server/data` | 容器内路径 `/var/lib/relaylink`，备份时须包含 WAL 相关文件 |
+| 服务端运行日志 | `.local/docker-server/data/logs` | 容器内 `/var/lib/relaylink/logs`，普通日志 14 天，错误日志永久保留 |
 
-Compose 对容器日志启用单文件 10 MiB、最多 5 个文件的轮换。停止容器不会删除配置和数据库；不要在未备份时手工删除 `.local/docker-server`。
+服务端使用 Serilog 将 JSONL 写入数据卷的 `logs/`，普通文件名为 `server-*.jsonl`，错误文件名为 `server-error-*.jsonl`，两类均按天或 10 MiB 轮转；普通日志保留 14 天，Error/Critical 不自动删除。Compose 对标准输出/错误仍启用单文件 10 MiB、最多 5 个文件的轮换，主要用于启动、配置预检及日志库写入失败诊断。停止容器不会删除配置、数据库和运行日志；不要在未备份时手工删除 `.local/docker-server`。
 
 ## 升级与排障
 

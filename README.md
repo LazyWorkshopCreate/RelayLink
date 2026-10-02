@@ -39,6 +39,7 @@ RelayLink/
 │   ├── RelayLink.Agent/    Windows/Linux/macOS Agent
 │   ├── RelayLink.Protocol/ 协议与消息模型
 │   ├── RelayLink.Transport/ TCP、TLS 与流量转发
+│   ├── RelayLink.Logging/  服务端与 Agent 共用的文件日志
 │   ├── RelayLink.AdminWeb/ React 服务端管理前端
 │   └── RelayLink.AgentWeb/ React Agent 本机前端
 ├── tests/                  单元与集成测试
@@ -57,6 +58,7 @@ RelayLink/
 |---|---|
 | [.NET / ASP.NET Core](https://dotnet.microsoft.com/en-us/apps/aspnet)、`Microsoft.Extensions.Hosting.WindowsServices`、`Microsoft.Extensions.Hosting.Systemd` | 服务端与 Agent 的运行框架、管理 API、Windows Service/systemd 托管；macOS Agent 由 launchd 启动同一 Generic Host 程序 |
 | [Microsoft.Data.Sqlite](https://www.nuget.org/packages/Microsoft.Data.Sqlite/) | 服务端分钟流量历史与审计日志的 SQLite 持久化 |
+| [Serilog](https://serilog.net/)、[Serilog.Sinks.File](https://github.com/serilog/serilog-sinks-file) | 服务端与 Agent 的结构化文件日志；普通日志自动轮转清理，错误日志永久保留 |
 | [React / React DOM](https://react.dev/) | 管理页面的组件与浏览器渲染 |
 | [Radix Dialog](https://www.radix-ui.com/primitives/docs/components/dialog)、[Lucide](https://lucide.dev/) | 管理页面的弹窗交互与图标 |
 | [TypeScript](https://www.typescriptlang.org/)、[Vite](https://vite.dev/)、[Node.js](https://nodejs.org/)、[pnpm](https://pnpm.io/) | 前端类型检查、依赖管理和静态资源构建；发布后的服务端和 Agent 不需要 Node.js 或 pnpm |

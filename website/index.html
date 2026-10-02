@@ -167,6 +167,19 @@
                         </div>
                     </div>
 
+                    <div class="agent-feature" aria-labelledby="logging-feature-title">
+                        <div class="agent-feature-intro">
+                            <p class="card-kicker">LOGGING / 日志与诊断</p>
+                            <h3 id="logging-feature-title">连接失败，原因有据可查。</h3>
+                            <p>Server 与 Agent 统一记录结构化文件日志，按客户端、连接项和会话关联事件；拒绝连接时返回并记录明确原因。</p>
+                        </div>
+                        <div class="agent-feature-list">
+                            <div><strong>分级保留</strong><span>普通日志保留 14 天；错误日志不自动删除。两类文件均按天及 10 MiB 轮转。</span></div>
+                            <div><strong>拒绝原因</strong><span>区分客户端不存在、停用、密钥错误、身份不匹配及重复会话；两端升级后可读取完整原因。</span></div>
+                            <div><strong>本机文件</strong><span>Windows Agent 日志位于 ProgramData 的 RelayLink/Agent/logs；Server 部署支持独立持久化目录。日志不记录密钥或业务载荷。</span></div>
+                        </div>
+                    </div>
+
                     <aside class="security-note">
                         <span class="note-mark">!</span>
                         <div>
@@ -328,6 +341,9 @@
                             </div>
                             <a href="https://github.com/DeronQi/RelayLink/blob/main/docs/design/technical-design.md" target="_blank" rel="noreferrer">
                                 <span><strong>技术设计</strong><small>总体架构、协议、配置与故障处理</small></span><b>→</b>
+                            </a>
+                            <a href="https://github.com/DeronQi/RelayLink/blob/main/docs/design/logging-and-diagnostics.md" target="_blank" rel="noreferrer">
+                                <span><strong>日志与诊断</strong><small>文件路径、保留策略与连接拒绝原因</small></span><b>→</b>
                             </a>
                             <a href="https://github.com/DeronQi/RelayLink/blob/main/docs/design/agent-to-agent.md" target="_blank" rel="noreferrer">
                                 <span><strong>Agent 安全互访</strong><small>访问授权、内层 TLS 与身份校验</small></span><b>→</b>

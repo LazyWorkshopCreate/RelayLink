@@ -12,6 +12,8 @@
 
 脚本先执行静态配置检查，再创建自动启动及失败恢复的 Windows Service。若同名服务已存在，脚本会停止并要求管理员显式处理，避免意外替换正在运行的服务。服务账号必须能绑定配置中的控制、数据、业务和仪表盘端口，并读取控制 TLS 证书私钥。Agent 需能访问控制端口 `tunnel.port` 及独立数据端口 `tunnel.dataPort`；普通数据端口当前为明文，须依靠受信隔离链路或网络层加密保护。升级时 Server 与 Agent 必须一起更新。
 
+服务端运行日志默认写入配置目录的 `logs/`，例如 `C:\ProgramData\RelayLink\logs`。`server-*.jsonl` 保留 14 天，`server-error-*.jsonl` 永久保留，均按天或 10 MiB 轮转。手动启动可用 `--log-directory <受保护目录>` 指定路径；服务账号必须具有写入权限。运行日志不依赖 Windows Event Log 事件源，SQLite 审计仍独立保存。
+
 ## Agent
 
 推荐使用安装包。目标机最低支持 Windows Server 2012 R2 x64，两种安装包均要求 Microsoft Visual C++ 2015–2022 Redistributable x64。自包含包携带 .NET 10 运行时；框架依赖包还要求目标机预装 .NET 10 ASP.NET Core Runtime x64。在 Windows 构建机安装 Inno Setup 6.3 或更新版本（需有 `ISCC.exe`），运行：

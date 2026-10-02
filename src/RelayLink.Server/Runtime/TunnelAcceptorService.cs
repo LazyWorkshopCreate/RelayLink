@@ -57,8 +57,9 @@ public sealed class TunnelAcceptorService(
     {
         if (!await unauthenticatedLimit.WaitAsync(0, serverStoppingToken))
         {
+            logger.LogWarning("Rejected tunnel connection from {RemoteIp}: {ErrorCode}; {ReasonCode}.",
+                (client.Client.RemoteEndPoint as IPEndPoint)?.Address.ToString(), ErrorCode.CapacityExceeded, "unauthenticated_connection_limit");
             client.Dispose();
-            logger.LogWarning("Rejected tunnel connection because the unauthenticated connection limit was reached.");
             return;
         }
 
@@ -75,17 +76,22 @@ public sealed class TunnelAcceptorService(
                 var first = await reader.ReadAsync(ProtocolConstants.MaxInitialPayloadLength, handshakeTimeout.Token);
                 if (first?.Type != FrameType.Register)
                 {
-                    await RecordRejectionAsync(null, "invalid_first_frame");
-                    await TryWriteErrorAsync(writer, ErrorCode.ProtocolError, handshakeTimeout.Token);
+                    await RecordRejectionAsync(null, "invalid_first_frame", ErrorCode.ProtocolError, ControlRejectionReason.InvalidFirstFrame);
+                    await TryWriteErrorAsync(writer, ErrorCode.ProtocolError, handshakeTimeout.Token, ControlRejectionReason.InvalidFirstFrame);
                     return;
                 }
 
                 var register = JsonProtocolSerializer.Deserialize<RegisterMessage>(first.Payload.Span);
-                if (!authentication.TryAuthenticate(register.ClientId, register.Secret, out var clientConfiguration))
+                if (!authentication.TryAuthenticate(register.ClientId, register.Secret, out var clientConfiguration, out var authenticationReason))
                 {
-                    await RecordRejectionAsync(register.ClientId, "authentication_failed");
-                    await TryWriteErrorAsync(writer, ErrorCode.AuthFailed, handshakeTimeout.Token);
-                    logger.LogWarning("Authentication failed for client {ClientId}.", register.ClientId);
+                    var auditReason = authenticationReason switch
+                    {
+                        ControlRejectionReason.ClientNotFound => "client_not_found",
+                        ControlRejectionReason.ClientDisabled => "client_disabled",
+                        _ => "authentication_failed"
+                    };
+                    await RecordRejectionAsync(register.ClientId, auditReason, ErrorCode.AuthFailed, authenticationReason);
+                    await TryWriteErrorAsync(writer, ErrorCode.AuthFailed, handshakeTimeout.Token, authenticationReason);
                     return;
                 }
 
@@ -94,25 +100,32 @@ public sealed class TunnelAcceptorService(
                     (clientConfiguration!.E2eCertificateSha256 is not null &&
                     !string.Equals(clientConfiguration.E2eCertificateSha256, register.E2eCertificateSha256, StringComparison.OrdinalIgnoreCase)))
                 {
-                    await RecordRejectionAsync(register.ClientId, "identity_mismatch");
-                    await TryWriteErrorAsync(writer, ErrorCode.AuthFailed, handshakeTimeout.Token);
-                    logger.LogWarning("E2E certificate identity mismatch for client {ClientId}.", register.ClientId);
+                    var reason = register.E2eCertificateSha256 is null || register.E2eCertificateSha256.Length != 64 || !register.E2eCertificateSha256.All(Uri.IsHexDigit)
+                        ? ControlRejectionReason.IdentityInvalid : ControlRejectionReason.IdentityMismatch;
+                    await RecordRejectionAsync(register.ClientId, reason == ControlRejectionReason.IdentityInvalid ? "identity_invalid" : "identity_mismatch", ErrorCode.AuthFailed, reason);
+                    await TryWriteErrorAsync(writer, ErrorCode.AuthFailed, handshakeTimeout.Token, reason);
                     return;
                 }
 
                 if (!runtime.Sessions.TryRegister(clientConfiguration!, out var session))
                 {
-                    await RecordRejectionAsync(register.ClientId, "duplicate_session");
-                    await TryWriteErrorAsync(writer, ErrorCode.DuplicateSession, handshakeTimeout.Token);
-                    logger.LogWarning("Rejected duplicate session for client {ClientId}.", register.ClientId);
+                    await RecordRejectionAsync(register.ClientId, "duplicate_session", ErrorCode.DuplicateSession, ControlRejectionReason.DuplicateSession);
+                    await TryWriteErrorAsync(writer, ErrorCode.DuplicateSession, handshakeTimeout.Token, ControlRejectionReason.DuplicateSession);
                     return;
                 }
 
                 if (!runtime.Configuration.Clients.TryGetValue(register.ClientId, out var currentClient) || !currentClient.Enabled || session.LifetimeToken.IsCancellationRequested)
                 {
-                    await RecordRejectionAsync(register.ClientId, "client_disabled");
+                    var reason = currentClient is null ? ControlRejectionReason.ClientNotFound : !currentClient.Enabled ? ControlRejectionReason.ClientDisabled : ControlRejectionReason.ClientConfigurationChanged;
+                    var auditReason = reason switch
+                    {
+                        ControlRejectionReason.ClientNotFound => "client_not_found",
+                        ControlRejectionReason.ClientDisabled => "client_disabled",
+                        _ => "client_configuration_changed"
+                    };
+                    await RecordRejectionAsync(register.ClientId, auditReason, ErrorCode.AuthFailed, reason);
                     runtime.Sessions.Remove(session.ClientId, session.SessionId);
-                    await TryWriteErrorAsync(writer, ErrorCode.AuthFailed, handshakeTimeout.Token);
+                    await TryWriteErrorAsync(writer, ErrorCode.AuthFailed, handshakeTimeout.Token, reason);
                     return;
                 }
 
@@ -133,22 +146,25 @@ public sealed class TunnelAcceptorService(
                     var acknowledgement = await reader.ReadAsync(ProtocolConstants.MaxControlPayloadLength, handshakeTimeout.Token);
                     if (acknowledgement?.Type != FrameType.ConfigAck)
                     {
-                        await TryWriteErrorAsync(writer, ErrorCode.ConfigurationMismatch, handshakeTimeout.Token);
+                        await RecordRejectionAsync(register.ClientId, "configuration_mismatch", ErrorCode.ConfigurationMismatch, ControlRejectionReason.ConfigurationMismatch);
+                        await TryWriteErrorAsync(writer, ErrorCode.ConfigurationMismatch, handshakeTimeout.Token, ControlRejectionReason.ConfigurationMismatch);
                         return;
                     }
 
                     var ack = JsonProtocolSerializer.Deserialize<ConfigAckMessage>(acknowledgement.Payload.Span);
-                    if (ack.SessionId != session.SessionId || !CryptographicOperations.FixedTimeEquals(Convert.FromHexString(ack.ConfigVersion), Convert.FromHexString(configVersion)))
+                    if (ack.SessionId != session.SessionId || ack.ConfigVersion is null || ack.ConfigVersion.Length != 64 || !ack.ConfigVersion.All(Uri.IsHexDigit) ||
+                        !CryptographicOperations.FixedTimeEquals(Convert.FromHexString(ack.ConfigVersion), Convert.FromHexString(configVersion)))
                     {
-                        await TryWriteErrorAsync(writer, ErrorCode.ConfigurationMismatch, handshakeTimeout.Token);
+                        await RecordRejectionAsync(register.ClientId, "configuration_mismatch", ErrorCode.ConfigurationMismatch, ControlRejectionReason.ConfigurationMismatch);
+                        await TryWriteErrorAsync(writer, ErrorCode.ConfigurationMismatch, handshakeTimeout.Token, ControlRejectionReason.ConfigurationMismatch);
                         return;
                     }
 
                     try { clientConfiguration = await clientEditor.BindIdentityAsync(clientConfiguration, register.E2eCertificateSha256, serverStoppingToken); }
-                    catch (ClientUpdateException exception)
+                    catch (ClientUpdateException)
                     {
-                        await TryWriteErrorAsync(writer, ErrorCode.AuthFailed, serverStoppingToken);
-                        logger.LogWarning("E2E certificate registration rejected for client {ClientId}: {Reason}", register.ClientId, exception.Message);
+                        await RecordRejectionAsync(register.ClientId, "client_configuration_changed", ErrorCode.AuthFailed, ControlRejectionReason.ClientConfigurationChanged);
+                        await TryWriteErrorAsync(writer, ErrorCode.AuthFailed, serverStoppingToken, ControlRejectionReason.ClientConfigurationChanged);
                         return;
                     }
                     session.SetConfigVersion(configVersion);
@@ -195,9 +211,11 @@ public sealed class TunnelAcceptorService(
             }
         }
 
-        async Task RecordRejectionAsync(string? untrustedClientId, string reason)
+        async Task RecordRejectionAsync(string? untrustedClientId, string reason, ErrorCode code, ControlRejectionReason rejectionReason)
         {
             var safeClientId = new string((untrustedClientId ?? string.Empty).Where(character => !char.IsControl(character)).Take(128).ToArray());
+            logger.LogWarning("Agent control session rejected for {ClientId} from {RemoteIp}: {ErrorCode}; {RejectionReason}. {Description}",
+                safeClientId, (client.Client.RemoteEndPoint as IPEndPoint)?.Address.ToString(), code, rejectionReason, rejectionReason.Describe());
             try { await audit.RecordAsync(new AuditEvent("agent_session_rejected", "denied")
                 { ClientId = safeClientId, RemoteIp = (client.Client.RemoteEndPoint as IPEndPoint)?.Address.ToString(), ReasonCode = reason }, CancellationToken.None); }
             catch (Exception exception) { logger.LogError(exception, "Could not persist Agent authentication rejection audit."); }
@@ -309,9 +327,9 @@ public sealed class TunnelAcceptorService(
         }
     }
 
-    private static async Task TryWriteErrorAsync(FrameWriter writer, ErrorCode code, CancellationToken cancellationToken)
+    private static async Task TryWriteErrorAsync(FrameWriter writer, ErrorCode code, CancellationToken cancellationToken, ControlRejectionReason? reason = null)
     {
-        try { await writer.WriteAsync(new Frame(FrameType.Error, JsonProtocolSerializer.Serialize(new ErrorMessage(code))), cancellationToken); }
+        try { await writer.WriteAsync(new Frame(FrameType.Error, JsonProtocolSerializer.Serialize(new ErrorMessage(code, reason))), cancellationToken); }
         catch (IOException) { }
     }
 

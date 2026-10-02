@@ -7,15 +7,86 @@ using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text.Json;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Logging;
 using RelayLink.Agent;
 using RelayLink.Protocol;
 using RelayLink.Server.Configuration;
 using RelayLink.Transport;
+using Serilog;
 
 namespace RelayLink.IntegrationTests;
 
 public sealed class MultiServerAgentTests
 {
+    [Fact]
+    public async Task Local_configuration_save_failure_uses_shared_error_file_without_credentials()
+    {
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        var token = deadline.Token;
+        var directory = Directory.CreateTempSubdirectory("relaylink-save-log-");
+        try
+        {
+            var configPath = Path.Combine(directory.FullName, "agent.json");
+            var profile = new AgentServerProfile
+            {
+                ProfileId = "east", ClientId = "test-agent", Enabled = false,
+                ServerHost = "127.0.0.1", ServerPort = 7443, DataPort = 7444,
+                Secret = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)),
+                Reconnect = new ReconnectConfiguration(1, 2, 3)
+            };
+            var config = new AgentProcessConfiguration { DashboardPort = FreePort(), Servers = [profile] };
+            var original = JsonSerializer.Serialize(config, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
+            await File.WriteAllTextAsync(configPath, original, token);
+            using var sink = AgentFileLogging.Create(configPath);
+            using var factory = LoggerFactory.Create(builder => builder.AddSerilog(sink, dispose: false));
+            var runtime = new AgentProcessRuntime(config, new AgentConfigurationPath(configPath), factory)
+            {
+                BeforeConfigurationCommit = () => throw new UnauthorizedAccessException("test-save-denied")
+            };
+            using var dashboard = new AgentLocalDashboard(config, runtime, loggerFactory: factory);
+            try
+            {
+                await runtime.StartAsync(token);
+                await dashboard.StartAsync(token);
+                using var http = new HttpClient(new HttpClientHandler { UseCookies = true })
+                { BaseAddress = new Uri($"http://127.0.0.1:{config.DashboardPort}") };
+                JsonElement session;
+                while (true)
+                {
+                    try { session = await http.GetFromJsonAsync<JsonElement>("/api/v2/admin/session", token); break; }
+                    catch (HttpRequestException) { await Task.Delay(50, token); }
+                }
+                using var response = await WriteAsync(http, HttpMethod.Put, "/api/v2/admin/servers/east/enabled",
+                    http.BaseAddress.GetLeftPart(UriPartial.Authority), session.GetProperty("csrfToken").GetString()!,
+                    new { version = session.GetProperty("version").GetString(), enabled = true }, token);
+                Assert.Equal(HttpStatusCode.InternalServerError, response.StatusCode);
+                var body = await response.Content.ReadAsStringAsync(token);
+                Assert.Contains("Unable to save Agent configuration.", body);
+                Assert.DoesNotContain("test-save-denied", body);
+                Assert.Equal(original, await File.ReadAllTextAsync(configPath, token));
+                Assert.False(Assert.Single(runtime.Snapshot).Enabled);
+            }
+            finally
+            {
+                await dashboard.StopAsync(CancellationToken.None);
+                await runtime.StopAsync(CancellationToken.None);
+            }
+            static string ReadActiveLog(string path)
+            {
+                using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                using var reader = new StreamReader(stream);
+                return reader.ReadToEnd();
+            }
+            var logs = string.Concat(Directory.GetFiles(Path.Combine(directory.FullName, "logs"), "*.jsonl").Select(ReadActiveLog));
+            var errors = string.Concat(Directory.GetFiles(Path.Combine(directory.FullName, "logs"), "error-*.jsonl").Select(ReadActiveLog));
+            Assert.Contains("test-save-denied", errors);
+            Assert.Contains("east", errors);
+            Assert.Contains("UnauthorizedAccessException", errors);
+            Assert.DoesNotContain(profile.Secret, logs);
+        }
+        finally { directory.Delete(recursive: true); }
+    }
+
     private static readonly object PortGate = new();
     private static readonly HashSet<int> AssignedPorts = [];
 

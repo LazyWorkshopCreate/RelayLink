@@ -14,6 +14,8 @@ RelayLink 为 macOS 提供两个自包含 Agent 包。Intel Mac 使用 `RelayLin
 - 配置放在 `/Library/Application Support/RelayLink/Agent`，各服务端的身份、端口状态和诊断日志放在其 `state/<profileId>/` 中；所有者为 `_relaylink-agent:_relaylink-agent`，配置目录为 `0700`，配置为 `0600`。
 - 标准输出目录 `/Library/Logs/RelayLink` 由 root 创建，所有者为 `_relaylink-agent:_relaylink-agent`，权限为 `0750`。
 
+Agent 运行日志写入配置目录下的 `logs/`：`agent-*.jsonl` 保留 14 天，`error-*.jsonl` 永久保留，均按天或 10 MiB 轮转；标准错误仍用于启动脚本、转换器和日志写入失败的诊断。日志策略详见[安装指南](../../docs/operations/installation-and-usage.md#9-日志与故障定位)。
+
 从管理页面下载该客户端的新格式 Agent JSON，保存为 `/Library/Application Support/RelayLink/Agent/agent.json`。配置包含客户端密钥，不得提交到仓库、复制到程序目录或授予其他用户读取权限。确保程序目录中的 `RelayLink.Agent`、`RelayLink.Agent.ConfigMigrator` 与 `start-relaylink-agent.sh` 可执行。安装服务前先以前述服务账号运行转换器和配置检查：
 
 ```sh
@@ -39,7 +41,7 @@ sudo launchctl kickstart -k system/com.relaylink.agent
 
 ```sh
 sudo launchctl print system/com.relaylink.agent
-log show --predicate 'process == "RelayLink.Agent"' --last 30m
+tail -n 100 '/Library/Application Support/RelayLink/Agent/logs/'agent-*.jsonl
 tail -n 100 /Library/Logs/RelayLink/agent.stderr.log
 ```
 

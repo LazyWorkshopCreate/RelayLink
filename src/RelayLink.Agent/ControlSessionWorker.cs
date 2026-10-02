@@ -42,7 +42,7 @@ public sealed class ControlSessionWorker(AgentConfiguration configuration, Agent
             catch (AgentPermanentException exception)
             {
                 permanentFailure = true;
-                logger.LogWarning(exception, "Agent control session rejected; retrying slowly.");
+                logger.LogWarning(exception, "Agent control session rejected; retrying slowly. ErrorCode: {ErrorCode}; reason: {RejectionReason}.", exception.ErrorCode, exception.RejectionReason);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -71,13 +71,13 @@ public sealed class ControlSessionWorker(AgentConfiguration configuration, Agent
         var writer = new FrameWriter(tls);
         await writer.WriteAsync(new Frame(FrameType.Register, JsonProtocolSerializer.Serialize(new RegisterMessage(configuration.ClientId, configuration.Secret, GetType().Assembly.GetName().Version?.ToString() ?? "0.0.0", identity.Fingerprint))), stoppingToken);
         var accepted = await reader.ReadAsync(ProtocolConstants.MaxControlPayloadLength, stoppingToken);
-        if (accepted?.Type == FrameType.Error) throw new AgentPermanentException("Server rejected registration.");
+        if (accepted?.Type == FrameType.Error) throw AgentPermanentException.FromServerError(accepted, "registration");
         if (accepted?.Type != FrameType.RegisterAccepted) throw new ProtocolException("Expected RegisterAccepted.");
         var registration = JsonProtocolSerializer.Deserialize<RegisterAcceptedMessage>(accepted.Payload.Span);
         ValidateSnapshot(registration);
         await writer.WriteAsync(new Frame(FrameType.ConfigAck, JsonProtocolSerializer.Serialize(new ConfigAckMessage(registration.SessionId, registration.ConfigVersion))), stoppingToken);
         var ready = await reader.ReadAsync(ProtocolConstants.MaxControlPayloadLength, stoppingToken);
-        if (ready?.Type == FrameType.Error) throw new AgentPermanentException("Server rejected configuration acknowledgement.");
+        if (ready?.Type == FrameType.Error) throw AgentPermanentException.FromServerError(ready, "configuration acknowledgement");
         if (ready?.Type != FrameType.Ready || JsonProtocolSerializer.Deserialize<ReadyMessage>(ready.Payload.Span).SessionId != registration.SessionId) throw new ProtocolException("Expected Ready for the current session.");
 
         using var sessionScope = logger.BeginScope(new Dictionary<string, object?>
@@ -163,7 +163,7 @@ public sealed class ControlSessionWorker(AgentConfiguration configuration, Agent
                     continue;
                 }
 
-                if (frame.Type == FrameType.Error) throw new AgentPermanentException("Server closed control session with error.");
+                if (frame.Type == FrameType.Error) throw AgentPermanentException.FromServerError(frame, "control session");
                 throw new ProtocolException($"Unexpected control frame: {frame.Type}.");
             }
         }
@@ -419,4 +419,19 @@ internal sealed class SessionConfiguration(string version, ClientConfigSnapshot 
 
 internal sealed record SessionConfigurationState(string Version, ClientConfigSnapshot Config);
 
-public sealed class AgentPermanentException(string message) : Exception(message);
+public sealed class AgentPermanentException(string message, ErrorCode? errorCode = null, ControlRejectionReason? rejectionReason = null) : Exception(message)
+{
+    public ErrorCode? ErrorCode { get; } = errorCode;
+    public ControlRejectionReason? RejectionReason { get; } = rejectionReason;
+
+    internal static AgentPermanentException FromServerError(Frame frame, string stage)
+    {
+        ErrorMessage error;
+        try { error = JsonProtocolSerializer.Deserialize<ErrorMessage>(frame.Payload.Span); }
+        catch (ProtocolException) { return new AgentPermanentException($"Server rejected {stage} with invalid error details.", Protocol.ErrorCode.ProtocolError); }
+        var code = Enum.IsDefined(error.Code) ? error.Code : Protocol.ErrorCode.ProtocolError;
+        var reason = error.Reason is { } value && Enum.IsDefined(value) ? error.Reason : null;
+        var description = reason?.Describe() ?? "Server did not provide a recognized rejection reason; check the server rejection audit.";
+        return new AgentPermanentException($"Server rejected {stage}: {code}; {reason?.ToString() ?? "unspecified"}. {description}", code, reason);
+    }
+}

@@ -11,6 +11,7 @@
     <None Remove="artifacts/**" />
     <ProjectReference Include="../RelayLink.Protocol/RelayLink.Protocol.csproj" />
     <ProjectReference Include="../RelayLink.Transport/RelayLink.Transport.csproj" />
+    <ProjectReference Include="../RelayLink.Logging/RelayLink.Logging.csproj" />
     <PackageReference Include="Microsoft.Extensions.Hosting.Systemd" Version="10.0.2" />
     <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.2" />
   </ItemGroup>

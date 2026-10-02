@@ -35,6 +35,7 @@ public sealed class AgentLocalDashboard : BackgroundService
     private readonly Func<IReadOnlyList<AgentServerRuntimeSnapshot>> snapshots;
     private readonly AgentProcessRuntime? runtime;
     private readonly AgentLocalWriteSession writeSession;
+    private readonly ILoggerFactory? loggerFactory;
     private static readonly JsonSerializerOptions AdminJsonOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -50,18 +51,21 @@ public sealed class AgentLocalDashboard : BackgroundService
         snapshots = () => [new AgentServerRuntimeSnapshot(configuration.ProfileId, configuration.ServerHost, configuration.UseTls, true, status.Snapshot)];
     }
 
-    public AgentLocalDashboard(AgentProcessConfiguration configuration, AgentProcessRuntime runtime, AgentLocalWriteSession? writeSession = null)
+    public AgentLocalDashboard(AgentProcessConfiguration configuration, AgentProcessRuntime runtime, AgentLocalWriteSession? writeSession = null, ILoggerFactory? loggerFactory = null)
     {
         dashboardPort = configuration.DashboardPort;
         snapshots = () => runtime.Snapshot;
         this.runtime = runtime;
         this.writeSession = writeSession ?? new AgentLocalWriteSession();
+        this.loggerFactory = loggerFactory;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         if (dashboardPort == 0) return;
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions { Args = [], ContentRootPath = AppContext.BaseDirectory });
+        builder.Logging.ClearProviders();
+        if (loggerFactory is not null) builder.Services.AddSingleton(loggerFactory);
         builder.WebHost.ConfigureKestrel(kestrel =>
         {
             kestrel.Listen(IPAddress.Loopback, dashboardPort);
@@ -157,7 +161,7 @@ public sealed class AgentLocalDashboard : BackgroundService
                 }
                 catch (AgentProfileMutationException exception) { return MutationError(exception); }
                 catch (AgentConfigurationException) { return Results.BadRequest(new { message = "Invalid server profile or process limits." }); }
-                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { return Results.Problem("Unable to save Agent configuration.", statusCode: 500); }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { return ConfigurationSaveError(app.Logger, exception, request.Server.ProfileId); }
             });
             app.MapDelete("/api/v2/admin/servers/{profileId}", async (string profileId, HttpContext context) =>
             {
@@ -173,7 +177,7 @@ public sealed class AgentLocalDashboard : BackgroundService
                     return Results.Ok(new { version });
                 }
                 catch (AgentProfileMutationException exception) { return MutationError(exception); }
-                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { return Results.Problem("Unable to save Agent configuration.", statusCode: 500); }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { return ConfigurationSaveError(app.Logger, exception, profileId); }
             });
             app.MapPut("/api/v2/admin/servers/{profileId}", async (string profileId, HttpContext context) =>
             {
@@ -190,7 +194,7 @@ public sealed class AgentLocalDashboard : BackgroundService
                 }
                 catch (AgentProfileMutationException exception) { return MutationError(exception); }
                 catch (AgentConfigurationException) { return Results.BadRequest(new { message = "Invalid server profile or process limits." }); }
-                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { return Results.Problem("Unable to save Agent configuration.", statusCode: 500); }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { return ConfigurationSaveError(app.Logger, exception, profileId); }
             });
             app.MapPut("/api/v2/admin/servers/{profileId}/enabled", async (string profileId, HttpContext context) =>
             {
@@ -206,13 +210,19 @@ public sealed class AgentLocalDashboard : BackgroundService
                     return Results.Ok(new { version, profileId, enabled = request.Enabled.Value });
                 }
                 catch (AgentProfileMutationException exception) { return MutationError(exception); }
-                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { return Results.Problem("Unable to save Agent configuration.", statusCode: 500); }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { return ConfigurationSaveError(app.Logger, exception, profileId); }
             });
         }
         await app.RunAsync(stoppingToken);
     }
 
     private AgentWriteSession? Session(HttpContext context) => writeSession.Get(context.Request.Cookies[AdminCookie]);
+
+    private static IResult ConfigurationSaveError(ILogger logger, Exception exception, string profileId)
+    {
+        logger.LogError(exception, "Unable to save Agent configuration for profile {profileId}.", profileId);
+        return Results.Problem("Unable to save Agent configuration.", statusCode: 500);
+    }
 
     private IResult? RequireWriteSession(HttpContext context)
     {

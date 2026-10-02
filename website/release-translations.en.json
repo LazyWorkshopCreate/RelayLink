@@ -1,4 +1,48 @@
 {
+  "v0.1.0-rc.8": {
+    "title": "RelayLink v0.1.0-rc.8",
+    "intro": "A release candidate focused on file logging, connection rejection diagnostics, and Windows Agent configuration saving.",
+    "sections": [
+      {
+        "title": "Highlights",
+        "items": [
+          "Server and Agent share structured JSONL file logging through Serilog. Agent logging no longer depends on a Windows Event Log source.",
+          "Information and Warning logs are retained for 14 days. All files roll daily or at 10 MiB; separate Error and Critical logs are never automatically deleted by age or file count.",
+          "Control rejection messages include reasons such as missing or disabled clients, invalid secrets, identity mismatch, and duplicate sessions. Agent logs include the rejection code, reason, and connection stage without secrets, private keys, or application payloads.",
+          "Server supports --log-directory. Docker and systemd deployments use /var/lib/relaylink/logs, with Docker logs persisted in the existing data volume.",
+          "Windows installation and updates repair LocalService write permissions on agent.json, fixing Unable to save Agent configuration during local JSON imports.",
+          "Adds logging requirements, technical design, deployment guidance, and bilingual website explanations."
+        ]
+      },
+      {
+        "title": "Upgrade and compatibility",
+        "items": [
+          "Use the preserve-state update path for installed Windows Agents. The installer also repairs old configuration permissions. Agent logs are stored in C:\\ProgramData\\RelayLink\\Agent\\logs.",
+          "The control protocol remains v3 with an optional rejection reason field. Upgrade both Server and Agent for complete reasons; older versions remain compatible but may only show a generic error code.",
+          "Connection rejection is a Warning and follows the 14-day retention policy. Permanent retention applies to Error and Critical only. Business diagnostic traces and SQLite audit retain their existing policies.",
+          "Read routine runtime events from log files. Container stderr and systemd journal mainly cover startup and logging failures. Operators should monitor capacity and archive permanently retained error files."
+        ]
+      },
+      {
+        "title": "Verification and limitations",
+        "items": [
+          "The local .NET solution build, 82 unit tests, and 30 integration tests passed. One peer TLS test was skipped by local defaults; the release pipeline enables it.",
+          "Coverage includes log rolling and retention, rejection reasons, duplicate sessions, configuration acknowledgement rejection, and sensitive-field checks. Server bootstrap errors and configuration-check mode were also checked locally.",
+          "Docker Compose configuration parsing passed. A new container image run and target-environment installation validation remain outstanding. Windows installers are unsigned; macOS packages are unsigned and not notarized."
+        ]
+      },
+      {
+        "title": "Release assets",
+        "items": [
+          "Self-contained Linux x64 and Windows x64 Server archives",
+          "Self-contained Linux x64 Agent archive",
+          "Self-contained and framework-dependent Windows x64 Agent archives and installers",
+          "Self-contained macOS Intel and Apple Silicon Agent archives",
+          "SHA256SUMS checksum manifest"
+        ]
+      }
+    ]
+  },
   "v0.1.0-rc.7": {
     "title": "RelayLink v0.1.0-rc.7",
     "intro": "A release candidate focused on multi-server Agent connections, local management, and cross-platform delivery.",

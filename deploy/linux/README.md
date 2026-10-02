@@ -6,6 +6,8 @@
 
 部署前执行：
 
+先用 `sudo install -d -o relaylink -g relaylink -m 0700 /var/lib/relaylink/logs` 创建运行日志目录。systemd 模板指定此目录；普通文件 `server-*.jsonl` 保留 14 天，错误文件 `server-error-*.jsonl` 永久保留，均按天或 10 MiB 轮转。`journalctl -u relaylink-server` 保留启动与标准错误诊断。旧部署须更新 systemd 的 `ExecStart` 日志目录参数并执行 `daemon-reload`；配置预检不创建日志文件。
+
 ```bash
 /opt/relaylink/server/RelayLink.Server --config /etc/relaylink/server.json --check-config
 sudo install -m 0644 deploy/linux/relaylink-server.service /etc/systemd/system/relaylink-server.service
@@ -41,7 +43,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now relaylink-agent
 ```
 
-通过 `systemctl status relaylink-agent` 和 `journalctl -u relaylink-agent` 检查进程；本机状态页默认位于 `http://127.0.0.1:18081/`。systemd 的 `ExecStartPre` 每次启动先运行转换器，新格式只作校验；转换失败时 Agent 不会启动。升级时只替换 `/opt/relaylink/agent` 中的程序文件并重启服务，不要覆盖 `/var/lib/relaylink-agent` 中的配置和身份状态。状态目录不放在 `/var/lib/relaylink/` 下，避免被 Server 服务账号目录的遍历权限阻断。
+通过 `systemctl status relaylink-agent` 检查进程，运行日志位于 `/var/lib/relaylink-agent/logs/`：`agent-*.jsonl` 保留 14 天，`error-*.jsonl` 永久保留，均按天或 10 MiB 轮转。`journalctl -u relaylink-agent` 可查看启动脚本、转换器和标准错误。日志策略详见[安装指南](../../docs/operations/installation-and-usage.md#9-日志与故障定位)。本机状态页默认位于 `http://127.0.0.1:18081/`。systemd 的 `ExecStartPre` 每次启动先运行转换器，新格式只作校验；转换失败时 Agent 不会启动。升级时只替换 `/opt/relaylink/agent` 中的程序文件并重启服务，不要覆盖 `/var/lib/relaylink-agent` 中的配置和身份状态。状态目录不放在 `/var/lib/relaylink/` 下，避免被 Server 服务账号目录的遍历权限阻断。
 
 ## 通过互访通道访问服务端管理页
 

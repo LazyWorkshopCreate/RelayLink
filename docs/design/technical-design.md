@@ -2,8 +2,8 @@
 
 文档 ID：DES-001\
 状态：Draft（待评审）\
-版本：v2.17.0 设计评审稿\
-更新日期：2026-09-29\
+版本：v2.18.0 设计评审稿\
+更新日期：2026-09-30\
 调研日期：2026-09-15\
 配套文档：[需求文档索引](../requirements/README.md)
 
@@ -71,6 +71,7 @@ flowchart LR
 RelayLink.sln
   src/RelayLink.Protocol/         帧编解码、DTO、错误码、协议版本
   src/RelayLink.Transport/        TLS、帧读写、双向转发、超时和计数
+  src/RelayLink.Logging/          Serilog 文件日志、级别分流与保留策略
   src/RelayLink.Server/           ASP.NET Core Host、后台监听与仪表盘
   src/RelayLink.Agent/            Generic Host、Windows Service/systemd/launchd、目标连接
   tests/RelayLink.UnitTests/      状态机、配置、令牌及帧边界
@@ -249,12 +250,14 @@ Agent 主程序现在仅接受包含 `servers[]` 的新格式；配置示例见[
 | 11 | BindAccepted | Server→Agent；connectionId |
 | 12 | TargetReady | Agent→Server，控制连接；connectionId、targetConnectDurationMs |
 | 13 | Start | Server→Agent，控制连接；connectionId |
-| 14 | Error | 任一端→对端；code，不含异常堆栈或秘密 |
+| 14 | Error | 任一端→对端；code、可选的控制拒绝原因 reason，不含异常堆栈或秘密 |
 | 32 | Data | 仅互访数据中继；按通道模式承载内层 TLS 记录或明文业务块 |
 | 33 | Fin | 仅互访数据中继；该发送方向结束 |
 | 34 | Reset | 仅互访数据中继；异常终止 |
 
 除 Data/Fin 外使用 UTF-8 JSON。sessionId、connectionId 使用随机 UUID，clientId 和 channelId 使用配置中的稳定标识；令牌使用 32 字节随机数的 Base64。所有注册、确认、绑定和启动消息单次出现，重复消息不得重复建立连接或重复计数。控制入口仅允许 Register 及后续控制消息；数据入口仅允许 BindData 或 PeerBindData 首帧。普通数据连接只在绑定时使用帧；`BindAccepted` 后静待控制连接上的 `Start`，其后任何字节都视为原始业务数据。
+
+控制拒绝在 Error 帧的既有 `code` 之外增加可选数值 `reason`，协议仍为 v3；既有错误码不重编号。固定原因表、Agent 安全回退、两端日志及不能返回错误帧的边界以[日志与诊断技术设计](logging-and-diagnostics.md#4-控制拒绝协议与诊断)为准。
 
 ### 7.3 控制会话流程
 
@@ -540,7 +543,7 @@ LimitNOFILE=16384
 WantedBy=multi-user.target
 ```
 
-Docker Compose 方案见 [deploy/docker/README.md](../../deploy/docker/README.md)。由于普通通道端口由运行配置动态创建，Linux 容器使用 host 网络，不维护固定端口映射；配置、客户端文件和 SQLite 数据通过宿主目录持久化，容器根文件系统只读，日志由 Docker 轮换。Linux 原生部署对应 systemd 模板见 [deploy/linux/relaylink-server.service](../../deploy/linux/relaylink-server.service)，步骤见 [deploy/linux/README.md](../../deploy/linux/README.md)。Windows 发布及 Service 安装见 [deploy/windows/README.md](../../deploy/windows/README.md) 和 [deploy/windows/install-server-service.ps1](../../deploy/windows/install-server-service.ps1)。Windows 服务账号需要对程序、配置、客户端目录及证书私钥有最小读取权限，并能够绑定配置端口。服务端重启依旧不提供无损迁移。证书续期在外部完成后安排重启加载；如使用 ACME DNS 验证，无须为签发额外开放 HTTP 入站端口。
+Docker Compose 方案见 [deploy/docker/README.md](../../deploy/docker/README.md)。由于普通通道端口由运行配置动态创建，Linux 容器使用 host 网络，不维护固定端口映射；配置、客户端文件和 SQLite 数据通过宿主目录持久化，容器根文件系统只读，运行文件日志写入数据卷，由程序按级别轮转和保留；Docker 另行轮换标准错误。Linux 原生部署对应 systemd 模板见 [deploy/linux/relaylink-server.service](../../deploy/linux/relaylink-server.service)，步骤见 [deploy/linux/README.md](../../deploy/linux/README.md)。Windows 发布及 Service 安装见 [deploy/windows/README.md](../../deploy/windows/README.md) 和 [deploy/windows/install-server-service.ps1](../../deploy/windows/install-server-service.ps1)。Windows 服务账号需要对程序、配置、客户端目录及证书私钥有最小读取权限，并能够绑定配置端口。服务端重启依旧不提供无损迁移。证书续期在外部完成后安排重启加载；如使用 ACME DNS 验证，无须为签发额外开放 HTTP 入站端口。
 
 ### 13.2 Windows Agent
 
@@ -568,7 +571,7 @@ Docker Compose 方案见 [deploy/docker/README.md](../../deploy/docker/README.md
 6. 从仪表盘更新通道时，确认保存结果显示监听更新和配置下发；直接修改配置文件或密钥时仍安排维护窗口重启，并保留上一版文件用于回滚。
 7. 密钥轮换需同步更新 Agent 和服务端并重启相应进程；首期不支持双密钥重叠窗口，维护期间存在短暂中断。
 
-管理密码使用 `scripts/new-admin-password-hash.ps1` 生成 PBKDF2-SHA256 哈希后填入配置；不得提交明文密码或真实哈希。管理登录依赖内网访问控制，生产环境应通过 HTTPS 或受信任的内网 TLS 终结保护登录请求。结构化日志字段：timestamp、level、eventId、clientId、channelId、sessionId、connectionId、durationMs、errorCode。记录连接建立和关闭摘要，不逐 DATA 帧打日志。日志轮转和保留由部署环境统一设置。
+管理密码使用 `scripts/new-admin-password-hash.ps1` 生成 PBKDF2-SHA256 哈希后填入配置；不得提交明文密码或真实哈希。管理登录依赖内网访问控制，生产环境应通过 HTTPS 或受信任的内网 TLS 终结保护登录请求。结构化日志字段：timestamp、level、eventId、clientId、channelId、sessionId、connectionId、durationMs、errorCode。记录连接建立和关闭摘要，不逐 DATA 帧打日志。Server 与 Agent 共用 `RelayLink.Logging` 的 Serilog 文件策略：普通日志保留 14 天，Error/Critical 永久保留，两类均按天和 10 MiB 轮转。Server 默认写入配置目录的 `logs/`，可通过 `--log-directory` 指定；Docker/systemd 模板使用 `/var/lib/relaylink/logs/`，日志目录须受服务账号权限保护。运行日志不替代 SQLite 审计，详细路径与拒绝诊断见[安装指南](../operations/installation-and-usage.md#9-日志与故障定位)。
 
 ## 14. 测试与实施顺序
 

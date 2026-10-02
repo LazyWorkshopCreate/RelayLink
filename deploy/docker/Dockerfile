@@ -13,6 +13,7 @@ WORKDIR /src
 COPY NuGet.Config Directory.Build.props ./
 COPY src/RelayLink.Protocol/RelayLink.Protocol.csproj src/RelayLink.Protocol/
 COPY src/RelayLink.Transport/RelayLink.Transport.csproj src/RelayLink.Transport/
+COPY src/RelayLink.Logging/RelayLink.Logging.csproj src/RelayLink.Logging/
 COPY src/RelayLink.Server/RelayLink.Server.csproj src/RelayLink.Server/
 RUN dotnet restore src/RelayLink.Server/RelayLink.Server.csproj --configfile NuGet.Config
 COPY src/ src/
@@ -31,4 +32,4 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /app/publish/ ./
 ENTRYPOINT ["dotnet", "RelayLink.Server.dll"]
-CMD ["--config", "/etc/relaylink/server.json"]
+CMD ["--config", "/etc/relaylink/server.json", "--log-directory", "/var/lib/relaylink/logs"]

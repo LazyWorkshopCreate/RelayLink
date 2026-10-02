@@ -88,6 +88,9 @@ if ($Mode -eq 'Update') {
     }
     & $resolvedExecutable --config $installedConfiguration --check-config
     if ($LASTEXITCODE -ne 0) { throw 'Installed Agent configuration validation failed after update.' }
+    # The local management page replaces agent.json when profiles change.
+    & icacls.exe $installedConfiguration /grant:r '*S-1-5-19:M' | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Could not grant Agent service configuration write access.' }
     Set-AgentServiceExecutable
     Start-Service -Name $ServiceName
     return
@@ -178,7 +181,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Could not secure the Agent data directory.' }
 [IO.File]::WriteAllBytes($installedConfiguration, $configurationBytes)
 & icacls.exe $installedConfiguration /reset | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'Could not reset the Agent configuration permissions.' }
-& icacls.exe $installedConfiguration /inheritance:r /grant:r '*S-1-5-18:F' '*S-1-5-32-544:F' '*S-1-5-19:R' | Out-Null
+& icacls.exe $installedConfiguration /inheritance:r /grant:r '*S-1-5-18:F' '*S-1-5-32-544:F' '*S-1-5-19:M' | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'Could not secure the Agent configuration.' }
 & $resolvedExecutable --config $installedConfiguration --check-config
 if ($LASTEXITCODE -ne 0) { throw 'Installed Agent configuration validation failed.' }

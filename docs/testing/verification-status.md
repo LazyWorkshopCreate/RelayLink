@@ -2,10 +2,14 @@
 
 文档 ID：TST-001\
 状态：Active\
-版本：v1.29.0\
-更新日期：2026-09-23
+版本：v1.31.1\
+更新日期：2026-10-01
 
 本文记录当前仓库可重复执行的验证证据，不替代 [需求文档](../requirements/README.md) 的验收标准，也不把未在目标环境运行的项目标记为通过。
+
+2026-09-30 增加控制注册拒绝原因与 Server 文件日志（A73/A74 的相关自动化检查）：两端通过 `RelayLink.Logging` 共用 Serilog 策略，协议 v3 的 Error 帧新增可选数值 `reason`，既有错误码数值与无扩展帧形状保持不变。Windows .NET 10 预览 SDK 下解决方案 Debug 构建通过、单元测试 82/82；覆盖 8 种固定原因的 Agent 描述、旧帧与未知/畸形原因安全回退、两组件级别分流、14 天普通日志清理、旧错误文件保留及超过 31 个大小轮转文件。新增 7 项集成测试覆盖不存在/停用/错误密钥/无效身份/已固定身份不匹配的注册拒绝、重复会话与错误配置确认，以及真实 Server 进程到 Agent 工作线程的错误码、原因和配置项归属落盘；扫描运行日志未发现测试密钥。默认集成测试最终 30 项通过、1 项完整双 Agent 互访场景按既有开关跳过。初次回归因新增夹具将未绑定指纹写为 null 而触发既有“字段尚不存在”断言，修正夹具省略 null 后复跑通过；Server 日志测试初次读取时文件匹配也包含错误日志，收紧测试文件匹配后通过。Server 真实进程冒烟验证自定义日志目录、配置错误落盘及 `--check-config` 不创建目录；Compose 配置检查与 `git diff --check` 通过。使用 `SkipAdminWebBuild=true`，未重新构建前端；未构建/运行新 Docker 镜像，未部署生产或升级安装包，也未在 Linux/macOS 服务环境验证文件权限。注册期间配置变更竞态与兼容旧二进制的跨版本运行仍需目标环境复验。
+
+2026-09-30 增加 Agent Serilog 文件日志（A72）：Windows .NET 10 预览 SDK 下 Agent Debug 构建通过，单元测试 66/66；其中 3 项日志测试覆盖 Info/Warning 与 Error/Critical 分流、`ILogger` 服务端 scope 和异常、旧普通文件清理与旧错误文件保留，以及超过 31 个大小轮转文件和重启后记录不丢失。既有多服务端集成测试 6/6；新增 HTTP 保存失败集成测试 1/1，注入 `UnauthorizedAccessException` 后页面返回通用 500，错误文件保留底层异常及 `profileId`，配置与停用状态保持原样，全部运行日志不含测试注册密钥。首次执行该新增测试时因读文件未允许共享写入而失败，修正测试读取方式后通过。真实 Agent 进程的无效配置启动冒烟验证退出码为 2 且错误落盘、无配置正文泄露，`--check-config` 不创建日志目录。上述构建与测试使用 `SkipAdminWebBuild=true`，未重新构建前端；尚未更新运行中的 Windows Service，也未在 Linux/macOS 服务环境复验。
 
 2026-09-23 在 Windows Docker Desktop Linux 引擎和独立的 `.local/compose-validation-desktop` 目录验证 Compose：`docker compose config --quiet` 通过，配置解析结果为 host 网络、只读根文件系统、配置和数据库分别绑定挂载。首次运行 `start-server-compose.ps1 -NoBuild` 生成仅含 PBKDF2-SHA256 哈希、无模板占位符的配置，容器配置预检通过并启动；容器网络内 `/health/ready` 返回 200，SQLite 文件已创建。重复运行脚本未改写配置，重启后就绪仍为 200；运行 `stop-server-compose.ps1` 后容器移除，配置和数据库保留。因此 A58、A59 的本地检查通过。Docker Desktop 的 host 网络未将管理端口映射到 Windows `127.0.0.1`，该环境不作为 Linux Docker Engine 的 A60 验收；动态普通通道转发尚未验证。构建时发现原 Dockerfile 引用不存在的 .NET 10 `bookworm-slim` 镜像标签，已改用官方 `10.0` 标签；修正后的 `docker compose build` 完整通过，生成 `relaylink-server:local`，用该镜像再次执行配置预检、启动和容器内就绪检查均通过。曾尝试新建独立的 Multipass Ubuntu 24.04 实例，但实例持续停在 Starting，随后 Multipass 命令无响应；当前账户无权重启 Multipass 服务或读取 Hyper-V 事件，因此尚未在该 Linux VM 执行 A60。
 
@@ -131,3 +135,7 @@ Agent 安装包新增桌面监控快捷方式后，使用 Windows PowerShell 5.1
 - Windows Agent 目标机能够使用 Schannel 验证服务端证书链和名称。
 - 云端内网、目标 SQL Server、固定 TCP 端口与安全组规则已经按需求配置。
 - 压测环境必须记录 CPU、内存、NIC、运行时补丁、RTT、丢包、SQL 与驱动版本；没有这些条件的数字不得作为容量结论。
+
+## 2026-10-01 发布检查修正
+
+rc.8 发布前 CI 的 macOS Intel 大流量互访用例跨越分钟边界，历史接口返回两个通道各两条采样；原断言误要求总共恰好两条。修正为按通道累加所有分钟采样，仍要求两个指定通道均达到预期密文流量并逐条校验统计隔离。首次 CI 的 Linux、Windows 和 macOS ARM 检查通过；修正后的跨平台检查结果以 GitHub Actions 为准。

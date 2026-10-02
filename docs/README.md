@@ -2,7 +2,9 @@
 
 | 文档 | ID | 状态 | 用途 |
 |---|---|---|---|
-| [需求文档索引](requirements/README.md) | REQ-001A–REQ-001J | Draft / Accepted / Done | 按日期与主题拆分的需求范围、功能与验收；实现进度见验证状态 |
+| [需求文档索引](requirements/README.md) | REQ-001A–REQ-001K | Draft / Accepted / Done | 按日期与主题拆分的需求范围、功能与验收；实现进度见验证状态 |
+| [日志与诊断需求](requirements/2026-09-30-logging-and-diagnostics.md) | REQ-001K | Accepted | 两端文件日志、拒绝原因、敏感信息边界与 A72–A74 |
+| [日志与诊断技术设计](design/logging-and-diagnostics.md) | DES-005 | Accepted | Serilog 共享库、轮转保留、错误帧兼容及诊断关联 |
 | [技术实现文档](design/technical-design.md) | DES-001 | Draft | 架构、协议、配置与部署设计 |
 | [Agent 多服务端技术设计](design/multi-server-agent.md) | DES-004 | Draft | 多服务端运行隔离、启动前转换与本机页面管理方案 |
 | [首期隧道方案](adr/0001-independent-tcp-tunnels.md) | ADR-0001 | Proposed | 记录独立数据隧道的方案取舍 |

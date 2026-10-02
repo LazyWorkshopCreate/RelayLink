@@ -1,6 +1,18 @@
 const siteLocale = document.documentElement.lang.toLowerCase().startsWith("en") ? "en" : "zh";
 
 const english = {
+    "LOGGING / 日志与诊断": "LOGGING / DIAGNOSTICS",
+    "连接失败，原因有据可查。": "Connection failures with actionable reasons.",
+    "Server 与 Agent 统一记录结构化文件日志，按客户端、连接项和会话关联事件；拒绝连接时返回并记录明确原因。": "Server and Agent write structured file logs with client, profile, and session context. Rejected connections return and log explicit reasons.",
+    "分级保留": "Retention by severity",
+    "普通日志保留 14 天；错误日志不自动删除。两类文件均按天及 10 MiB 轮转。": "Routine logs are kept for 14 days; error logs are never automatically deleted. Both roll daily and at 10 MiB.",
+    "拒绝原因": "Rejection reasons",
+    "区分客户端不存在、停用、密钥错误、身份不匹配及重复会话；两端升级后可读取完整原因。": "Distinguish missing or disabled clients, invalid secrets, identity mismatch, and duplicate sessions. Upgrade both ends for complete reasons.",
+    "本机文件": "Local files",
+    "Windows Agent 日志位于 ProgramData 的 RelayLink/Agent/logs；Server 部署支持独立持久化目录。日志不记录密钥或业务载荷。": "Windows Agent logs are in RelayLink/Agent/logs under ProgramData. Server deployments support a separate persistent directory. Logs exclude secrets and application payloads.",
+    "日志与诊断": "Logging and diagnostics",
+    "文件路径、保留策略与连接拒绝原因": "File paths, retention policies, and connection rejection reasons",
+
     "RelayLink · 让内网 TCP 服务可控地被访问": "RelayLink · Controlled access to private TCP services",
     "RelayLink 是一个基于 .NET 的开源反向 TCP 代理，让云端应用在内网无需开放公网入站端口的情况下访问 TCP 服务。": "RelayLink is an open-source reverse TCP proxy built on .NET. It lets cloud applications reach private-network TCP services without exposing inbound ports on the private network.",
     "跳到正文": "Skip to content",
