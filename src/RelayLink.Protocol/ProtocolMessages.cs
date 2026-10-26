@@ -24,8 +24,16 @@ public sealed record ErrorMessage(ErrorCode Code,
     ControlRejectionReason? Reason = null);
 public sealed record ResetMessage(ErrorCode Code);
 public sealed record PeerOpenRequestMessage(Guid RequestId, string MappingId);
-public sealed record PeerOpenGrantedMessage(Guid RequestId, Guid ConnectionId, Guid SessionId, string Token, bool EndToEndEncryptionEnabled = true, string TransportProtocol = "tcp", HttpIngressContext? HttpIngress = null);
-public sealed record PeerOpenMessage(Guid ConnectionId, Guid SessionId, string CallerClientId, string ChannelId, string Token, bool EndToEndEncryptionEnabled = true, string TransportProtocol = "tcp", HttpIngressContext? HttpIngress = null);
+public sealed record PeerOpenGrantedMessage(Guid RequestId, Guid ConnectionId, Guid SessionId, string Token, bool EndToEndEncryptionEnabled = true, string TransportProtocol = "tcp", HttpIngressContext? HttpIngress = null)
+{
+    // Sum of the server open timeout and the target channel connect timeout.
+    // 0 means an older peer omitted the field.
+    public int SetupTimeoutMilliseconds { get; init; }
+}
+public sealed record PeerOpenMessage(Guid ConnectionId, Guid SessionId, string CallerClientId, string ChannelId, string Token, bool EndToEndEncryptionEnabled = true, string TransportProtocol = "tcp", HttpIngressContext? HttpIngress = null)
+{
+    public int SetupTimeoutMilliseconds { get; init; }
+}
 public sealed record PeerBindDataMessage(Guid ConnectionId, Guid SessionId, string Token, string Role);
 public sealed record PeerBindAcceptedMessage(Guid ConnectionId);
 public sealed record PeerOpenRejectedMessage(Guid RequestId, ErrorCode ErrorCode);

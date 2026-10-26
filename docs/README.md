@@ -47,6 +47,7 @@
 | [Windows Agent 双模式发布](adr/0019-dual-windows-agent-distribution.md) | ADR-0019 | Superseded（目录布局） | 自包含与框架依赖双产物，原 `program` 子目录布局 |
 | [Windows Agent 安装根目录布局](adr/0020-flat-windows-agent-installation.md) | ADR-0020 | Accepted | 根目录程序文件清理、旧子目录迁移和 ProgramData 分离 |
 | [Agent 多服务端隔离](adr/0018-agent-multi-server-isolation.md) | ADR-0018 | Proposed | Agent 按服务端配置项隔离会话、状态并授权本机增删的拟议取舍 |
+| [Agent 本机管理令牌](adr/0027-agent-local-management-token.md) | ADR-0027 | Accepted | 本机写接口要求仅管理员可读的令牌；只读状态保持匿名，不设密码登录 |
 | [目录规划](development/repository-layout.md) | DEV-001 | Active | 文件归属及项目职责 |
 | [文档管理规则](development/documentation-policy.md) | DEV-002 | Active | 命名、状态、更新和引用规则 |
 | [GitHub Actions 流水线](development/ci.md) | DEV-003 | Active | CI 检查、构建产物和安全边界 |
@@ -54,6 +55,7 @@
 | [安装与使用指南](operations/installation-and-usage.md) | OPS-001 | Active | Docker/原生 Server 部署、Agent 安装、通道配置和排障 |
 | [UDP 转发使用指南](operations/udp-forwarding.md) | OPS-002 | Active | UDP 版本要求、普通与授权入口、网络放行、报文和排障 |
 | [验证状态](testing/verification-status.md) | TST-001 | Active | 已执行检查与未完成验收证据 |
+| [2026-10-23 代码审查](testing/code-review-2026-10-23.md) | TST-006 | Active | 静态审查发现、严重级别与修改建议；本次未修改产品代码 |
 | [本地多场景验收方案](testing/local-acceptance-plan.md) | TST-002 | Active | 隔离启动、场景判定、运行记录与安全停止 |
 | [Agent 多服务端验收记录](testing/multi-server-agent-verification.md) | TST-003 | Active | REQ-001J 的自动化测试与 Windows Sandbox 安装验收证据 |
 | [对外介绍材料](intro/README.md) | DOC-001 | Active | 演示文稿与公众号文章的源文件、插图及重建脚本 |

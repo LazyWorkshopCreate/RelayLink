@@ -16,9 +16,9 @@ public sealed class ChannelConfigurationEditor(
     private static readonly JsonSerializerOptions JsonOptions = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, WriteIndented = true };
     private readonly string configurationPath = Path.GetFullPath(serverConfigurationPath);
 
-    public async Task<ChannelConfiguration> UpdateAsync(string clientId, string channelId, ChannelUpdateRequest request, CancellationToken cancellationToken)
+    public async Task<(ChannelConfiguration Channel, AgentPushReport Push)> UpdateAsync(string clientId, string channelId, ChannelUpdateRequest request, CancellationToken cancellationToken)
     {
-        return await ChangeAsync(clientId, client =>
+        var (channel, push) = await ChangeAsync(clientId, (client, _) =>
         {
             var existing = client.Channels.SingleOrDefault(channel => channel.ChannelId == channelId) ?? throw new ChannelUpdateException("Channel was not found.");
             var updated = ToChannel(channelId, request) with
@@ -37,12 +37,13 @@ public sealed class ChannelConfigurationEditor(
             else updated = updated with { EndToEndEncryptionEnabled = true };
             if (updated.AuthorizedClientsOnly && string.IsNullOrWhiteSpace(updated.AccessSecret)) updated = updated with { AccessSecret = NewAccessSecret() };
             return (client with { Channels = client.Channels.Select(channel => channel.ChannelId == existing.ChannelId ? updated : channel).ToArray() }, updated);
-        }, cancellationToken) ?? throw new ChannelUpdateException("Channel update did not produce a channel.");
+        }, cancellationToken);
+        return (channel ?? throw new ChannelUpdateException("Channel update did not produce a channel."), push);
     }
 
-    public async Task<ChannelConfiguration> CreateAsync(string clientId, ChannelCreateRequest request, CancellationToken cancellationToken)
+    public async Task<(ChannelConfiguration Channel, AgentPushReport Push)> CreateAsync(string clientId, ChannelCreateRequest request, CancellationToken cancellationToken)
     {
-        return await ChangeAsync(clientId, client =>
+        var (channel, push) = await ChangeAsync(clientId, (client, _) =>
         {
             if (client.Channels.Any(channel => channel.ChannelId == request.ChannelId)) throw new ChannelUpdateException("Channel ID already exists.");
             var created = new ChannelConfiguration(request.ChannelId, request.DisplayName, request.Enabled, request.ListenAddress, request.ListenPort, request.TargetHost, request.TargetPort, request.MaxConnections, request.TargetConnectTimeoutSeconds)
@@ -56,40 +57,50 @@ public sealed class ChannelConfigurationEditor(
                 Tags = NormalizeTags(request.Tags)
             };
             return (client with { Channels = client.Channels.Append(created).ToArray() }, created);
-        }, cancellationToken) ?? throw new ChannelUpdateException("Channel creation did not produce a channel.");
+        }, cancellationToken);
+        return (channel ?? throw new ChannelUpdateException("Channel creation did not produce a channel."), push);
     }
 
-    public Task DeleteAsync(string clientId, string channelId, CancellationToken cancellationToken) =>
-        ChangeAsync(clientId, client =>
+    public async Task<AgentPushReport> DeleteAsync(string clientId, string channelId, CancellationToken cancellationToken)
+    {
+        var (_, push) = await ChangeAsync(clientId, (client, _) =>
         {
             if (!client.Channels.Any(channel => channel.ChannelId == channelId)) throw new ChannelUpdateException("Channel was not found.");
             return (client with { Channels = client.Channels.Where(channel => channel.ChannelId != channelId).ToArray() }, (ChannelConfiguration?)null);
         }, cancellationToken);
+        return push;
+    }
 
-    public async Task<OutboundMappingConfiguration> CreateMappingAsync(string clientId, MappingCreateRequest request, CancellationToken cancellationToken) =>
-        await ChangeAsync(clientId, client =>
+    public async Task<(OutboundMappingConfiguration Mapping, AgentPushReport Push)> CreateMappingAsync(string clientId, MappingCreateRequest request, CancellationToken cancellationToken)
+    {
+        var (mapping, push) = await ChangeAsync(clientId, (client, current) =>
         {
             var mappingId = $"{request.TargetClientId}-{request.TargetChannelId}";
             if (client.OutboundMappings.Any(mapping => mapping.MappingId == mappingId)) throw new ChannelUpdateException("Generated access entry ID already exists.");
-            var mapping = ToMapping(mappingId, request, runtime.Configuration);
+            var mapping = ToMapping(mappingId, request, current);
             return (client with { OutboundMappings = client.OutboundMappings.Append(mapping).ToArray() }, mapping);
-        }, cancellationToken) ?? throw new ChannelUpdateException("Mapping creation failed.");
+        }, cancellationToken);
+        return (mapping ?? throw new ChannelUpdateException("Mapping creation failed."), push);
+    }
 
-    public Task DeleteMappingAsync(string clientId, string mappingId, CancellationToken cancellationToken) =>
-        ChangeAsync(clientId, client =>
+    public async Task<AgentPushReport> DeleteMappingAsync(string clientId, string mappingId, CancellationToken cancellationToken)
+    {
+        var (_, push) = await ChangeAsync(clientId, (client, _) =>
         {
             if (!client.OutboundMappings.Any(mapping => mapping.MappingId == mappingId)) throw new ChannelUpdateException("Mapping was not found.");
             return (client with { OutboundMappings = client.OutboundMappings.Where(mapping => mapping.MappingId != mappingId).ToArray() }, (OutboundMappingConfiguration?)null);
         }, cancellationToken);
+        return push;
+    }
 
-    private async Task<T?> ChangeAsync<T>(string clientId, Func<ClientConfiguration, (ClientConfiguration Updated, T? Result)> change, CancellationToken cancellationToken)
+    private async Task<(T? Result, AgentPushReport Push)> ChangeAsync<T>(string clientId, Func<ClientConfiguration, LoadedConfiguration, (ClientConfiguration Updated, T? Result)> change, CancellationToken cancellationToken)
     {
         await writeLock.Gate.WaitAsync(cancellationToken);
         try
         {
             var current = loader.Load(configurationPath);
             if (!current.Clients.TryGetValue(clientId, out var client)) throw new ChannelUpdateException("Client was not found.");
-            var (updatedClient, result) = change(client);
+            var (updatedClient, result) = change(client, current);
             loader.ValidateChannelUpdate(current, updatedClient);
             var serialized = JsonSerializer.Serialize(updatedClient, JsonOptions);
             var updatedConfiguration = new LoadedConfiguration(current.Server, current.Clients.ToDictionary(pair => pair.Key, pair => pair.Key == clientId ? updatedClient : pair.Value, StringComparer.Ordinal));
@@ -114,10 +125,15 @@ public sealed class ChannelConfigurationEditor(
                     pair.First.HasSameRuntimeSettings(pair.Second)) &&
                 client.Channels.Zip(updatedClient.Channels).Any(pair =>
                     !pair.First.Tags.SequenceEqual(pair.Second.Tags, StringComparer.Ordinal));
-            if (!onlyTagsChanged && sessions.TryGet(clientId, out var session) && session is not null)
+            var failures = new List<string>();
+            var attempted = false;
+            var primaryOnline = sessions.TryGet(clientId, out var session) && session is not null;
+            if (!onlyTagsChanged && primaryOnline)
             {
-                var (snapshot, version) = ConfigurationSnapshotFactory.Create(updatedClient, updatedConfiguration, session.ProtocolVersion);
-                await session.SendConfigurationUpdateAsync(snapshot, version, cancellationToken);
+                var (snapshot, version) = ConfigurationSnapshotFactory.Create(updatedClient, updatedConfiguration, session!.ProtocolVersion);
+                attempted = true;
+                var failure = await ConfigurationPush.TrySendAsync(session, snapshot, version, cancellationToken);
+                if (failure is not null) failures.Add(failure);
             }
             foreach (var dependent in updatedConfiguration.Clients.Values.Where(c => c.ClientId != clientId &&
                 c.OutboundMappings.Any(m => m.TargetClientId == clientId)))
@@ -125,10 +141,12 @@ public sealed class ChannelConfigurationEditor(
                 if (!sessions.TryGet(dependent.ClientId, out var dependentSession) || dependentSession is null) continue;
                 var before = ConfigurationSnapshotFactory.Create(dependent, current, dependentSession.ProtocolVersion);
                 var after = ConfigurationSnapshotFactory.Create(dependent, updatedConfiguration, dependentSession.ProtocolVersion);
-                if (before.Version != after.Version)
-                    await dependentSession.SendConfigurationUpdateAsync(after.Snapshot, after.Version, cancellationToken);
+                if (before.Version == after.Version) continue;
+                attempted = true;
+                var failure = await ConfigurationPush.TrySendAsync(dependentSession, after.Snapshot, after.Version, cancellationToken);
+                if (failure is not null) failures.Add(dependent.ClientId + ": " + failure);
             }
-            return result;
+            return (result, AgentPushReport.From(attempted, failures, primaryOnline && onlyTagsChanged));
         }
         catch (ConfigurationException exception) { throw new ChannelUpdateException(exception.Message); }
         finally { writeLock.Gate.Release(); }

@@ -2,12 +2,26 @@
 
 文档 ID：TST-001\
 状态：Active\
-版本：v1.34.1\
-更新日期：2026-10-12
+版本：v1.34.5\
+更新日期：2026-10-24
+
+## 2026-10-24 Windows 端口状态替换
+
+Verify windows-latest 40118110170 (private source CI run 40118110170) 中 `Disabling_referenced_client_preserves_configuration_and_revokes_peer_connections` 失败：调用方 Agent 已绑定 `to-visited`，紧接着写入第二个映射时 `AgentPortAllocator.Persist` 的 `File.Move` 抛出 `UnauthorizedAccessException`，`to-visited-b` 未监听，`mappingsReady` 保持 false。同一运行的 Ubuntu、macOS 与网站检查已通过。调用方与被访问方各自把端口状态写在自己的配置目录 `state/<profileId>/ports.json`。失败发生在同一进程内第二次原子替换刚创建的状态文件；Windows 上 `MoveFileEx(MOVEFILE_REPLACE_EXISTING)` 会在扫描器或未共享删除的读取占用该文件时返回拒绝访问或共享冲突。
+
+修复在同一次进程内端口锁中有限次重试该替换，并让集成夹具读取端口文件时允许删除共享。Linux、.NET SDK 10.0.402、Release、`SkipAdminWebBuild=true`：单元测试 217/217；`EnablePeerTlsTests=true` 的集成测试 85/85，包含原先失败的那一项。该轮未在 Windows 上复跑集成用例。
+
+同一 PR 的 Verify windows-latest 40120383806 (private source CI run 40120383806) 在单元测试失败 2 项（215 通过 / 217），集成测试未运行。`Agent_port_allocator_persists_second_mapping_while_port_state_is_open` 的 `Assert.False(bound.IsCompleted)` 得到 true。`Task.IsCompleted` 在任务失败时同样为 true：固定端口段 29100–29200 可能落在 Windows 保留的 TCP 段上，第一次绑定碰巧成功后第二次在写入状态前以 `SocketException`（WSAEACCES）结束；即便端口可用，不含 `FILE_SHARE_DELETE` 的读取会让 `MoveFileEx` 一直失败，而约 560ms 的重试预算短于用例里最长 5 秒的 `await Task.Delay` 观察。托管线程池繁忙时，观察恢复时重试已经耗尽，临时文件也已删除。这不是替换忽略了打开的句柄。用例改为先探测一段确实能监听的 loopback 端口，在测试线程上同步看到临时文件后立即放开读取，再要求第二次映射写入成功。`Failed_udp_bind_keeps_existing_binding_and_tcp_can_share_its_port` 在 `TcpListener.Start` 收到 WSAEACCES，与端口状态替换无关；UDP `bind(0)` 可能返回仅禁止 TCP 的端口。用例在交给监听器前确认该端口可以绑定 TCP。本次跟进在 Linux、.NET SDK 10.0.402、Release、`SkipAdminWebBuild=true` 复跑单元测试 217/217。随后 Verify 40122720846 (private source CI run 40122720846) 在 `8f35a7f` 上通过：Windows 单元测试 217/217、`EnablePeerTlsTests=true` 的集成测试 85/85，Ubuntu、macOS arm64、macOS x86_64 与网站检查同时通过。未创建标签或发行包。
 
 2026-10-05 网站多页重构的静态构建、全站链接和浏览器证据单独记录在[网站重构验证](website-multipage-verification.md)，对应 A80–A84；本次不执行代理后端测试或线上发布。
 
 本文记录当前仓库可重复执行的验证证据，不替代 [需求文档](../requirements/README.md) 的验收标准，也不把未在目标环境运行的项目标记为通过。
+
+## 2026-10-23 代码审查低优先级项
+
+按 Codex 对当前 main 的复审处理 CR-07、CR-08、CR-10、CR-11、CR-12、CR-13、CR-14、CR-16、CR-17、CR-18。CR-09 的半帧总期限和 CR-15 的匿名只读保持原行为。通道可用性、帧长度、配置访问错误、心跳快照、快照 clientId、监听退出、UDP 处理器隔离、映射磁盘快照、UDP 丢弃计数和互访 RequestId 均有单元测试。
+
+Linux 上 .NET SDK 10.0.402、Release、`SkipAdminWebBuild=true`：`dotnet test tests/RelayLink.UnitTests/RelayLink.UnitTests.csproj` 为 213/213。不可读配置另用真实 Server 进程的 `--check-config` 断言退出码 2。未运行集成测试、前端、网站、Docker 或安装包。
 
 ## 2026-10-12 HTTP/HTTPS 反向代理
 

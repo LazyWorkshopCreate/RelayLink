@@ -11,6 +11,7 @@ using Microsoft.Extensions.Logging;
 using RelayLink.Agent;
 using RelayLink.Protocol;
 using RelayLink.Server.Configuration;
+using RelayLink.Testing;
 using RelayLink.Transport;
 using Serilog;
 
@@ -56,9 +57,10 @@ public sealed class MultiServerAgentTests
                     try { session = await http.GetFromJsonAsync<JsonElement>("/api/v2/admin/session", token); break; }
                     catch (HttpRequestException) { await Task.Delay(50, token); }
                 }
+                var managementToken = (await File.ReadAllTextAsync(Path.Combine(directory.FullName, AgentLocalManagementToken.FileName), token)).Trim();
                 using var response = await WriteAsync(http, HttpMethod.Put, "/api/v2/admin/servers/east/enabled",
                     http.BaseAddress.GetLeftPart(UriPartial.Authority), session.GetProperty("csrfToken").GetString()!,
-                    new { version = session.GetProperty("version").GetString(), enabled = true }, token);
+                    new { version = session.GetProperty("version").GetString(), enabled = true }, token, managementToken);
                 Assert.Equal(HttpStatusCode.InternalServerError, response.StatusCode);
                 var body = await response.Content.ReadAsStringAsync(token);
                 Assert.Contains("Unable to save Agent configuration.", body);
@@ -377,9 +379,10 @@ public sealed class MultiServerAgentTests
             var csrf = session.GetProperty("csrfToken").GetString()!;
             var version = session.GetProperty("version").GetString()!;
             var origin = http.BaseAddress!.GetLeftPart(UriPartial.Authority);
+            var managementToken = (await File.ReadAllTextAsync(Path.Combine(directory.FullName, AgentLocalManagementToken.FileName), token)).Trim();
 
             using (var added = await WriteAsync(http, HttpMethod.Post, "/api/v2/admin/servers", origin, csrf,
-                new { version, server = west.Profile("west"), confirmExistingState = false }, token))
+                new { version, server = west.Profile("west"), confirmExistingState = false }, token, managementToken))
             {
                 added.EnsureSuccessStatusCode();
                 version = (await added.Content.ReadFromJsonAsync<JsonElement>(cancellationToken: token)).GetProperty("version").GetString()!;
@@ -396,7 +399,7 @@ public sealed class MultiServerAgentTests
             var identityPath = Path.Combine(directory.FullName, "state", "east", "identity.pfx");
             var identity = File.ReadAllBytes(identityPath);
             using (var disabled = await WriteAsync(http, HttpMethod.Put, "/api/v2/admin/servers/east/enabled", origin, csrf,
-                new { version, enabled = false }, token))
+                new { version, enabled = false }, token, managementToken))
             {
                 disabled.EnsureSuccessStatusCode();
                 version = (await disabled.Content.ReadFromJsonAsync<JsonElement>(cancellationToken: token)).GetProperty("version").GetString()!;
@@ -410,7 +413,7 @@ public sealed class MultiServerAgentTests
             Assert.Equal((byte)0x57, (await RoundTripAsync(west.ProxyPort, new byte[] { 4 }, token))[0]);
 
             using (var enabled = await WriteAsync(http, HttpMethod.Put, "/api/v2/admin/servers/east/enabled", origin, csrf,
-                new { version, enabled = true }, token))
+                new { version, enabled = true }, token, managementToken))
             {
                 enabled.EnsureSuccessStatusCode();
                 version = (await enabled.Content.ReadFromJsonAsync<JsonElement>(cancellationToken: token)).GetProperty("version").GetString()!;
@@ -425,7 +428,7 @@ public sealed class MultiServerAgentTests
             await eastStreamAgain.WriteAsync(new byte[] { 0x32 }, token);
             await WaitUntilAsync(() => runtime.Snapshot.Single(item => item.ProfileId == "east").ActiveConnections == 1, token);
 
-            using (var removed = await WriteAsync(http, HttpMethod.Delete, "/api/v2/admin/servers/east", origin, csrf, new { version }, token))
+            using (var removed = await WriteAsync(http, HttpMethod.Delete, "/api/v2/admin/servers/east", origin, csrf, new { version }, token, managementToken))
             {
                 removed.EnsureSuccessStatusCode();
                 version = (await removed.Content.ReadFromJsonAsync<JsonElement>(cancellationToken: token)).GetProperty("version").GetString()!;
@@ -437,7 +440,7 @@ public sealed class MultiServerAgentTests
             catch (IOException) { /* a reset also proves the removed stream ended */ }
             Assert.Equal((byte)0x57, (await RoundTripAsync(west.ProxyPort, new byte[] { 4, 5, 6 }, token))[0]);
 
-            using (var removedLast = await WriteAsync(http, HttpMethod.Delete, "/api/v2/admin/servers/west", origin, csrf, new { version }, token))
+            using (var removedLast = await WriteAsync(http, HttpMethod.Delete, "/api/v2/admin/servers/west", origin, csrf, new { version }, token, managementToken))
             {
                 removedLast.EnsureSuccessStatusCode();
                 version = (await removedLast.Content.ReadFromJsonAsync<JsonElement>(cancellationToken: token)).GetProperty("version").GetString()!;
@@ -452,7 +455,7 @@ public sealed class MultiServerAgentTests
             do { absentDataPort = FreePort(); } while (absentDataPort == absentControlPort);
             var unreachable = east.Profile("north") with { ServerPort = absentControlPort, DataPort = absentDataPort };
             using (var addedOffline = await WriteAsync(http, HttpMethod.Post, "/api/v2/admin/servers", origin, csrf,
-                new { version, server = unreachable, confirmExistingState = false }, token))
+                new { version, server = unreachable, confirmExistingState = false }, token, managementToken))
                 addedOffline.EnsureSuccessStatusCode();
             Assert.Equal("north", Assert.Single(runtime.Snapshot).ProfileId);
             Assert.False(runtime.Snapshot[0].Status.Online);
@@ -585,11 +588,12 @@ public sealed class MultiServerAgentTests
         return (process.ExitCode, await stdout, await stderr);
     }
 
-    private static Task<HttpResponseMessage> WriteAsync(HttpClient http, HttpMethod method, string path, string origin, string csrf, object body, CancellationToken token)
+    private static Task<HttpResponseMessage> WriteAsync(HttpClient http, HttpMethod method, string path, string origin, string csrf, object body, CancellationToken token, string managementToken)
     {
         var request = new HttpRequestMessage(method, path) { Content = JsonContent.Create(body) };
         request.Headers.TryAddWithoutValidation("Origin", origin);
         request.Headers.TryAddWithoutValidation("X-RelayLink-CSRF", csrf);
+        request.Headers.TryAddWithoutValidation(AgentLocalManagementToken.HeaderName, managementToken);
         return http.SendAsync(request, token);
     }
 
@@ -651,7 +655,8 @@ public sealed class MultiServerAgentTests
 
     private sealed class ServerFixture(byte marker) : IDisposable
     {
-        private readonly string directory = Path.Combine(Path.GetTempPath(), $"relaylink-multi-server-{Guid.NewGuid():N}");
+        private readonly TestDirectory storage = new("relaylink-multi-server-");
+        private string directory => storage.Path;
         private readonly TcpListener target = new(IPAddress.Loopback, 0);
         private Process? process;
         private Task? targetLoop;
@@ -778,7 +783,7 @@ public sealed class MultiServerAgentTests
             Stop();
             process?.Dispose();
             target.Stop();
-            try { Directory.Delete(directory, recursive: true); } catch (IOException) { }
+            storage.Dispose();
         }
 
         private static string PasswordHash()

@@ -78,7 +78,7 @@ public sealed class ControlSessionWorker(AgentConfiguration configuration, Agent
         if (accepted?.Type == FrameType.Error) throw AgentPermanentException.FromServerError(accepted, "registration");
         if (accepted?.Type != FrameType.RegisterAccepted) throw new ProtocolException("Expected RegisterAccepted.");
         var registration = JsonProtocolSerializer.Deserialize<RegisterAcceptedMessage>(accepted.Payload.Span);
-        ValidateSnapshot(registration);
+        ValidateSnapshot(configuration.ClientId, registration);
         halfCloseDrainTimeout = TimeSpan.FromSeconds(registration.HalfCloseDrainTimeoutSeconds < 1 ? 300 : registration.HalfCloseDrainTimeoutSeconds);
         tcpIdleTimeout = TimeSpan.FromSeconds(Math.Max(0, registration.TcpIdleTimeoutSeconds));
         await writer.WriteAsync(new Frame(FrameType.ConfigAck, JsonProtocolSerializer.Serialize(new ConfigAckMessage(registration.SessionId, registration.ConfigVersion))), stoppingToken);
@@ -145,7 +145,7 @@ public sealed class ControlSessionWorker(AgentConfiguration configuration, Agent
                 {
                     var update = JsonProtocolSerializer.Deserialize<ConfigUpdateMessage>(frame.Payload.Span);
                     if (update.SessionId != registration.SessionId) throw new ProtocolException("Configuration update did not belong to the current session.");
-                    ValidateSnapshot(update.ConfigVersion, update.Config);
+                    ValidateSnapshot(configuration.ClientId, update.ConfigVersion, update.Config);
                     activeConfiguration.Replace(update.ConfigVersion, update.Config);
                     openLimit.SetMaximum(Math.Min(update.Config.MaxConnections, configuration.MaxConnections));
                     await httpProxy.PrepareAsync(update.Config, sessionCancellation.Token);
@@ -414,11 +414,11 @@ public sealed class ControlSessionWorker(AgentConfiguration configuration, Agent
         catch (IOException) { }
     }
 
-    private static void ValidateSnapshot(RegisterAcceptedMessage registration) => ValidateSnapshot(registration.ConfigVersion, registration.Config, registration.HeartbeatIntervalSeconds, registration.HeartbeatTimeoutSeconds);
+    internal static void ValidateSnapshot(string expectedClientId, RegisterAcceptedMessage registration) => ValidateSnapshot(expectedClientId, registration.ConfigVersion, registration.Config, registration.HeartbeatIntervalSeconds, registration.HeartbeatTimeoutSeconds);
 
-    private static void ValidateSnapshot(string version, ClientConfigSnapshot config, int heartbeatIntervalSeconds = 1, int heartbeatTimeoutSeconds = 1)
+    internal static void ValidateSnapshot(string expectedClientId, string version, ClientConfigSnapshot config, int heartbeatIntervalSeconds = 1, int heartbeatTimeoutSeconds = 1)
     {
-        if (config.ClientId is null || config.Channels.Count > 100 || heartbeatIntervalSeconds < 1 || heartbeatTimeoutSeconds < heartbeatIntervalSeconds)
+        if (config.ClientId is null || !string.Equals(config.ClientId, expectedClientId, StringComparison.Ordinal) || config.Channels.Count > 100 || heartbeatIntervalSeconds < 1 || heartbeatTimeoutSeconds < heartbeatIntervalSeconds)
         {
             throw new AgentPermanentException("Server returned an invalid configuration snapshot.");
         }

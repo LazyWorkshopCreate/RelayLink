@@ -99,24 +99,36 @@ public sealed class AdminPlaneTests
     }
 
     [Fact]
-    public void Login_failures_lock_the_source_address_across_usernames()
+    public void Login_failures_lock_only_the_username_until_the_address_aggregate()
     {
         var clock = new ManualTimeProvider(DateTimeOffset.Parse("2026-10-15T00:00:00Z"));
         var guard = new AdminLoginGuard(clock);
         for (var attempt = 0; attempt < AdminLoginGuard.FailureThreshold; attempt++)
         {
-            Assert.True(guard.TryReserve("203.0.113.8", attempt == 0 ? "admin" : "other-name", out _));
-            guard.CompleteAttempt("203.0.113.8", attempt == 0 ? "admin" : "other-name", success: false);
+            Assert.True(guard.TryReserve("203.0.113.8", "admin", out _));
+            guard.CompleteAttempt("203.0.113.8", "admin", success: false);
         }
 
         Assert.True(guard.IsLocked("203.0.113.8", "admin", out var retryAfter));
         Assert.True(retryAfter > TimeSpan.Zero);
-        Assert.True(guard.IsLocked("203.0.113.8", "unused-name", out _));
+        Assert.False(guard.IsLocked("203.0.113.8", "other-name", out _));
+        Assert.True(guard.TryReserve("203.0.113.8", "other-name", out _));
+        guard.CompleteAttempt("203.0.113.8", "other-name", success: true);
         Assert.False(guard.IsLocked("203.0.113.9", "admin", out _));
-
         guard.CompleteAttempt("203.0.113.8", "admin", success: true);
         Assert.False(guard.IsLocked("203.0.113.8", "admin", out _));
-        Assert.False(guard.IsLocked("203.0.113.8", "other-name", out _));
+
+        for (var name = 0; name < AdminLoginGuard.IpFailureThreshold; name++)
+        {
+            var username = "spray-" + name;
+            Assert.True(guard.TryReserve("203.0.113.8", username, out _));
+            guard.CompleteAttempt("203.0.113.8", username, success: false);
+        }
+
+        Assert.True(guard.IsLocked("203.0.113.8", "brand-new", out _));
+        Assert.False(guard.TryReserve("203.0.113.8", "brand-new", out _));
+        Assert.Equal(1, guard.TrackedStateCount);
+        Assert.True(guard.IsLocked("203.0.113.8", "admin", out _));
     }
 
     [Fact]
@@ -191,27 +203,29 @@ public sealed class AdminPlaneTests
             if (guard.TryReserve("203.0.113.20", "admin", out var _)) Interlocked.Increment(ref reserved);
         });
         Assert.Equal(AdminLoginGuard.FailureThreshold, reserved);
-        Assert.False(guard.TryReserve("203.0.113.20", "rotated-name", out _));
+        Assert.True(guard.TryReserve("203.0.113.20", "rotated-name", out _));
+        Assert.False(guard.TryReserve("203.0.113.20", "admin", out _));
     }
 
     [Fact]
-    public void Locked_source_does_not_track_new_usernames_and_a_full_cache_keeps_locks()
+    public void Address_aggregate_does_not_track_new_usernames_and_a_full_cache_keeps_locks()
     {
         var clock = new ManualTimeProvider(DateTimeOffset.Parse("2026-10-15T00:00:00Z"));
         var guard = new AdminLoginGuard(clock);
-        for (var attempt = 0; attempt < AdminLoginGuard.FailureThreshold; attempt++)
+        for (var attempt = 0; attempt < AdminLoginGuard.IpFailureThreshold; attempt++)
         {
-            Assert.True(guard.TryReserve("203.0.113.30", "admin", out _));
-            guard.CompleteAttempt("203.0.113.30", "admin", success: false);
+            Assert.True(guard.TryReserve("203.0.113.30", "user-" + attempt, out _));
+            guard.CompleteAttempt("203.0.113.30", "user-" + attempt, success: false);
         }
 
         Assert.True(guard.IsLocked("203.0.113.30", "admin", out _));
         Assert.Equal(1, guard.TrackedStateCount);
         for (var name = 0; name < 40; name++)
         {
-            var username = "user-" + name;
+            var username = "extra-" + name;
             Assert.True(guard.IsLocked("203.0.113.30", username, out _));
-            Assert.False(guard.TryReserve("203.0.113.30", username, out _));
+            Assert.False(guard.TryReserve("203.0.113.30", username, out _, out var exhausted));
+            Assert.False(exhausted);
             guard.CompleteAttempt("203.0.113.30", username, success: false);
         }
 
@@ -219,22 +233,24 @@ public sealed class AdminPlaneTests
         Assert.False(guard.TryReserve("203.0.113.30", "brand-new-user", out _));
         Assert.True(guard.IsLocked("203.0.113.30", "brand-new-user", out _));
 
-        for (var index = 0; index < AdminLoginGuard.MaxTrackedStates; index++)
+        for (var index = 0; index < AdminLoginGuard.MaxTrackedStates - 1; index++)
         {
             var address = $"198.51.100.{index / 250}.{index % 250}";
-            if (!guard.TryReserve(address, $"name-{index}", out _)) break;
+            Assert.True(guard.TryReserve(address, $"name-{index}", out _));
             guard.CompleteAttempt(address, $"name-{index}", success: false);
         }
 
         Assert.Equal(AdminLoginGuard.MaxTrackedStates, guard.TrackedStateCount);
-        Assert.False(guard.TryReserve("192.0.2.10", "admin", out _));
+        Assert.False(guard.TryReserve("192.0.2.10", "admin", out _, out var capacityExhausted));
+        Assert.True(capacityExhausted);
         Assert.Equal(AdminLoginGuard.MaxTrackedStates, guard.TrackedStateCount);
         Assert.True(guard.IsLocked("203.0.113.30", "admin", out _));
         Assert.True(guard.IsLocked("203.0.113.30", "still-rotating", out _));
 
         clock.Advance(TimeSpan.FromMinutes(16));
         Assert.False(guard.IsLocked("203.0.113.30", "admin", out _));
-        Assert.True(guard.TryReserve("192.0.2.99", "admin", out _));
+        Assert.True(guard.TryReserve("192.0.2.99", "admin", out _, out var afterIdle));
+        Assert.False(afterIdle);
         Assert.Equal(1, guard.TrackedStateCount);
     }
 
@@ -256,22 +272,23 @@ public sealed class AdminPlaneTests
             Assert.True(guard.IsLocked("203.0.113.40", "admin", out var current));
             clock.Advance(current + TimeSpan.FromMilliseconds(1));
             Assert.False(guard.IsLocked("203.0.113.40", "admin", out _));
-            Assert.True(guard.TryReserve("203.0.113.40", "user-" + step, out _));
-            Assert.False(guard.TryReserve("203.0.113.40", "other-" + step, out _));
-            guard.CompleteAttempt("203.0.113.40", "user-" + step, success: false);
+            Assert.True(guard.TryReserve("203.0.113.40", "admin", out _));
+            Assert.False(guard.TryReserve("203.0.113.40", "admin", out _));
+            guard.CompleteAttempt("203.0.113.40", "admin", success: false);
             Assert.True(guard.IsLocked("203.0.113.40", "admin", out var next));
             reachedMaximum = next >= TimeSpan.FromMinutes(15) - TimeSpan.FromSeconds(1);
         }
 
         Assert.True(reachedMaximum);
         Assert.True(clock.GetUtcNow() - started > TimeSpan.FromMinutes(15));
-        Assert.True(guard.IsLocked("203.0.113.40", "rotated", out var maximum));
+        Assert.True(guard.IsLocked("203.0.113.40", "admin", out var maximum));
         Assert.True(maximum >= TimeSpan.FromSeconds(899));
+        Assert.False(guard.IsLocked("203.0.113.40", "someone-else", out _));
         clock.Advance(maximum + TimeSpan.FromMilliseconds(1));
-        Assert.True(guard.TryReserve("203.0.113.40", "once", out _));
-        Assert.False(guard.TryReserve("203.0.113.40", "twice", out _));
-        guard.CompleteAttempt("203.0.113.40", "once", success: false);
-        Assert.True(guard.IsLocked("203.0.113.40", "once", out var stillMaximum));
+        Assert.True(guard.TryReserve("203.0.113.40", "admin", out _));
+        Assert.False(guard.TryReserve("203.0.113.40", "admin", out _));
+        guard.CompleteAttempt("203.0.113.40", "admin", success: false);
+        Assert.True(guard.IsLocked("203.0.113.40", "admin", out var stillMaximum));
         Assert.True(stillMaximum >= TimeSpan.FromSeconds(899));
         Assert.Equal(1, guard.TrackedStateCount);
     }
@@ -301,7 +318,8 @@ public sealed class AdminPlaneTests
 
         Assert.True(guard.IsLocked(kept, "admin", out _));
         Assert.Equal(AdminLoginGuard.MaxTrackedStates, guard.TrackedStateCount);
-        Assert.False(guard.TryReserve("192.0.2.10", "new", out _));
+        Assert.False(guard.TryReserve("192.0.2.10", "new", out _, out var capacityExhausted));
+        Assert.True(capacityExhausted);
         Assert.Equal(AdminLoginGuard.MaxTrackedStates, guard.TrackedStateCount);
         Assert.True(guard.IsLocked(kept, "admin", out _));
 
@@ -326,10 +344,11 @@ public sealed class AdminPlaneTests
         var reserved = 0;
         for (var attempt = 0; attempt < 8; attempt++)
         {
-            if (guard.TryReserve("203.0.113.41", "user-" + attempt, out _)) reserved++;
+            if (guard.TryReserve("203.0.113.41", "admin", out _)) reserved++;
         }
 
         Assert.Equal(AdminLoginGuard.FailureThreshold, reserved);
+        Assert.True(guard.TryReserve("203.0.113.41", "other-admin", out _));
     }
 
     [Fact]

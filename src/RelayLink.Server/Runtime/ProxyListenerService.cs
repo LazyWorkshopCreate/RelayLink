@@ -18,13 +18,16 @@ public sealed class ProxyListenerService(ServerRuntime runtime, PendingConnectio
     private readonly SemaphoreSlim globalLimit = runtime.GlobalConnectionLimit;
     private readonly SemaphoreSlim globalPendingLimit = runtime.GlobalPendingLimit;
     private long connectionTaskSequence;
+    private int unexpectedListenerFailures;
+    private int forcedAcceptFailures;
     private CancellationToken serviceStoppingToken;
+    internal int UnexpectedListenerFailures => Volatile.Read(ref unexpectedListenerFailures);
+    internal void FailNextAccepts(int count) => Volatile.Write(ref forcedAcceptFailures, count);
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         serviceStoppingToken = stoppingToken;
         await ApplyConfigurationAsync(runtime.Configuration, stoppingToken);
-        runtime.IsReady = true;
         await Task.Delay(Timeout.InfiniteTimeSpan, stoppingToken);
     }
 
@@ -42,7 +45,9 @@ public sealed class ProxyListenerService(ServerRuntime runtime, PendingConnectio
                 foreach (var channel in client.Channels) metrics.For(client.ClientId, channel.ChannelId);
             }
             var desired = configuration.Clients.Values.Where(client => client.Enabled).SelectMany(client => client.Channels.Where(channel => channel.Enabled && !channel.AuthorizedClientsOnly).Select(channel => new ListenerBinding(client, channel))).ToDictionary(binding => binding.Key, StringComparer.Ordinal);
-            var additions = desired.Values.Where(candidate => !bindings.TryGetValue(candidate.Key, out var existing) || !existing.HasSameListener(candidate)).ToArray();
+            foreach (var existing in bindings.Values.Where(existing => existing.AcceptFailed && desired.ContainsKey(existing.Key)).ToArray())
+                existing.Stop();
+            var additions = desired.Values.Where(candidate => !bindings.TryGetValue(candidate.Key, out var existing) || !existing.HasSameListener(candidate) || existing.AcceptFailed).ToArray();
             var started = new List<ListenerBinding>();
             // A wildcard listener overlaps a loopback listener on the same port. Release only
             // listeners being replaced/removed; keep established connections alive.
@@ -61,7 +66,7 @@ public sealed class ProxyListenerService(ServerRuntime runtime, PendingConnectio
                     {
                         restored.Start();
                         bindings[binding.Key] = restored;
-                        _ = AcceptLoopAsync(restored, serviceStoppingToken);
+                        TrackAcceptLoop(restored);
                     }
                     catch (SocketException restoreException)
                     {
@@ -83,7 +88,7 @@ public sealed class ProxyListenerService(ServerRuntime runtime, PendingConnectio
             {
                 bindings.TryGetValue(binding.Key, out var replaced);
                 bindings[binding.Key] = binding;
-                _ = AcceptLoopAsync(binding, serviceStoppingToken);
+                TrackAcceptLoop(binding);
                 logger.LogInformation("Proxy listener started for {ClientId}/{ChannelId} at {Address}:{Port}.", binding.Client.ClientId, binding.Channel.ChannelId, binding.Channel.ListenAddress, binding.Channel.ListenPort);
                 if (replaced is { Stopped: false }) replaced.Stop();
             }
@@ -93,6 +98,7 @@ public sealed class ProxyListenerService(ServerRuntime runtime, PendingConnectio
                 obsolete.Stop();
                 logger.LogInformation("Proxy listener stopped for {ClientId}/{ChannelId}.", obsolete.Client.ClientId, obsolete.Channel.ChannelId);
             }
+            runtime.IsReady = desired.Keys.All(key => bindings.TryGetValue(key, out var binding) && binding.IsHealthy);
         }
         finally { configurationLock.Release(); }
     }
@@ -107,6 +113,52 @@ public sealed class ProxyListenerService(ServerRuntime runtime, PendingConnectio
              left.Equals(IPAddress.IPv6Any) || right.Equals(IPAddress.IPv6Any));
     }
 
+    private void TrackAcceptLoop(ListenerBinding binding)
+    {
+        var loop = AcceptLoopAsync(binding, serviceStoppingToken);
+        binding.AttachAcceptLoop(loop);
+        _ = ObserveAcceptLoopAsync(binding, loop);
+    }
+
+    private async Task ObserveAcceptLoopAsync(ListenerBinding binding, Task loop)
+    {
+        try
+        {
+            await loop;
+            if (serviceStoppingToken.IsCancellationRequested || binding.Stopped) return;
+            NoteAcceptLoopFailed(binding, null);
+        }
+        catch (Exception exception) when (serviceStoppingToken.IsCancellationRequested || binding.Stopped)
+        {
+            logger.LogDebug(exception, "Proxy listener for {ClientId}/{ChannelId} stopped.", binding.Client.ClientId, binding.Channel.ChannelId);
+        }
+        catch (Exception exception)
+        {
+            NoteAcceptLoopFailed(binding, exception);
+        }
+    }
+
+    private void NoteAcceptLoopFailed(ListenerBinding binding, Exception? exception)
+    {
+        binding.MarkAcceptFailed();
+        Interlocked.Increment(ref unexpectedListenerFailures);
+        logger.LogError(exception, "Proxy listener for {ClientId}/{ChannelId} stopped unexpectedly.", binding.Client.ClientId, binding.Channel.ChannelId);
+        runtime.IsReady = false;
+    }
+
+    private bool ConsumeForcedAcceptFailure()
+    {
+        while (true)
+        {
+            var current = Volatile.Read(ref forcedAcceptFailures);
+            if (current <= 0) return false;
+            if (Interlocked.CompareExchange(ref forcedAcceptFailures, current - 1, current) == current) return true;
+        }
+    }
+
+    internal TcpListener? ActiveTcpListener(string clientId, string channelId) =>
+        bindings.TryGetValue($"{clientId}/{channelId}", out var binding) ? binding.Listener : null;
+
     private async Task AcceptLoopAsync(ListenerBinding binding, CancellationToken cancellationToken)
     {
         if (binding.UdpListener is { } udp)
@@ -114,21 +166,37 @@ public sealed class ProxyListenerService(ServerRuntime runtime, PendingConnectio
             await udp.RunAsync(binding.Channel.MaxConnections, source =>
                 runtime.Sessions.TryGet(binding.Client.ClientId, out var session) && session is { IsReady: true } &&
                 SecurityGroupMatcher.IsAllowed(binding.Channel, runtime.Configuration.Server, source.Address),
-                datagram => TrackDatagramAsync(datagram, binding, cancellationToken), cancellationToken);
+                datagram => TrackDatagramAsync(datagram, binding, cancellationToken), cancellationToken,
+                exception => logger.LogError(exception, "UDP session handler failed for {ClientId}/{ChannelId}.", binding.Client.ClientId, binding.Channel.ChannelId),
+                () => metrics.For(binding.Client.ClientId, binding.Channel.ChannelId).DatagramDropped());
             return;
         }
+        var socketFailures = 0;
         try
         {
-            while (!cancellationToken.IsCancellationRequested)
+            while (!cancellationToken.IsCancellationRequested && !binding.Stopped)
             {
-                var caller = await binding.Listener!.AcceptSocketAsync(cancellationToken);
+                Socket caller;
+                try
+                {
+                    if (ConsumeForcedAcceptFailure()) throw new SocketException((int)SocketError.ConnectionReset);
+                    caller = await binding.Listener!.AcceptSocketAsync(cancellationToken);
+                }
+                catch (SocketException exception) when (!binding.Stopped && !cancellationToken.IsCancellationRequested && socketFailures < 3)
+                {
+                    socketFailures++;
+                    logger.LogWarning(exception, "Proxy accept failed for {ClientId}/{ChannelId}; retry {Attempt} of 3.", binding.Client.ClientId, binding.Channel.ChannelId, socketFailures);
+                    await Task.Delay(TimeSpan.FromMilliseconds(200L * socketFailures), cancellationToken);
+                    continue;
+                }
+                socketFailures = 0;
                 caller.NoDelay = true;
                 TrackConnection(caller, binding, cancellationToken);
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
-        catch (ObjectDisposedException) { }
-        catch (SocketException) when (binding.Stopped) { }
+        catch (ObjectDisposedException) when (binding.Stopped || cancellationToken.IsCancellationRequested) { }
+        catch (SocketException) when (binding.Stopped || cancellationToken.IsCancellationRequested) { }
     }
 
     public override async Task StopAsync(CancellationToken cancellationToken)
@@ -373,6 +441,12 @@ public sealed class ProxyListenerService(ServerRuntime runtime, PendingConnectio
         public DatagramListener? UdpListener { get; private set; }
         public SemaphoreSlim ChannelLimit { get; } = new(channel.MaxConnections);
         public bool Stopped { get; private set; }
+        private int acceptFailed;
+        private Task? acceptLoop;
+        public bool AcceptFailed => Volatile.Read(ref acceptFailed) == 1;
+        public bool IsHealthy => !Stopped && !AcceptFailed && Volatile.Read(ref acceptLoop) is { IsCompleted: false };
+        public void MarkAcceptFailed() => Volatile.Write(ref acceptFailed, 1);
+        public void AttachAcceptLoop(Task loop) => Volatile.Write(ref acceptLoop, loop);
         public void Start()
         {
             if (Channel.TransportProtocol == "tcp") Listener!.Start();

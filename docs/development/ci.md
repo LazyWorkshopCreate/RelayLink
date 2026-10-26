@@ -2,8 +2,8 @@
 
 文档 ID：DEV-003\
 状态：Active\
-版本：v1.10.0\
-更新日期：2026-10-15
+版本：v1.11.1\
+更新日期：2026-10-23
 
 流水线分为[日常校验](../../.github/workflows/ci.yml)、[tag 发行](../../.github/workflows/release.yml)和 [GitHub Pages 站点部署](../../.github/workflows/pages.yml)三部分。推送到 `main` 或提交 Pull Request 时，在 Linux 与 Windows 上检查服务端前端的类型、组件测试和格式，以及 Agent 前端的构建和格式，再执行 .NET 单元和集成测试（包括 Agent 互访 TLS 测试）。同时在 GitHub 托管的 `macos-15-intel` 与 `macos-15` runner 上构建 Agent 前端，原生执行含互访 TLS 的集成测试，再发布并运行 `osx-x64`、`osx-arm64` Agent，检查 Mach-O 架构、配置、最小文件权限、launchd 启动与异常退出重启、只读状态页和端到端身份复用；测试脚本拒绝在非 GitHub-hosted runner 上操作系统目录。日常校验不创建 GitHub Release。.NET 测试自身仍会编译测试所需代码，但跳过前端的重复构建。
 

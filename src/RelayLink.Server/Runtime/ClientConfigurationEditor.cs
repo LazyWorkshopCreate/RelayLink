@@ -36,7 +36,9 @@ public sealed class ClientConfigurationEditor(string serverConfigurationPath, Co
         finally { writeLock.Gate.Release(); }
     }
 
-    public Task<ClientConfiguration> CreateAsync(ClientCreateRequest request, CancellationToken cancellationToken) => ChangeAsync(current =>
+    public async Task<(ClientConfiguration Client, AgentPushReport Push)> CreateAsync(ClientCreateRequest request, CancellationToken cancellationToken)
+    {
+        var (client, push) = await ChangeAsync(current =>
     {
         if (current.Clients.ContainsKey(request.ClientId)) throw new ClientUpdateException("Client ID already exists.");
         var secret = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
@@ -47,13 +49,19 @@ public sealed class ClientConfigurationEditor(string serverConfigurationPath, Co
         };
         return (new LoadedConfiguration(current.Server, current.Clients.Append(new KeyValuePair<string, ClientConfiguration>(client.ClientId, client)).ToDictionary()), client, true);
     }, cancellationToken);
+        return (client, push);
+    }
 
-    public Task<ClientConfiguration> UpdateAsync(string clientId, ClientUpdateRequest request, CancellationToken cancellationToken) => ChangeAsync(current =>
+    public async Task<(ClientConfiguration Client, AgentPushReport Push)> UpdateAsync(string clientId, ClientUpdateRequest request, CancellationToken cancellationToken)
+    {
+        var (client, push) = await ChangeAsync(current =>
     {
         if (!current.Clients.TryGetValue(clientId, out var existing)) throw new ClientUpdateException("Client was not found.");
         var updated = existing with { DisplayName = request.DisplayName, Enabled = request.Enabled, MaxConnections = request.MaxConnections, MaxPendingConnections = request.MaxPendingConnections, Tags = NormalizeTags(request.Tags) };
         return (new LoadedConfiguration(current.Server, current.Clients.ToDictionary(pair => pair.Key, pair => pair.Key == clientId ? updated : pair.Value, StringComparer.Ordinal)), updated, false);
     }, cancellationToken);
+        return (client, push);
+    }
 
     public async Task DeleteAsync(string clientId, CancellationToken cancellationToken)
     {
@@ -98,7 +106,7 @@ public sealed class ClientConfigurationEditor(string serverConfigurationPath, Co
         .Distinct(StringComparer.OrdinalIgnoreCase)
         .ToArray();
 
-    private async Task<ClientConfiguration> ChangeAsync(Func<LoadedConfiguration, (LoadedConfiguration Configuration, ClientConfiguration Client, bool IsNew)> change, CancellationToken cancellationToken)
+    private async Task<(ClientConfiguration Client, AgentPushReport Push)> ChangeAsync(Func<LoadedConfiguration, (LoadedConfiguration Configuration, ClientConfiguration Client, bool IsNew)> change, CancellationToken cancellationToken)
     {
         await writeLock.Gate.WaitAsync(cancellationToken);
         try
@@ -131,9 +139,13 @@ public sealed class ClientConfigurationEditor(string serverConfigurationPath, Co
             {
                 var (snapshot, version) = ConfigurationSnapshotFactory.Create(client, updated, session.ProtocolVersion);
                 if (!string.Equals(session.ConfigVersionPendingOrCurrent, version, StringComparison.Ordinal))
-                    await session.SendConfigurationUpdateAsync(snapshot, version, cancellationToken);
+                {
+                    var failure = await ConfigurationPush.TrySendAsync(session, snapshot, version, cancellationToken);
+                    return (client, failure is null ? AgentPushReport.Sent : AgentPushReport.Failed(failure));
+                }
             }
-            return client;
+            var online = sessions.TryGet(client.ClientId, out var currentSession) && currentSession is not null;
+            return (client, online && client.Enabled ? AgentPushReport.Sent : AgentPushReport.Offline);
         }
         catch (ConfigurationException exception) { throw new ClientUpdateException(exception.Message); }
         finally { writeLock.Gate.Release(); }

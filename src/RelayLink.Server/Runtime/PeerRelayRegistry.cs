@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Security.Cryptography;
 using RelayLink.Protocol;
 using RelayLink.Transport;
@@ -14,6 +15,9 @@ public sealed class PeerRelayRegistry(ServerRuntime runtime, MetricsRegistry met
     private readonly object quotaLock = new();
     private readonly Dictionary<string, int> clientCounts = new(StringComparer.Ordinal);
     private readonly Dictionary<string, int> channelCounts = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<Guid, ConcurrentDictionary<Guid, long>> recentPeerRequests = new();
+    private static readonly long RecentRequestWindowTicks = Stopwatch.Frequency * 120;
+    private const int RecentRequestsPerSession = 1024;
 
     public async Task RequestAsync(Session caller, PeerOpenRequestMessage request, CancellationToken cancellationToken)
     {
@@ -48,6 +52,11 @@ public sealed class PeerRelayRegistry(ServerRuntime runtime, MetricsRegistry met
             httpIngress = new HttpIngressContext("peer", http.PeerEntryScheme, CallerClientId: caller.ClientId, MappingId: mapping.MappingId,
                 EntryAuthority: $"{http.PeerAuthorityHost}:{address.LocalPort}", PolicyHash: HttpProxyPolicy.Hash(ConfigurationSnapshotFactory.ToHttpSnapshot(targetChannel)));
         }
+        if (!TryRememberPeerRequest(caller.SessionId, request.RequestId))
+        {
+            await RejectAsync(caller, request.RequestId, ErrorCode.ProtocolError, cancellationToken);
+            return;
+        }
         if (!await limit.WaitAsync(0, cancellationToken))
         {
             await RejectAsync(caller, request.RequestId, ErrorCode.CapacityExceeded, cancellationToken);
@@ -68,6 +77,7 @@ public sealed class PeerRelayRegistry(ServerRuntime runtime, MetricsRegistry met
         }
 
         var relay = new PeerRelay(caller, targetSession, targetChannel.ChannelId, TimeSpan.FromSeconds(runtime.Configuration.Server.Limits.OpenTimeoutSeconds), mapping.MappingId, targetChannel.TransportProtocol);
+        var setupTimeoutMilliseconds = PeerSetupTimeoutMilliseconds(runtime.Configuration.Server.Limits.OpenTimeoutSeconds, targetChannel.TargetConnectTimeoutSeconds);
         var channelMetrics = metrics.For(targetConfig.ClientId, targetChannel.ChannelId);
         channelMetrics.PeerAccepted();
         if (!relays.TryAdd(relay.ConnectionId, relay))
@@ -89,8 +99,8 @@ public sealed class PeerRelayRegistry(ServerRuntime runtime, MetricsRegistry met
         }
         try
         {
-            await targetSession.SendAsync(new Frame(FrameType.PeerOpen, JsonProtocolSerializer.Serialize(new PeerOpenMessage(relay.ConnectionId, targetSession.SessionId, caller.ClientId, targetChannel.ChannelId, relay.TargetToken, targetChannel.EndToEndEncryptionEnabled, targetChannel.TransportProtocol, httpIngress), targetSession.ProtocolVersion)), cancellationToken);
-            await caller.SendAsync(new Frame(FrameType.PeerOpenGranted, JsonProtocolSerializer.Serialize(new PeerOpenGrantedMessage(request.RequestId, relay.ConnectionId, caller.SessionId, relay.CallerToken, targetChannel.EndToEndEncryptionEnabled, targetChannel.TransportProtocol, httpIngress), caller.ProtocolVersion)), cancellationToken);
+            await targetSession.SendAsync(new Frame(FrameType.PeerOpen, JsonProtocolSerializer.Serialize(new PeerOpenMessage(relay.ConnectionId, targetSession.SessionId, caller.ClientId, targetChannel.ChannelId, relay.TargetToken, targetChannel.EndToEndEncryptionEnabled, targetChannel.TransportProtocol, httpIngress) { SetupTimeoutMilliseconds = setupTimeoutMilliseconds }, targetSession.ProtocolVersion)), cancellationToken);
+            await caller.SendAsync(new Frame(FrameType.PeerOpenGranted, JsonProtocolSerializer.Serialize(new PeerOpenGrantedMessage(request.RequestId, relay.ConnectionId, caller.SessionId, relay.CallerToken, targetChannel.EndToEndEncryptionEnabled, targetChannel.TransportProtocol, httpIngress) { SetupTimeoutMilliseconds = setupTimeoutMilliseconds }, caller.ProtocolVersion)), cancellationToken);
             _ = RunAsync(relay);
         }
         catch
@@ -112,6 +122,7 @@ public sealed class PeerRelayRegistry(ServerRuntime runtime, MetricsRegistry met
 
     public void CancelSession(Guid sessionId)
     {
+        recentPeerRequests.TryRemove(sessionId, out _);
         foreach (var relay in relays.Values.Where(relay => relay.Caller.SessionId == sessionId || relay.Target.SessionId == sessionId)) Cleanup(relay);
     }
 
@@ -196,7 +207,18 @@ public sealed class PeerRelayRegistry(ServerRuntime runtime, MetricsRegistry met
             relay.SetEndReason(exception is AuditUnavailableException ? "audit_unavailable" : exception is OperationCanceledException ? "cancelled" : "transport_error");
             logger.LogWarning(exception, "Peer relay {ConnectionId} ended.", relay.ConnectionId);
         }
+        catch (Exception exception)
+        {
+            relay.SetEndReason("unexpected");
+            logger.LogError(exception, "Peer relay {ConnectionId} failed unexpectedly.", relay.ConnectionId);
+        }
         finally { Cleanup(relay); }
+    }
+
+    internal static int PeerSetupTimeoutMilliseconds(int openTimeoutSeconds, int targetConnectTimeoutSeconds)
+    {
+        var milliseconds = (long)Math.Max(1, openTimeoutSeconds) * 1000L + (long)Math.Max(1, targetConnectTimeoutSeconds) * 1000L;
+        return milliseconds >= int.MaxValue ? int.MaxValue : (int)milliseconds;
     }
 
     internal static TimeSpan IdleTimeoutFor(string transportProtocol, int tcpIdleTimeoutSeconds) =>
@@ -212,6 +234,48 @@ public sealed class PeerRelayRegistry(ServerRuntime runtime, MetricsRegistry met
             await writer.WriteAsync(frame, cancellationToken);
             if (frame.Type == FrameType.Data) bytesWritten(frame.Payload.Length);
             if (frame.Type != FrameType.Data) return;
+        }
+    }
+
+    private bool TryRememberPeerRequest(Guid sessionId, Guid requestId)
+    {
+        var now = Stopwatch.GetTimestamp();
+        var window = recentPeerRequests.GetOrAdd(sessionId, _ => new ConcurrentDictionary<Guid, long>());
+        while (true)
+        {
+            if (window.TryAdd(requestId, now))
+            {
+                if (window.Count > RecentRequestsPerSession) PrunePeerRequests(window, now);
+                return true;
+            }
+
+            if (!window.TryGetValue(requestId, out var seen)) continue;
+            if (now - seen <= RecentRequestWindowTicks) return false;
+            if (window.TryUpdate(requestId, now, seen)) return true;
+        }
+    }
+
+    private static void PrunePeerRequests(ConcurrentDictionary<Guid, long> window, long now)
+    {
+        foreach (var entry in window)
+        {
+            if (now - entry.Value > RecentRequestWindowTicks) window.TryRemove(entry.Key, out _);
+        }
+
+        while (window.Count > RecentRequestsPerSession)
+        {
+            var oldestTicks = long.MaxValue;
+            var oldestId = Guid.Empty;
+            var found = false;
+            foreach (var entry in window)
+            {
+                if (entry.Value >= oldestTicks) continue;
+                oldestTicks = entry.Value;
+                oldestId = entry.Key;
+                found = true;
+            }
+
+            if (!found || !window.TryRemove(oldestId, out _)) return;
         }
     }
 

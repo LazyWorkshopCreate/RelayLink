@@ -4,6 +4,7 @@ using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging.Abstractions;
 using RelayLink.Server.Configuration;
 using RelayLink.Server.Runtime;
+using RelayLink.Testing;
 
 namespace RelayLink.UnitTests;
 
@@ -12,10 +13,10 @@ public sealed class TrafficHistoryTests
     [Fact]
     public async Task Sqlite_history_aggregates_direct_and_peer_bytes_once_per_minute_and_trims_expired_rows()
     {
-        var directory = Path.Combine(Path.GetTempPath(), $"relaylink-history-{Guid.NewGuid():N}");
+        using var directory = new TestDirectory("relaylink-history-");
         try
         {
-            var path = Path.Combine(directory, "traffic.db");
+            var path = Path.Combine(directory.Path, "traffic.db");
             var configuration = Configuration(path);
             var metrics = new MetricsRegistry(configuration);
             var counter = metrics.For("agent", "channel");
@@ -62,17 +63,16 @@ public sealed class TrafficHistoryTests
             count.CommandText = "SELECT COUNT(*) FROM traffic_minute";
             Assert.Equal(1L, (long)(await count.ExecuteScalarAsync())!);
         }
-        finally { SqliteConnection.ClearAllPools(); if (Directory.Exists(directory)) Directory.Delete(directory, true); }
+        finally { SqliteConnection.ClearAllPools(); }
     }
 
     [Fact]
     public async Task Legacy_jsonl_is_imported_once_without_deleting_source()
     {
-        var directory = Path.Combine(Path.GetTempPath(), $"relaylink-history-{Guid.NewGuid():N}");
+        using var directory = new TestDirectory("relaylink-history-");
         try
         {
-            Directory.CreateDirectory(directory);
-            var path = Path.Combine(directory, "traffic.jsonl");
+            var path = Path.Combine(directory.Path, "traffic.jsonl");
             var minute = DateTimeOffset.FromUnixTimeSeconds(DateTimeOffset.UtcNow.ToUnixTimeSeconds() / 60 * 60).AddMinutes(-3);
             var lines = new[]
             {
@@ -92,7 +92,7 @@ public sealed class TrafficHistoryTests
                 NullLogger<TrafficHistoryService>.Instance);
             Assert.Equal(2, (await restarted.ReadAsync("agent", "channel", 24, CancellationToken.None)).Count);
         }
-        finally { SqliteConnection.ClearAllPools(); if (Directory.Exists(directory)) Directory.Delete(directory, true); }
+        finally { SqliteConnection.ClearAllPools(); }
     }
 
     private static LoadedConfiguration Configuration(string path)

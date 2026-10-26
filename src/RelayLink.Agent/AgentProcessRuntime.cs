@@ -5,7 +5,12 @@ using System.Text.Json.Serialization;
 namespace RelayLink.Agent;
 
 public sealed record AgentServerRuntimeSnapshot(string ProfileId, string ServerHost, bool UseTls, bool Enabled, AgentStatusSnapshot Status,
-    int PendingConnections = 0, int ActiveConnections = 0, long CapacityRejected = 0);
+    int PendingConnections = 0, int ActiveConnections = 0, long CapacityRejected = 0)
+{
+    public int ServerPort { get; init; }
+}
+
+public readonly record struct AgentEnabledProfileChange(string Version, AgentServerProfile Profile);
 
 public sealed class AgentProcessRuntime(AgentProcessConfiguration configuration, AgentConfigurationPath path, ILoggerFactory loggerFactory) : IHostedService
 {
@@ -24,6 +29,7 @@ public sealed class AgentProcessRuntime(AgentProcessConfiguration configuration,
     };
 
     public string ConfigurationVersion { get { lock (gate) return version; } }
+    public string ConfigurationDirectory => Path.GetDirectoryName(Path.GetFullPath(path.Value))!;
 
     public IReadOnlyList<AgentServerRuntimeSnapshot> Snapshot
     {
@@ -34,7 +40,8 @@ public sealed class AgentProcessRuntime(AgentProcessConfiguration configuration,
                 {
                     var usage = context.Quota.Snapshot;
                     return new AgentServerRuntimeSnapshot(context.Configuration.ProfileId, context.Configuration.ServerHost,
-                        context.Configuration.UseTls, context.Enabled, context.Status.Snapshot, usage.Pending, usage.Active, usage.Rejected);
+                        context.Configuration.UseTls, context.Enabled, context.Status.Snapshot, usage.Pending, usage.Active, usage.Rejected)
+                    { ServerPort = context.Configuration.ServerPort };
                 }).ToArray();
         }
     }
@@ -180,7 +187,7 @@ public sealed class AgentProcessRuntime(AgentProcessConfiguration configuration,
         finally { mutationGate.Release(); }
     }
 
-    public async Task<string> SetEnabledAsync(string profileId, bool enabled, string expectedVersion, CancellationToken cancellationToken)
+    public async Task<AgentEnabledProfileChange> SetEnabledAsync(string profileId, bool enabled, string expectedVersion, CancellationToken cancellationToken)
     {
         await mutationGate.WaitAsync(cancellationToken);
         try
@@ -190,12 +197,13 @@ public sealed class AgentProcessRuntime(AgentProcessConfiguration configuration,
                 throw new AgentProfileMutationException(AgentProfileMutationError.Missing, "This profileId does not exist.");
             if (previous.Enabled == enabled)
                 throw new AgentProfileMutationException(AgentProfileMutationError.Conflict, "This profile is already in the requested state; refresh the page.");
+            var profile = current.Servers.Single(server => server.ProfileId == profileId) with { Enabled = enabled };
             var next = current with
             {
-                Servers = current.Servers.Select(server => server.ProfileId == profileId ? server with { Enabled = enabled } : server).ToArray()
+                Servers = current.Servers.Select(server => server.ProfileId == profileId ? profile : server).ToArray()
             };
             AgentProcessConfigurationLoader.Validate(next);
-            var replacement = CreateContext(next.Servers.Single(server => server.ProfileId == profileId));
+            var replacement = CreateContext(profile);
             string newVersion;
             try { newVersion = Persist(next); }
             catch
@@ -212,7 +220,7 @@ public sealed class AgentProcessRuntime(AgentProcessConfiguration configuration,
             try { await previous.Worker.StopAsync(CancellationToken.None); }
             finally { previous.Worker.Dispose(); }
             if (enabled) await replacement.Worker.StartAsync(CancellationToken.None);
-            return newVersion;
+            return new AgentEnabledProfileChange(newVersion, profile);
         }
         finally { mutationGate.Release(); }
     }

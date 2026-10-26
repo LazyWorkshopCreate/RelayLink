@@ -100,8 +100,41 @@ public sealed class AgentPortAllocator
         try
         {
             File.WriteAllText(temporary, JsonSerializer.Serialize(saved));
-            File.Move(temporary, path, overwrite: true);
+            ReplacePortStateFile(temporary, path);
         }
-        finally { if (File.Exists(temporary)) File.Delete(temporary); }
+        finally
+        {
+            try { if (File.Exists(temporary)) File.Delete(temporary); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
     }
+
+    // Windows MoveFileEx(MOVEFILE_REPLACE_EXISTING) returns access denied or a sharing
+    // violation while Defender, indexing, or a reader opened without FILE_SHARE_DELETE
+    // still holds ports.json. The same rename is atomic on Unix. Keep the temp name
+    // stable and retry only those transient failures; a later attempt finishes the replace.
+    internal const int PortStateReplaceAttempts = 8;
+
+    internal static void ReplacePortStateFile(string temporary, string destination) =>
+        ReplacePortStateFile(temporary, destination, static (source, dest) => File.Move(source, dest, overwrite: true), static attempt => Thread.Sleep(TimeSpan.FromMilliseconds(20 * attempt)));
+
+    internal static void ReplacePortStateFile(string temporary, string destination, Action<string, string> replace, Action<int> wait)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                replace(temporary, destination);
+                return;
+            }
+            catch (Exception exception) when (IsTransientPortStateReplaceFailure(exception) && attempt < PortStateReplaceAttempts)
+            {
+                wait(attempt);
+            }
+        }
+    }
+
+    private static bool IsTransientPortStateReplaceFailure(Exception exception) =>
+        exception is UnauthorizedAccessException or IOException;
 }

@@ -104,6 +104,7 @@ public sealed class DatagramSession(IPEndPoint source, UdpClient listener) : IDi
     private readonly Channel<byte[]> queue = Channel.CreateBounded<byte[]>(new BoundedChannelOptions(DatagramRelay.QueueCapacity)
     { SingleReader = true, SingleWriter = true, FullMode = BoundedChannelFullMode.Wait });
     private readonly CancellationTokenSource lifetime = new();
+    private int disposed;
     public IPEndPoint Source { get; } = source;
     public CancellationToken Token => lifetime.Token;
     public bool Enqueue(byte[] payload) => queue.Writer.TryWrite(payload);
@@ -116,7 +117,13 @@ public sealed class DatagramSession(IPEndPoint source, UdpClient listener) : IDi
             idleSeconds, cancellation.Token, toTarget, toCaller, writeTimeoutSeconds);
     }
     public void Cancel() { try { lifetime.Cancel(); } catch (ObjectDisposedException) { } }
-    public void Dispose() { Cancel(); queue.Writer.TryComplete(); lifetime.Dispose(); }
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref disposed, 1) == 1) return;
+        Cancel();
+        queue.Writer.TryComplete();
+        lifetime.Dispose();
+    }
 }
 
 public sealed class DatagramListener(UdpClient listenerSocket)
@@ -126,7 +133,7 @@ public sealed class DatagramListener(UdpClient listenerSocket)
     public void Stop() => socket.Dispose();
 
     public async Task RunAsync(int maxSessions, Func<IPEndPoint, bool> allowed,
-        Func<DatagramSession, Task> handle, CancellationToken token)
+        Func<DatagramSession, Task> handle, CancellationToken token, Action<Exception>? onHandlerFailed = null, Action? onDatagramDropped = null)
     {
         var sessions = new Dictionary<IPEndPoint, (DatagramSession Session, Task Task)>();
         using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(token);
@@ -140,8 +147,7 @@ public sealed class DatagramListener(UdpClient listenerSocket)
                 await Task.WhenAny(receive, tick);
                 foreach (var entry in sessions.Where(pair => pair.Value.Task.IsCompleted).ToArray())
                 {
-                    // Observe handler failures, then release exactly once.
-                    _ = entry.Value.Task.Exception;
+                    if (entry.Value.Task.IsFaulted) onHandlerFailed?.Invoke(entry.Value.Task.Exception!.GetBaseException());
                     sessions.Remove(entry.Key);
                     entry.Value.Session.Dispose();
                 }
@@ -158,10 +164,20 @@ public sealed class DatagramListener(UdpClient listenerSocket)
                 {
                     if (sessions.Count >= maxSessions) continue;
                     var session = new DatagramSession(packet.RemoteEndPoint, socket);
-                    session.Enqueue(packet.Buffer);
-                    sessions.Add(packet.RemoteEndPoint, (session, handle(session)));
+                    sessions.Add(packet.RemoteEndPoint, (session, Task.CompletedTask));
+                    try
+                    {
+                        if (!session.Enqueue(packet.Buffer)) onDatagramDropped?.Invoke();
+                        sessions[packet.RemoteEndPoint] = (session, handle(session));
+                    }
+                    catch (Exception exception)
+                    {
+                        sessions.Remove(packet.RemoteEndPoint);
+                        session.Dispose();
+                        onHandlerFailed?.Invoke(exception);
+                    }
                 }
-                else current.Session.Enqueue(packet.Buffer);
+                else if (!current.Session.Enqueue(packet.Buffer)) onDatagramDropped?.Invoke();
             }
         }
         catch (ObjectDisposedException) { }

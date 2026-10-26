@@ -59,7 +59,9 @@ public sealed class AgentLocalDashboard : BackgroundService
     private readonly Func<IReadOnlyList<AgentServerRuntimeSnapshot>> snapshots;
     private readonly AgentProcessRuntime? runtime;
     private readonly AgentLocalWriteSession writeSession;
+    private readonly ILogger configurationAudit;
     private readonly ILoggerFactory? loggerFactory;
+    private AgentLocalManagementToken? managementToken;
     private static readonly JsonSerializerOptions AdminJsonOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -71,6 +73,7 @@ public sealed class AgentLocalDashboard : BackgroundService
     public AgentLocalDashboard(AgentConfiguration configuration, AgentStatus status)
     {
         writeSession = new AgentLocalWriteSession();
+        configurationAudit = Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance;
         dashboardPort = configuration.DashboardPort;
         snapshots = () => [new AgentServerRuntimeSnapshot(configuration.ProfileId, configuration.ServerHost, configuration.UseTls, true, status.Snapshot)];
     }
@@ -82,6 +85,7 @@ public sealed class AgentLocalDashboard : BackgroundService
         this.runtime = runtime;
         this.writeSession = writeSession ?? new AgentLocalWriteSession();
         this.loggerFactory = loggerFactory;
+        configurationAudit = loggerFactory?.CreateLogger("RelayLink.Agent.LocalConfiguration") ?? Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -146,6 +150,8 @@ public sealed class AgentLocalDashboard : BackgroundService
         app.MapGet("/api/status", () => Single(snapshot => snapshot));
         if (runtime is not null)
         {
+            managementToken = AgentLocalManagementToken.LoadOrCreate(runtime.ConfigurationDirectory);
+            configurationAudit.LogInformation("Local management token file is {TokenPath}. Write requests must send it; the token value is not logged.", managementToken.FilePath);
             app.MapGet("/api/v2/admin/session", (HttpContext context) =>
             {
                 var cookie = context.Request.Cookies[AdminCookie];
@@ -178,9 +184,12 @@ public sealed class AgentLocalDashboard : BackgroundService
                 try { request = await JsonSerializer.DeserializeAsync<AgentAddProfileRequest>(context.Request.Body, AdminJsonOptions, context.RequestAborted); }
                 catch (JsonException) { return Results.BadRequest(new { message = "Invalid server profile request." }); }
                 if (request?.Server is null || string.IsNullOrWhiteSpace(request.Version)) return Results.BadRequest(new { message = "Invalid server profile request." });
+                var insecure = RejectInsecureTransport(request.Server, request.ConfirmInsecureTransport);
+                if (insecure is not null) return insecure;
                 try
                 {
                     var version = await runtime.AddAsync(request.Server, request.Version, request.ConfirmExistingState, context.RequestAborted);
+                    AuditProfile("add", request.Server);
                     return Results.Ok(new { version, profileId = request.Server.ProfileId });
                 }
                 catch (AgentProfileMutationException exception) { return MutationError(exception); }
@@ -197,7 +206,9 @@ public sealed class AgentLocalDashboard : BackgroundService
                 if (string.IsNullOrWhiteSpace(request?.Version)) return Results.BadRequest(new { message = "Invalid delete request." });
                 try
                 {
+                    var removed = runtime.Snapshot.SingleOrDefault(item => item.ProfileId == profileId);
                     var version = await runtime.RemoveAsync(profileId, request.Version, context.RequestAborted);
+                    configurationAudit.LogInformation("Local Agent configuration {Action} for profile {ProfileId} on {ServerHost}:{ServerPort} useTls={UseTls} clientId={ClientId}.", "delete", profileId, removed?.ServerHost, removed?.ServerPort, removed?.UseTls, removed?.Status.ClientId);
                     return Results.Ok(new { version });
                 }
                 catch (AgentProfileMutationException exception) { return MutationError(exception); }
@@ -211,9 +222,12 @@ public sealed class AgentLocalDashboard : BackgroundService
                 try { request = await JsonSerializer.DeserializeAsync<AgentUpdateProfileRequest>(context.Request.Body, AdminJsonOptions, context.RequestAborted); }
                 catch (JsonException) { return Results.BadRequest(new { message = "Invalid server profile request." }); }
                 if (request?.Server is null || string.IsNullOrWhiteSpace(request.Version)) return Results.BadRequest(new { message = "Invalid server profile request." });
+                var insecure = RejectInsecureTransport(request.Server, request.ConfirmInsecureTransport);
+                if (insecure is not null) return insecure;
                 try
                 {
                     var version = await runtime.UpdateAsync(profileId, request.Server, request.Version, context.RequestAborted);
+                    AuditProfile("update", request.Server);
                     return Results.Ok(new { version, profileId });
                 }
                 catch (AgentProfileMutationException exception) { return MutationError(exception); }
@@ -230,8 +244,9 @@ public sealed class AgentLocalDashboard : BackgroundService
                 if (request?.Enabled is null || string.IsNullOrWhiteSpace(request.Version)) return Results.BadRequest(new { message = "Invalid profile state request." });
                 try
                 {
-                    var version = await runtime.SetEnabledAsync(profileId, request.Enabled.Value, request.Version, context.RequestAborted);
-                    return Results.Ok(new { version, profileId, enabled = request.Enabled.Value });
+                    var changed = await runtime.SetEnabledAsync(profileId, request.Enabled.Value, request.Version, context.RequestAborted);
+                    configurationAudit.LogInformation("Local Agent configuration {Action} for profile {ProfileId} on {ServerHost}:{ServerPort} useTls={UseTls} clientId={ClientId} enabled={Enabled}.", "set-enabled", changed.Profile.ProfileId, changed.Profile.ServerHost, changed.Profile.ServerPort, changed.Profile.UseTls, changed.Profile.ClientId, changed.Profile.Enabled);
+                    return Results.Ok(new { version = changed.Version, profileId = changed.Profile.ProfileId, enabled = changed.Profile.Enabled });
                 }
                 catch (AgentProfileMutationException exception) { return MutationError(exception); }
                 catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { return ConfigurationSaveError(app.Logger, exception, profileId); }
@@ -250,11 +265,28 @@ public sealed class AgentLocalDashboard : BackgroundService
 
     private IResult? RequireWriteSession(HttpContext context)
     {
+        if (managementToken is null || !managementToken.Matches(context.Request.Headers[AgentLocalManagementToken.HeaderName].ToString()))
+            return Results.Json(new { message = "Local management token is required." }, statusCode: StatusCodes.Status401Unauthorized);
         var session = Session(context);
-        if (session is null) return Results.StatusCode(StatusCodes.Status401Unauthorized);
+        if (session is null) return Results.Json(new { message = "Local management session is required." }, statusCode: StatusCodes.Status401Unauthorized);
         if (!writeSession.CheckCsrf(session, context.Request.Headers["X-RelayLink-CSRF"].ToString()))
             return Results.StatusCode(StatusCodes.Status403Forbidden);
         return null;
+    }
+
+    private static IResult? RejectInsecureTransport(AgentServerProfile server, string? confirmation)
+    {
+        if (server.UseTls || string.Equals(confirmation, AgentLocalManagementToken.InsecureTransportConfirmation, StringComparison.Ordinal))
+            return null;
+        return Results.BadRequest(new { message = "Connecting without TLS requires confirmInsecureTransport set to CONNECT_WITHOUT_TLS." });
+    }
+
+    private void AuditProfile(string action, AgentServerProfile server)
+    {
+        if (server.UseTls)
+            configurationAudit.LogInformation("Local Agent configuration {Action} for profile {ProfileId} on {ServerHost}:{ServerPort} useTls={UseTls} clientId={ClientId}.", action, server.ProfileId, server.ServerHost, server.ServerPort, server.UseTls, server.ClientId);
+        else
+            configurationAudit.LogWarning("Local Agent configuration {Action} for profile {ProfileId} on {ServerHost}:{ServerPort} useTls={UseTls} clientId={ClientId}. Plaintext control exposes the client secret to that server.", action, server.ProfileId, server.ServerHost, server.ServerPort, server.UseTls, server.ClientId);
     }
 
     private static IResult MutationError(AgentProfileMutationException exception) => exception.Reason switch
@@ -267,7 +299,13 @@ public sealed class AgentLocalDashboard : BackgroundService
 
 public sealed record AgentChannelsResponse(string ClientId, bool Online, DateTimeOffset? UpdatedAtUtc, IReadOnlyList<AgentChannelView> Channels);
 public sealed record AgentMappingsResponse(string ClientId, bool Online, DateTimeOffset? UpdatedAtUtc, IReadOnlyList<AgentMappingView> Mappings);
-public sealed record AgentAddProfileRequest(string Version, AgentServerProfile Server, bool ConfirmExistingState);
+public sealed record AgentAddProfileRequest(string Version, AgentServerProfile Server, bool ConfirmExistingState)
+{
+    public string? ConfirmInsecureTransport { get; init; }
+}
 public sealed record AgentRemoveProfileRequest(string Version);
-public sealed record AgentUpdateProfileRequest(string Version, AgentServerProfile Server);
+public sealed record AgentUpdateProfileRequest(string Version, AgentServerProfile Server)
+{
+    public string? ConfirmInsecureTransport { get; init; }
+}
 public sealed record AgentSetProfileEnabledRequest(string Version, bool? Enabled);

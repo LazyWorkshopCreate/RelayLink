@@ -703,9 +703,15 @@ export function App() {
         setError('');
         try {
             const { clientId, form } = mappingDialog;
-            await write(`/api/v1/admin/clients/${enc(clientId)}/mappings`, 'POST', form);
+            const result = await write<{ message?: string }>(
+                `/api/v1/admin/clients/${enc(clientId)}/mappings`,
+                'POST',
+                form,
+            );
             setMappingDialog(null);
-            setNotice('端到端访问入口已创建并下发。创建后不可修改；如需调整，请删除后重建。');
+            setNotice(
+                result.message ?? '端到端访问入口已创建并下发。创建后不可修改；如需调整，请删除后重建。',
+            );
             await refresh();
         } catch (e) {
             setError((e as Error).message);
@@ -718,12 +724,12 @@ export function App() {
         setSaving(true);
         setError('');
         try {
-            await write(
+            const result = await write<{ message?: string }>(
                 `/api/v1/admin/clients/${enc(confirmDeleteMapping.clientId)}/mappings/${enc(confirmDeleteMapping.mapping.mappingId)}`,
                 'DELETE',
             );
             setConfirmDeleteMapping(null);
-            setNotice('端到端访问入口已删除并下发，原有连接已断开。');
+            setNotice(result.message ?? '端到端访问入口已删除并下发，原有连接已断开。');
             await refresh();
         } catch (e) {
             setError((e as Error).message);

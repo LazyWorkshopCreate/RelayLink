@@ -47,6 +47,7 @@ public sealed class ChannelMetrics
     private long peerCiphertextToCaller;
     private int peerPending;
     private int peerActive;
+    private long udpDropped;
     private TargetConnectionResult? targetResult;
 
     public void Accepted() { Interlocked.Increment(ref accepted); Interlocked.Increment(ref pending); }
@@ -66,6 +67,7 @@ public sealed class ChannelMetrics
     public void PeerClosed() => Interlocked.Decrement(ref peerActive);
     public void AddPeerCiphertextToTarget(int bytes) => Interlocked.Add(ref peerCiphertextToTarget, bytes);
     public void AddPeerCiphertextToCaller(int bytes) => Interlocked.Add(ref peerCiphertextToCaller, bytes);
+    public long DatagramDropped() => Interlocked.Increment(ref udpDropped);
     public void MarkHttpIngressReady() => Volatile.Write(ref targetResult, new TargetConnectionResult("http_ingress_ready", DateTimeOffset.UtcNow));
     public void MarkTargetSuccess() => Volatile.Write(ref targetResult, new TargetConnectionResult("success", DateTimeOffset.UtcNow));
     public void MarkTargetFailure(string errorCode) => Volatile.Write(ref targetResult, new TargetConnectionResult(errorCode, DateTimeOffset.UtcNow));
@@ -90,7 +92,8 @@ public sealed class ChannelMetrics
         PeerPendingConnections = Volatile.Read(ref peerPending),
         PeerActiveConnections = Volatile.Read(ref peerActive),
         PeerCiphertextToTarget = Interlocked.Read(ref peerCiphertextToTarget),
-        PeerCiphertextToCaller = Interlocked.Read(ref peerCiphertextToCaller)
+        PeerCiphertextToCaller = Interlocked.Read(ref peerCiphertextToCaller),
+        UdpDroppedTotal = Interlocked.Read(ref udpDropped)
     };
 }
 
@@ -103,5 +106,6 @@ public sealed record ChannelMetricsSnapshot(long AcceptedTotal, long OpenedTotal
     public int PeerActiveConnections { get; init; }
     public long PeerCiphertextToTarget { get; init; }
     public long PeerCiphertextToCaller { get; init; }
+    public long UdpDroppedTotal { get; init; }
 }
 public sealed record TargetConnectionResult(string Result, DateTimeOffset TimeUtc);

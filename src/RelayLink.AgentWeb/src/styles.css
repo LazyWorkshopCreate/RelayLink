@@ -430,6 +430,25 @@ td code {
     font-size: 13px;
     margin: 0 0 20px;
 }
+.agent-token {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+    color: #5c6b80;
+    font-size: 13px;
+}
+.agent-token input {
+    border: 1px solid #d5deea;
+    border-radius: 8px;
+    padding: 7px 10px;
+    min-width: min(280px, 100%);
+    background: #fff;
+    color: #1c2840;
+}
+.agent-confirm-phrase {
+    margin: 12px 0;
+}
 .agent-footer {
     display: flex;
     gap: 7px;

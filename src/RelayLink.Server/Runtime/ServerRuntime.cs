@@ -11,6 +11,11 @@ public sealed class ServerRuntime(LoadedConfiguration configuration, SessionRegi
     public SemaphoreSlim GlobalPendingLimit { get; } = new(configuration.Server.Limits.MaxPendingConnections);
     public DateTimeOffset StartedAtUtc { get; } = DateTimeOffset.UtcNow;
     public Guid InstanceId { get; } = Guid.NewGuid();
-    public bool IsReady { get; set; }
+    private int ready;
+    public bool IsReady
+    {
+        get => Volatile.Read(ref ready) == 1;
+        set => Volatile.Write(ref ready, value ? 1 : 0);
+    }
     public void ReplaceConfiguration(LoadedConfiguration updated) => Volatile.Write(ref configuration, updated);
 }

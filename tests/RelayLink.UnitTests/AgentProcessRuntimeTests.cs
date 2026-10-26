@@ -128,7 +128,12 @@ public sealed class AgentProcessRuntimeTests
             Assert.True(runtime.Snapshot[0].Enabled);
 
             runtime.BeforeConfigurationCommit = null;
-            version = await runtime.SetEnabledAsync("east", false, version, CancellationToken.None);
+            var disabled = await runtime.SetEnabledAsync("east", false, version, CancellationToken.None);
+            version = disabled.Version;
+            Assert.Equal("127.0.0.1", disabled.Profile.ServerHost);
+            Assert.Equal(7443, disabled.Profile.ServerPort);
+            Assert.Equal("same", disabled.Profile.ClientId);
+            Assert.False(disabled.Profile.Enabled);
             Assert.False(runtime.Snapshot[0].Enabled);
             Assert.False(runtime.Snapshot[0].Status.Online);
             Assert.True(runtime.Snapshot[1].Enabled);
@@ -137,6 +142,8 @@ public sealed class AgentProcessRuntimeTests
 
             var imported = initial.Servers[0] with { ServerHost = "updated.example", Enabled = true };
             version = await runtime.UpdateAsync("east", imported, version, CancellationToken.None);
+            Assert.Equal("127.0.0.1", disabled.Profile.ServerHost);
+            Assert.Equal(7443, disabled.Profile.ServerPort);
             Assert.False(runtime.Snapshot[0].Enabled);
             Assert.Equal("updated.example", runtime.Snapshot[0].ServerHost);
             Assert.False(AgentProcessConfigurationLoader.Load(path).Servers[0].Enabled);

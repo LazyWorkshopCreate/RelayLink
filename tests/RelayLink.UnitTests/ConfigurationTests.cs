@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
@@ -244,6 +245,136 @@ public sealed class ConfigurationTests
     }
 
     [Fact]
+    public void Port_state_replace_retries_transient_lock_failures()
+    {
+        var attempts = 0;
+        var waits = 0;
+        AgentPortAllocator.ReplacePortStateFile("ignored.tmp", "ports.json", (_, _) =>
+        {
+            attempts++;
+            if (attempts == 1) throw new UnauthorizedAccessException("simulated scanner lock");
+            if (attempts == 2) throw new IOException("simulated sharing violation");
+        }, _ => waits++);
+        Assert.Equal(3, attempts);
+        Assert.Equal(2, waits);
+
+        attempts = 0;
+        var denied = Assert.Throws<UnauthorizedAccessException>(() => AgentPortAllocator.ReplacePortStateFile("ignored.tmp", "ports.json", (_, _) =>
+        {
+            attempts++;
+            throw new UnauthorizedAccessException("still locked");
+        }, static _ => { }));
+        Assert.Equal(AgentPortAllocator.PortStateReplaceAttempts, attempts);
+        Assert.Equal("still locked", denied.Message);
+
+        attempts = 0;
+        Assert.Throws<InvalidOperationException>(() => AgentPortAllocator.ReplacePortStateFile("ignored.tmp", "ports.json", (_, _) =>
+        {
+            attempts++;
+            throw new InvalidOperationException("not a file lock");
+        }, static _ => { }));
+        Assert.Equal(1, attempts);
+    }
+
+    [Fact]
+    public async Task Agent_port_allocator_persists_second_mapping_while_port_state_is_open()
+    {
+        var directory = Directory.CreateTempSubdirectory("relaylink-port-retry-");
+        using var release = new ManualResetEventSlim(false);
+        Task? reader = null;
+        try
+        {
+            // windows-latest excludes scattered TCP blocks. A fixed window such as
+            // 29100-29200 can bind the first mapping and then fail the second with
+            // WSAEACCES before Persist runs. Task.IsCompleted is true for that fault
+            // as well as for a finished replace, so probe ports that actually listen.
+            var (firstPort, lastPort) = BindableLoopbackRange(4);
+            var path = Path.Combine(directory.FullName, "ports.json");
+            var allocator = new AgentPortAllocator(path, firstPort, lastPort);
+            using (var first = allocator.Bind("to-visited")) first.Stop();
+
+            using var opened = new ManualResetEventSlim(false);
+            reader = Task.Run(() =>
+            {
+                using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+                opened.Set();
+                if (!release.Wait(TimeSpan.FromSeconds(10))) throw new TimeoutException("Port-state reader was not released.");
+            });
+            Assert.True(opened.Wait(TimeSpan.FromSeconds(5)));
+
+            var bound = Task.Run(() => allocator.Bind("to-visited-b"));
+            // Poll on this thread. await Task.Delay needs another pool thread, and the
+            // replace itself blocks one with Thread.Sleep. On a busy Windows runner the
+            // continuation can resume only after the ~560ms budget is already spent, so
+            // IsCompleted is true because the retry gave up. Task.IsCompleted is also
+            // true when the bind faults, which is what the old Assert.False observed.
+            // A reader without FILE_SHARE_DELETE makes MoveFileEx fail until that handle
+            // closes; release as soon as the temp file shows the attempt has started.
+            var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(3);
+            while (DateTime.UtcNow < deadline && !bound.IsCompleted)
+            {
+                var pending = false;
+                try
+                {
+                    pending = Directory.EnumerateFiles(directory.FullName).Any(file => file.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase));
+                }
+                catch (IOException) { }
+                if (pending) break;
+                Thread.Sleep(1);
+            }
+
+            release.Set();
+            using var second = await bound.WaitAsync(TimeSpan.FromSeconds(5));
+            second.Stop();
+            await reader;
+            reader = null;
+
+            using var saved = JsonDocument.Parse(File.ReadAllText(path));
+            var kept = saved.RootElement.GetProperty("to-visited").GetInt32();
+            var added = saved.RootElement.GetProperty("to-visited-b").GetInt32();
+            Assert.InRange(kept, firstPort, lastPort);
+            Assert.InRange(added, firstPort, lastPort);
+            Assert.NotEqual(kept, added);
+        }
+        finally
+        {
+            release.Set();
+            if (reader is not null)
+            {
+                try { await reader.WaitAsync(TimeSpan.FromSeconds(5)); }
+                catch (Exception) { }
+            }
+            try { directory.Delete(recursive: true); } catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { }
+        }
+
+        static (int First, int Last) BindableLoopbackRange(int width)
+        {
+            for (var attempt = 0; attempt < 48; attempt++)
+            {
+                var start = RandomNumberGenerator.GetInt32(20000, 60001 - width);
+                var held = new List<TcpListener>(width);
+                try
+                {
+                    for (var port = start; port < start + width; port++)
+                    {
+                        var listener = new TcpListener(IPAddress.Loopback, port);
+                        listener.Server.ExclusiveAddressUse = true;
+                        listener.Start();
+                        held.Add(listener);
+                    }
+                    return (start, start + width - 1);
+                }
+                catch (SocketException) { }
+                finally
+                {
+                    foreach (var listener in held) listener.Stop();
+                }
+            }
+            throw new InvalidOperationException($"No {width} consecutive loopback ports were bindable.");
+        }
+    }
+
+    [Fact]
     public void Server_never_downlinks_legacy_mapping_port()
     {
         var mapping = new OutboundMappingConfiguration("to-private", true, "127.0.0.1", "visited", "private", Convert.ToBase64String(new byte[32]), new string('A', 64))
@@ -475,6 +606,102 @@ public sealed class ConfigurationTests
         { Server = config.Server with { SecurityGroups = [] } })).Message);
         Assert.Contains("Invalid security group for", Assert.Throws<ConfigurationException>(() => loader.ValidateServerUpdate(config with
         { Clients = new Dictionary<string, ClientConfiguration> { ["agent"] = client with { Channels = [channel with { AuthorizedClientsOnly = true, AccessSecret = Convert.ToBase64String(new byte[32]) }] } } })).Message);
+    }
+
+    [Fact]
+    public void Unreadable_server_configuration_is_a_configuration_error()
+    {
+        using var directory = new TemporaryDirectory();
+        Directory.CreateDirectory(directory.Path);
+        var path = Path.Combine(directory.Path, "server.json");
+        Directory.CreateDirectory(path);
+        var exception = Assert.Throws<ConfigurationException>(() => new ConfigurationLoader().Load(path));
+        Assert.IsType<UnauthorizedAccessException>(exception.InnerException);
+        Assert.Contains("Unable to read", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Unreadable_client_file_and_directory_are_configuration_errors()
+    {
+        if (!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS()) return;
+        using var directory = new TemporaryDirectory();
+        var clients = Path.Combine(directory.Path, "clients");
+        Directory.CreateDirectory(clients);
+        var clientPath = Path.Combine(clients, "agent.json");
+        File.WriteAllText(clientPath, "{}");
+        var serverPath = WriteMinimalServer(directory.Path, clients);
+        File.SetUnixFileMode(clientPath, UnixFileMode.None);
+        try
+        {
+            var fileException = Assert.Throws<ConfigurationException>(() => new ConfigurationLoader().Load(serverPath));
+            Assert.IsType<UnauthorizedAccessException>(fileException.InnerException);
+            Assert.Contains("agent.json", fileException.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            File.SetUnixFileMode(clientPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        }
+
+        File.Delete(clientPath);
+        File.SetUnixFileMode(clients, UnixFileMode.None);
+        try
+        {
+            var directoryException = Assert.Throws<ConfigurationException>(() => new ConfigurationLoader().Load(serverPath));
+            Assert.IsType<UnauthorizedAccessException>(directoryException.InnerException);
+            Assert.Contains("Unable to read", directoryException.Message, StringComparison.Ordinal);
+            Assert.Contains(clients, directoryException.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            File.SetUnixFileMode(clients, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+    }
+
+    [Fact]
+    public async Task Unreadable_configuration_exits_with_code_2()
+    {
+        using var directory = new TemporaryDirectory();
+        Directory.CreateDirectory(directory.Path);
+        var path = Path.Combine(directory.Path, "server.json");
+        Directory.CreateDirectory(path);
+        using var process = Process.Start(new ProcessStartInfo("dotnet", $"exec \"{typeof(ConfigurationLoader).Assembly.Location}\" --config \"{path}\" --check-config")
+        {
+            RedirectStandardError = true,
+            RedirectStandardOutput = true,
+            UseShellExecute = false
+        });
+        Assert.NotNull(process);
+        var stderrTask = process.StandardError.ReadToEndAsync();
+        var stdoutTask = process.StandardOutput.ReadToEndAsync();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        try
+        {
+            await process.WaitForExitAsync(timeout.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            process.Kill(entireProcessTree: true);
+            throw;
+        }
+        var stderr = await stderrTask;
+        await stdoutTask;
+        Assert.Equal(2, process.ExitCode);
+        Assert.Contains("Configuration validation failed", stderr, StringComparison.Ordinal);
+        Assert.Contains("Unable to read", stderr, StringComparison.Ordinal);
+    }
+
+    private static string WriteMinimalServer(string directory, string clientsDirectory)
+    {
+        var path = Path.Combine(directory, "server.json");
+        File.WriteAllText(path, JsonSerializer.Serialize(new
+        {
+            schemaVersion = 1,
+            tunnel = new { listenAddress = "127.0.0.1", port = 7443, dataPort = 7444, tlsEnabled = false, certificatePemPath = "", privateKeyPemPath = "", handshakeTimeoutSeconds = 10, heartbeatIntervalSeconds = 15, heartbeatTimeoutSeconds = 45 },
+            dashboard = new { listenAddress = "127.0.0.1", port = 18080, refreshSeconds = 5, admin = new { username = "admin", passwordHash = "PBKDF2-SHA256$100000$AA==$AA==", sessionLifetimeMinutes = 60 } },
+            clientsDirectory,
+            limits = new { maxConnections = 20, maxPendingConnections = 10, maxUnauthenticatedConnections = 10, maxChannelsPerClient = 10, openTimeoutSeconds = 10, blockedWriteTimeoutSeconds = 120, halfCloseDrainTimeoutSeconds = 30 }
+        }));
+        return path;
     }
 
     private static LoadedConfiguration TestConfiguration(params ClientConfiguration[] clients) => new(

@@ -24,3 +24,25 @@
 ## 文档
 
 中文正文，稳定英文文件名，UTF-8、LF；链接使用仓库内相对路径。详细规则以文档管理规则为准。任务完成时说明实际改动、检查结果和未完成项。
+
+## Cursor Cloud 开发环境
+
+镜像内已有 .NET SDK 10、Node.js 24.22.0（`/usr/local/lib/nodejs/bin`，登录 shell 会排在 PATH 前面）、pnpm 11.19.0 和 PowerShell 7.6。依赖与日常校验命令以 [.github/workflows/ci.yml](.github/workflows/ci.yml) 为准：
+
+```bash
+pnpm --dir src/RelayLink.AdminWeb install --frozen-lockfile
+pnpm --dir src/RelayLink.AgentWeb install --frozen-lockfile
+npm --prefix website ci
+dotnet restore RelayLink.slnx --configfile NuGet.Config
+pnpm --dir src/RelayLink.AdminWeb typecheck
+pnpm --dir src/RelayLink.AdminWeb test
+pnpm --dir src/RelayLink.AdminWeb format:check
+pnpm --dir src/RelayLink.AgentWeb build
+pnpm --dir src/RelayLink.AgentWeb format:check
+node scripts/build-website.mjs
+npm --prefix website test
+dotnet test tests/RelayLink.UnitTests/RelayLink.UnitTests.csproj --configuration Release -p:SkipAdminWebBuild=true
+dotnet test tests/RelayLink.IntegrationTests/RelayLink.IntegrationTests.csproj --configuration Release -p:EnablePeerTlsTests=true -p:SkipAdminWebBuild=true
+```
+
+`scripts/start-local-acceptance.ps1` 通过 Windows 的 `Start-Process -WindowStyle` 启动进程。Linux 上的端到端检查使用上面的集成测试；若另起真实进程，监听只绑定 `127.0.0.1`，并且每个 Agent 使用独立配置目录，这样 `state/<profileId>` 不会互相覆盖。`.local/` 含本次生成的测试密钥，不要提交。

@@ -56,7 +56,17 @@ public sealed class ConfigurationLoader
         }
 
         var clients = new Dictionary<string, ClientConfiguration>(StringComparer.Ordinal);
-        foreach (var path in Directory.EnumerateFiles(clientsDirectory, "*.json", SearchOption.TopDirectoryOnly).OrderBy(path => path, StringComparer.Ordinal))
+        string[] clientFiles;
+        try
+        {
+            clientFiles = Directory.EnumerateFiles(clientsDirectory, "*.json", SearchOption.TopDirectoryOnly).ToArray();
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+        {
+            throw new ConfigurationException($"Unable to read {clientsDirectory}: {exception.Message}", exception);
+        }
+
+        foreach (var path in clientFiles.OrderBy(path => path, StringComparer.Ordinal))
         {
             var client = Deserialize<ClientConfiguration>(path);
             ValidateClient(client, path, server);
@@ -84,13 +94,10 @@ public sealed class ConfigurationLoader
             return JsonSerializer.Deserialize<T>(json, JsonOptions)
                 ?? throw new ConfigurationException($"Configuration is empty: {path}");
         }
-        catch (JsonException exception)
+        catch (Exception exception) when (exception is JsonException or IOException or UnauthorizedAccessException or System.Security.SecurityException)
         {
-            throw new ConfigurationException($"Invalid JSON in {path}: {exception.Message}");
-        }
-        catch (IOException exception)
-        {
-            throw new ConfigurationException($"Unable to read {path}: {exception.Message}");
+            var prefix = exception is JsonException ? $"Invalid JSON in {path}" : $"Unable to read {path}";
+            throw new ConfigurationException($"{prefix}: {exception.Message}", exception);
         }
     }
 

@@ -2,6 +2,7 @@ using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging.Abstractions;
 using RelayLink.Server.Configuration;
 using RelayLink.Server.Runtime;
+using RelayLink.Testing;
 
 namespace RelayLink.UnitTests;
 
@@ -10,10 +11,10 @@ public sealed class AuditServiceTests
     [Fact]
     public async Task Audit_is_persistent_queryable_and_recovers_unclosed_connections_once()
     {
-        var directory = Path.Combine(Path.GetTempPath(), $"relaylink-audit-{Guid.NewGuid():N}");
+        using var directory = new TestDirectory("relaylink-audit-");
         try
         {
-            var path = Path.Combine(directory, "audit.db");
+            var path = Path.Combine(directory.Path, "audit.db");
             var connectionId = Guid.NewGuid();
             var first = Service(path);
             await first.StartAsync(CancellationToken.None);
@@ -32,16 +33,16 @@ public sealed class AuditServiceTests
             await again.StartAsync(CancellationToken.None);
             Assert.Equal(2, (await again.ReadAsync(DateTimeOffset.UtcNow.AddHours(-1), DateTimeOffset.UtcNow.AddHours(1), null, "agent", 1, 50, CancellationToken.None)).Total);
         }
-        finally { SqliteConnection.ClearAllPools(); if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true); }
+        finally { SqliteConnection.ClearAllPools(); }
     }
 
     [Fact]
     public async Task Locked_database_rejects_audit_write_then_recovers()
     {
-        var directory = Path.Combine(Path.GetTempPath(), $"relaylink-audit-{Guid.NewGuid():N}");
+        using var directory = new TestDirectory("relaylink-audit-");
         try
         {
-            var path = Path.Combine(directory, "audit.db");
+            var path = Path.Combine(directory.Path, "audit.db");
             var service = Service(path);
             await service.StartAsync(CancellationToken.None);
             await using var blocker = new SqliteConnection($"Data Source={path}");
@@ -60,7 +61,7 @@ public sealed class AuditServiceTests
             await service.RecordAsync(new AuditEvent("admin_login_success", "success"));
             Assert.Equal(1, (await service.ReadAsync(DateTimeOffset.UtcNow.AddHours(-1), DateTimeOffset.UtcNow.AddHours(1), null, null, 1, 50, CancellationToken.None)).Total);
         }
-        finally { SqliteConnection.ClearAllPools(); if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true); }
+        finally { SqliteConnection.ClearAllPools(); }
     }
 
     [Fact]

@@ -11,6 +11,7 @@ using System.Text.Json;
 using System.Text;
 using Microsoft.Data.Sqlite;
 using RelayLink.Protocol;
+using RelayLink.Testing;
 using RelayLink.Transport;
 using RelayLink.Agent;
 using Microsoft.Extensions.Logging;
@@ -264,9 +265,12 @@ public sealed class ServerTunnelTests
             Assert.Equal(HttpStatusCode.Unauthorized, failed.StatusCode);
         }
         using var locked = await http.PostAsJsonAsync($"http://127.0.0.1:{fixture.DashboardPort}/api/v1/admin/session",
-            new { username = "other", password = "wrong-password" }, token);
+            new { username = "admin", password = "wrong-password" }, token);
         Assert.Equal(HttpStatusCode.TooManyRequests, locked.StatusCode);
         Assert.False(string.IsNullOrWhiteSpace(locked.Headers.RetryAfter?.ToString()));
+        using var otherName = await http.PostAsJsonAsync($"http://127.0.0.1:{fixture.DashboardPort}/api/v1/admin/session",
+            new { username = "other", password = "wrong-password" }, token);
+        Assert.Equal(HttpStatusCode.Unauthorized, otherName.StatusCode);
 
         using var exposed = new TunnelFixture();
         await exposed.StartAsync(dashboardListenAddress: "0.0.0.0");
@@ -1107,7 +1111,8 @@ public sealed class ServerTunnelTests
 
     private sealed class TunnelFixture : IDisposable
     {
-        private readonly string directory = Path.Combine(Path.GetTempPath(), $"relaylink-integration-{Guid.NewGuid():N}");
+        private readonly TestDirectory storage = new("relaylink-integration-");
+        private string directory => storage.Path;
         private readonly TcpListener targetListener = new(IPAddress.Loopback, 0);
         private Process? server;
         private Process? udpAgent;
@@ -1252,7 +1257,7 @@ public sealed class ServerTunnelTests
             udpAgent?.Dispose();
             if (server is { HasExited: false }) server.Kill(entireProcessTree: true);
             server?.Dispose();
-            try { Directory.Delete(directory, recursive: true); } catch (IOException) { }
+            storage.Dispose();
         }
 
         public string DiagnosticOutput()

@@ -11,6 +11,7 @@ using System.Text.Json;
 using RelayLink.Agent;
 using RelayLink.Protocol;
 using RelayLink.Server.Configuration;
+using RelayLink.Testing;
 using RelayLink.Transport;
 
 namespace RelayLink.IntegrationTests;
@@ -747,6 +748,7 @@ public sealed class PeerConnectionTests
             Assert.Equal(FrameType.PeerOpenGranted, grantFrame?.Type);
             grant = JsonProtocolSerializer.Deserialize<PeerOpenGrantedMessage>(grantFrame!.Payload.Span);
             Assert.Equal(requestId, grant.RequestId);
+            Assert.Equal(25_000, grant.SetupTimeoutMilliseconds);
         }
         Assert.Equal(encryptionEnabled, grant.EndToEndEncryptionEnabled);
         using var dataClient = new TcpClient();
@@ -776,7 +778,8 @@ public sealed class PeerConnectionTests
 
     internal sealed class Fixture : IDisposable
     {
-        private readonly string directory = Path.Combine(Path.GetTempPath(), $"relaylink-peer-{Guid.NewGuid():N}");
+        private readonly TestDirectory storage = new("relaylink-peer-");
+        private string directory => storage.Path;
         private readonly TcpListener target = new(IPAddress.Loopback, 0);
         private UdpClient? udpTarget;
         private readonly TcpListener targetB = new(IPAddress.Loopback, 0);
@@ -911,29 +914,35 @@ public sealed class PeerConnectionTests
         public async Task WaitOnlineAsync(CancellationToken token, int expected = 2, bool requireMappings = true)
         {
             using var http = new HttpClient();
+            var progress = "no overview";
             while (!token.IsCancellationRequested)
             {
                 try
                 {
                     using var response = await http.GetAsync($"http://127.0.0.1:{DashboardPort}/api/v1/overview", token);
                     var json = await response.Content.ReadFromJsonAsync<JsonElement>(cancellationToken: token);
-                    if (json.GetProperty("clientsOnline").GetInt32() == expected && (expected == 1 || !requireMappings || (TryReadPort("to-visited", out _) && TryReadPort("to-visited-b", out _))))
+                    var online = json.GetProperty("clientsOnline").GetInt32();
+                    var mappingsReady = !requireMappings || (TryReadPort("to-visited", out _) && TryReadPort("to-visited-b", out _));
+                    progress = $"clientsOnline={online}/{expected}; mappingsReady={mappingsReady}";
+                    if (online == expected && (expected == 1 || mappingsReady))
                     {
                         if (expected == 1) return;
                         var targetStatus = await http.GetFromJsonAsync<JsonElement>($"http://127.0.0.1:{VisitedDashboardPort}/api/v2/status", token);
-                        if (targetStatus.GetProperty("servers")[0].GetProperty("online").GetBoolean()) return;
+                        var targetOnline = targetStatus.GetProperty("servers")[0].GetProperty("online").GetBoolean();
+                        progress += $"; targetDashboardOnline={targetOnline}";
+                        if (targetOnline) return;
                     }
                 }
-                catch (HttpRequestException) { }
+                catch (HttpRequestException exception) { progress += $"; http={exception.Message}"; }
                 catch (OperationCanceledException) when (token.IsCancellationRequested)
                 {
-                    throw new InvalidOperationException($"Agents did not become online. {Logs()}");
+                    throw new InvalidOperationException($"Agents did not become online ({progress}). {Logs()}");
                 }
                 ThrowIfProcessExited();
                 try { await Task.Delay(100, token); }
                 catch (OperationCanceledException) when (token.IsCancellationRequested)
                 {
-                    throw new InvalidOperationException($"Agents did not become online. {Logs()}");
+                    throw new InvalidOperationException($"Agents did not become online ({progress}). {Logs()}");
                 }
             }
         }
@@ -1033,7 +1042,10 @@ public sealed class PeerConnectionTests
             if (!File.Exists(path)) return false;
             try
             {
-                using var json = JsonDocument.Parse(File.ReadAllText(path));
+                // Share delete so this poll does not pin ports.json against the agent's replace.
+                // On Windows a reader opened without FILE_SHARE_DELETE makes MoveFileEx fail.
+                using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                using var json = JsonDocument.Parse(stream);
                 if (!json.RootElement.TryGetProperty(mappingId, out var value)) return false;
                 port = value.GetInt32();
                 return port > 0;
@@ -1191,17 +1203,18 @@ public sealed class PeerConnectionTests
                 builder.Append('\n');
             }
 
-            var logDirectory = Path.Combine(directory, "logs");
-            if (Directory.Exists(logDirectory))
+            foreach (var path in Directory.EnumerateFiles(directory, "*.jsonl", SearchOption.AllDirectories))
             {
-                foreach (var path in Directory.EnumerateFiles(logDirectory, "*.jsonl"))
+                string text;
+                try
                 {
-                    string text;
-                    try { text = File.ReadAllText(path); }
-                    catch (IOException) { continue; }
-                    if (text.Length > 4000) text = text[^4000..];
-                    builder.Append("log ").Append(Path.GetFileName(path)).Append(": ").Append(text.Trim()).Append('\n');
+                    using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                    using var reader = new StreamReader(stream);
+                    text = reader.ReadToEnd();
                 }
+                catch (IOException) { continue; }
+                if (text.Length > 4000) text = text[^4000..];
+                builder.Append("log ").Append(Path.GetRelativePath(directory, path)).Append(": ").Append(text.Trim()).Append('\n');
             }
 
             return builder.ToString();
@@ -1223,7 +1236,7 @@ public sealed class PeerConnectionTests
                 if (!process.HasExited) process.Kill(entireProcessTree: true);
                 process.Dispose();
             }
-            try { Directory.Delete(directory, recursive: true); } catch (IOException) { }
+            storage.Dispose();
         }
 
     }

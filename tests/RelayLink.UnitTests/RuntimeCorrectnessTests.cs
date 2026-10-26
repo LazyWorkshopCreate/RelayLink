@@ -3,6 +3,7 @@ using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text.Json;
 using Microsoft.Extensions.Logging.Abstractions;
+using RelayLink.Protocol;
 using RelayLink.Server.Configuration;
 using RelayLink.Server.Runtime;
 using RelayLink.Transport;
@@ -137,6 +138,52 @@ public sealed class RuntimeCorrectnessTests
         Assert.Null(accepted.Client);
     }
 
+    [Theory]
+    [InlineData("queue")]
+    [InlineData("timeout")]
+    [InlineData("closed")]
+    [InlineData("write")]
+    public async Task Persisted_channel_reports_a_push_failure_without_closing_a_live_session(string failure)
+    {
+        using var workspace = new ConfigWorkspace();
+        var client = workspace.Runtime.Configuration.Clients["agent"];
+        Assert.True(workspace.Runtime.Sessions.TryRegister(client, out var session));
+        session!.ProtocolVersion = ProtocolConstants.Version;
+        session.MarkReady();
+        Stream stream = failure switch
+        {
+            "timeout" => new HangingStream(),
+            "write" => new ThrowingStream(),
+            _ => Stream.Null
+        };
+        session.AttachControlWriter(new FrameWriter(stream, TimeSpan.FromMilliseconds(50)));
+        if (failure == "queue")
+        {
+            var pending = ConfigurationSnapshotFactory.Create(client, workspace.Runtime.Configuration, session.ProtocolVersion).Snapshot;
+            for (var index = 0; index < 32; index++)
+                await session.SendConfigurationUpdateAsync(pending, "pending-" + index, CancellationToken.None);
+        }
+        if (failure == "closed") session.Close();
+
+        var (saved, push) = await workspace.Editor.UpdateAsync("agent", "echo",
+            new ChannelUpdateRequest("renamed-echo", true, "127.0.0.1", workspace.Port, "127.0.0.1", 9, 2, 5), CancellationToken.None);
+
+        Assert.Equal("renamed-echo", saved.DisplayName);
+        Assert.False(push.PushedToAgent);
+        Assert.Equal(failure switch
+        {
+            "queue" => "configuration push queue is full",
+            "timeout" => "control connection write timed out",
+            "write" => "control connection write failed",
+            _ => "control session is closed"
+        }, push.FailureReason);
+        Assert.Contains("renamed-echo", await File.ReadAllTextAsync(workspace.ClientPath));
+        Assert.Equal(workspace.Port, workspace.Runtime.Configuration.Clients["agent"].Channels[0].ListenPort);
+        if (failure == "queue") Assert.True(session.IsReady);
+        else Assert.False(session.IsReady);
+        await workspace.Service.StopAsync(CancellationToken.None);
+    }
+
     private static ChannelUpdateRequest Update(int port) =>
         new("Echo", true, "127.0.0.1", port, "127.0.0.1", 9, 2, 5);
 
@@ -205,5 +252,37 @@ public sealed class RuntimeCorrectnessTests
             Service.Dispose();
             try { Directory.Delete(directory, recursive: true); } catch (IOException) { }
         }
+    }
+
+    private sealed class HangingStream : Stream
+    {
+        public override bool CanRead => false;
+        public override bool CanSeek => false;
+        public override bool CanWrite => true;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken) =>
+            new(Task.Delay(Timeout.Infinite, cancellationToken));
+    }
+
+    private sealed class ThrowingStream : Stream
+    {
+        public override bool CanRead => false;
+        public override bool CanSeek => false;
+        public override bool CanWrite => true;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new IOException("write failed");
+        public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken) =>
+            throw new IOException("write failed");
     }
 }

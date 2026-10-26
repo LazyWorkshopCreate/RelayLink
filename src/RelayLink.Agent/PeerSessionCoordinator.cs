@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Buffers.Binary;
 using System.Net;
 using System.Net.Security;
@@ -32,11 +33,58 @@ internal sealed class PeerSessionCoordinator(
     private int openConnections;
     private ClientConfigSnapshot snapshot = null!;
     private long taskId;
+    private long udpDropped;
+    private long udpDropLogAt;
+    internal static TimeSpan PeerSetupDeadline(int deliveredMilliseconds, int localTimeoutSeconds)
+    {
+        var delivered = deliveredMilliseconds > 0 ? TimeSpan.FromMilliseconds(deliveredMilliseconds) : TimeSpan.Zero;
+        var local = localTimeoutSeconds > 0 ? TimeSpan.FromSeconds(localTimeoutSeconds) : TimeSpan.Zero;
+        var chosen = delivered > local ? delivered : local;
+        return chosen > TimeSpan.Zero ? chosen : TimeSpan.FromSeconds(20);
+    }
+
     public IReadOnlyList<PeerMappingAddress> Addresses => listeners.Values
         .Select(binding => new PeerMappingAddress(binding.Mapping.MappingId, "127.0.0.1", binding.Port)).ToArray();
 
+    internal static string? InvalidOutboundMappingReason(IReadOnlyList<OutboundMappingSnapshot> mappings)
+    {
+        var ids = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var mapping in mappings)
+        {
+            if (string.IsNullOrWhiteSpace(mapping.MappingId) || !ids.Add(mapping.MappingId))
+                return "mapping id is empty or duplicated";
+            if (mapping.LocalAddress != "127.0.0.1")
+                return "local address must be 127.0.0.1";
+            try
+            {
+                if (Convert.FromBase64String(mapping.AccessSecret).Length < 32)
+                    return "access secret must contain at least 32 bytes";
+            }
+            catch (FormatException)
+            {
+                return "access secret is not valid Base64";
+            }
+
+            if (mapping.TransportProtocol is not ("tcp" or "udp"))
+                return "transport protocol must be tcp or udp";
+            if (mapping.ApplicationProtocol is not ("raw" or "http"))
+                return "application protocol must be raw or http";
+            if (mapping.ApplicationProtocol == "http" && (mapping.TransportProtocol != "tcp" || mapping.Http is null))
+                return "http mappings require tcp and http options";
+        }
+
+        return null;
+    }
+
     public void ApplyConfiguration(ClientConfigSnapshot configuration)
     {
+        var reason = InvalidOutboundMappingReason(configuration.OutboundMappings);
+        if (reason is not null)
+        {
+            logger.LogWarning("Rejected outbound mapping snapshot for profile {ProfileId}: {Reason}. Existing listeners were left unchanged.", agent.ProfileId, reason);
+            throw new AgentPermanentException($"Server sent an invalid outbound mapping: {reason}.");
+        }
+
         Volatile.Write(ref snapshot, configuration);
         var wanted = configuration.OutboundMappings.Where(mapping => mapping.Enabled).ToDictionary(mapping => mapping.MappingId, StringComparer.Ordinal);
         foreach (var existing in listeners.Values.ToArray())
@@ -47,8 +95,6 @@ internal sealed class PeerSessionCoordinator(
         }
         foreach (var mapping in wanted.Values)
         {
-            if (mapping.LocalAddress != "127.0.0.1" || Convert.FromBase64String(mapping.AccessSecret).Length < 32)
-                throw new AgentPermanentException("Server sent an invalid outbound mapping.");
             if (listeners.ContainsKey(mapping.MappingId)) continue;
             try
             {
@@ -57,7 +103,9 @@ internal sealed class PeerSessionCoordinator(
                     : new LocalBinding(mapping, ports.Bind(mapping.MappingId), null);
                 listeners.Add(mapping.MappingId, binding);
                 Track(binding.Udp is { } udp
-                    ? udp.RunAsync(configuration.MaxConnections, _ => true, datagram => HandleDatagramCallerAsync(datagram, mapping), sessionToken)
+                    ? udp.RunAsync(configuration.MaxConnections, _ => true, datagram => HandleDatagramCallerAsync(datagram, mapping), sessionToken,
+                        exception => logger.LogError(exception, "UDP peer handler failed for mapping {MappingId}.", mapping.MappingId),
+                        NoteUdpDrop)
                     : AcceptLoopAsync(binding));
                 logger.LogInformation("Peer loopback listener {MappingId} started on 127.0.0.1:{Port}.", mapping.MappingId, binding.Port);
             }
@@ -166,7 +214,7 @@ internal sealed class PeerSessionCoordinator(
         using (caller)
         using (var deadline = CancellationTokenSource.CreateLinkedTokenSource(sessionToken, datagram?.Token ?? CancellationToken.None))
         {
-            deadline.CancelAfter(TimeSpan.FromSeconds(20));
+            deadline.CancelAfter(PeerSetupDeadline(0, 0));
             var requestId = Guid.NewGuid();
             var reply = new TaskCompletionSource<PeerOpenGrantedMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
             requests[requestId] = reply;
@@ -174,6 +222,7 @@ internal sealed class PeerSessionCoordinator(
             {
                 await controlWriter.WriteAsync(new Frame(FrameType.PeerOpenRequest, JsonProtocolSerializer.Serialize(new PeerOpenRequestMessage(requestId, mapping.MappingId))), deadline.Token);
                 var grant = await reply.Task.WaitAsync(deadline.Token);
+                deadline.CancelAfter(PeerSetupDeadline(grant.SetupTimeoutMilliseconds, 0));
                 if (grant.TransportProtocol != mapping.TransportProtocol) throw new ProtocolException("Peer transport changed; wait for updated configuration.");
                 await using var connection = await ConnectDataAsync(grant.ConnectionId, grant.SessionId, grant.Token, "caller", deadline.Token);
                 using var tls = grant.EndToEndEncryptionEnabled ? new SslStream(connection.Framed, leaveInnerStreamOpen: true) : null;
@@ -228,7 +277,7 @@ internal sealed class PeerSessionCoordinator(
             open.HttpIngress.PolicyHash != HttpProxyPolicy.Hash(channel) || open.HttpIngress.Scheme != channel.Http!.PeerEntryScheme)) return;
         if (channel.ApplicationProtocol != "http" && open.HttpIngress is not null) return;
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(sessionToken);
-        deadline.CancelAfter(TimeSpan.FromSeconds(20));
+        deadline.CancelAfter(PeerSetupDeadline(open.SetupTimeoutMilliseconds, channel.TargetConnectTimeoutSeconds));
         try
         {
             await using var connection = await ConnectDataAsync(open.ConnectionId, open.SessionId, open.Token, "target", deadline.Token);
@@ -411,6 +460,16 @@ internal sealed class PeerSessionCoordinator(
             }
         }, relayCancellation.Token);
         await RelayPump.CompleteBidirectionalAsync(toPeer, fromPeer, () => { relayCancellation.Cancel(); socket.Dispose(); }, halfCloseDrainTimeout);
+    }
+
+    private void NoteUdpDrop()
+    {
+        var total = Interlocked.Increment(ref udpDropped);
+        var now = Stopwatch.GetTimestamp();
+        var last = Volatile.Read(ref udpDropLogAt);
+        if (now - last < Stopwatch.Frequency * 30) return;
+        if (Interlocked.CompareExchange(ref udpDropLogAt, now, last) != last) return;
+        logger.LogWarning("UDP queue dropped the newest datagram; {DroppedTotal} dropped for this profile since it came online.", total);
     }
 
     private void Track(Task task)

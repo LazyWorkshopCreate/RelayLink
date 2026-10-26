@@ -2,8 +2,8 @@
 
 文档 ID：DES-002\
 状态：Draft\
-版本：v1.8.0\
-更新日期：2026-10-12\
+版本：v1.11.2\
+更新日期：2026-10-24\
 调研日期：2026-09-17
 
 ## 1. 范围与调研结论
@@ -37,11 +37,11 @@ outboundMappings[]:
 
 所有字段由 Server 校验、持久化和下发。Agent 本地配置文件仍仅存自身注册所需的 Server 地址、控制/数据端口、客户端 ID、客户端密钥、控制 TLS CA 和重连参数；不存映射或目标访问密钥。目标 Agent 本地端到端证书私钥是自动生成的身份状态，不是业务配置；当前实现将 PFX 写入 Agent 本地配置文件所在目录，用 Windows 当前用户 ACL 或 Unix `0600` 权限保护。部署时须将 Agent 配置放在受保护的数据目录，不提交仓库或由 Server 下载私钥。首次启动后可执行 `RelayLink.Agent --config <配置路径> --show-e2e-fingerprint` 获取本机证书 SHA-256 指纹，并与管理页客户端级已登记值带外核对。新证书不得自动覆盖已有固定指纹；旧通道级指纹字段不再支持，必须在升级前从客户端文件中删除。多服务端模式拟按本机 `profileId` 分别保存身份，详见[多服务端技术设计](multi-server-agent.md)；此处描述的是当前单服务端实现。
 
-端口所有权现由 Agent 持有：基础配置的 `outboundPortRangeStart`/`outboundPortRangeEnd` 默认 20000–59999；首次在范围内选空闲端口，按映射 ID 写入 Agent 配置目录的 `<clientId>.ports.json`。再次启动优先绑定原端口；若占用，扫描范围内其他端口并原子更新状态文件。服务端旧 `localPort` 字段只为读取历史配置保留，不再参与快照或写入新的映射。服务端验证目标引用、密钥相等、访问入口固定指纹与目标客户端指纹相等，并阻止将授权模式通道同时开放原云端代理监听。密钥不进入匿名 API、历史记录或日志；证书指纹作为非秘密元数据可在客户端查询结果和已登录管理页展示。受保护管理 API 可生成/保存密钥，但不回显密钥。
+端口所有权现由 Agent 持有：基础配置的 `outboundPortRangeStart`/`outboundPortRangeEnd` 默认 20000–59999；首次在范围内选空闲端口，按映射 ID 写入 Agent 配置目录的 `<clientId>.ports.json`。再次启动优先绑定原端口；若占用，扫描范围内其他端口并原子更新状态文件。Windows 上若该替换因文件被短暂占用而抛出 `UnauthorizedAccessException` 或 `IOException`，会在有限次数内重试同一次原子替换；仍失败时只放弃当前入口。服务端旧 `localPort` 字段只为读取历史配置保留，不再参与快照或写入新的映射。服务端验证目标引用、密钥相等、访问入口固定指纹与目标客户端指纹相等，并阻止将授权模式通道同时开放原云端代理监听。密钥不进入匿名 API、历史记录或日志；证书指纹作为非秘密元数据可在客户端查询结果和已登录管理页展示。受保护管理 API 可生成/保存密钥，但不回显密钥。
 
 Windows Schannel 在运行时需把文件私钥加载到当前用户密钥提供程序，但无需预先安装证书到系统证书库；Linux 以进程内临时密钥方式加载同一 PFX，并依靠配置目录的 Unix `0600` 权限保护落盘文件。服务端部署源仍是 PEM，Agent 身份源仍是本地 PFX。
 
-创建端到端访问入口的管理 API 只接受目标客户端 ID 和目标通道 ID，不接受调用方指定入口 ID 或启停状态；新入口默认启用。创建后不提供修改接口，调整时删除后重建；删除撤销旧连接，重建可能改变本机端口。旧配置中的自定义入口 ID 仍可读取和删除。
+创建端到端访问入口的管理 API 只接受目标客户端 ID 和目标通道 ID，不接受调用方指定入口 ID 或启停状态；新入口默认启用。访问密钥和目标证书指纹取自同一次写入锁内刚从磁盘重新加载的配置，不用可能落后于文件的内存副本。创建后不提供修改接口，调整时删除后重建；删除撤销旧连接，重建可能改变本机端口。旧配置中的自定义入口 ID 仍可读取和删除。
 
 ## 3. 协议与状态
 
@@ -50,15 +50,15 @@ Windows Schannel 在运行时需把文件私钥加载到当前用户密钥提供
 | 帧 | 发送方向 | 作用 |
 |---|---|---|
 | `PeerOpenRequest` | 访问 Agent→Server 控制连接 | `requestId`、`mappingId`；**不含业务字节或明文密钥** |
-| `PeerOpen` | Server→被访问 Agent 控制连接 | 一次性 `connectionId`、调用方 `clientId`、目标通道、加密模式及被访问方绑定令牌 |
-| `PeerOpenGranted` | Server→访问 Agent 控制连接 | 本次连接 ID、加密模式及访问方绑定令牌 |
+| `PeerOpen` | Server→被访问 Agent 控制连接 | 一次性 `connectionId`、调用方 `clientId`、目标通道、加密模式、被访问方绑定令牌，以及 `setupTimeoutMilliseconds` |
+| `PeerOpenGranted` | Server→访问 Agent 控制连接 | 本次连接 ID、加密模式、访问方绑定令牌，以及 `setupTimeoutMilliseconds` |
 | `PeerOpenRejected` | Server→访问 Agent 控制连接 | 拒绝原因 |
 | `PeerBindData` | 两端 Agent→Server 数据连接 | 当前会话、连接、角色及一次性随机令牌，恰好消费一次 |
 | `PeerBindAccepted` | Server→两端 Agent | 两条数据连接配对成功，进入帧中继状态 |
 | `PeerMappingStatus` | 访问 Agent→Server 控制连接 | 当前会话与配置版本、实际成功绑定的映射 ID 和 loopback 端口；不含密钥 |
 | `Data/Fin/Reset` | 两端 Agent↔Server 数据连接 | 原样转发加密记录或明文业务字节及结束信号 |
 
-访问方 Agent 已通过现有独立客户端密钥注册；Server 从会话中取得调用方 ID，只按 Server 自己的已确认映射解析目标，不能相信请求自带目标 ID、目标端口或访问密钥。Server 不把访问密钥塞进 `PeerOpen`；被访问 Agent 使用自己的已确认通道快照取密钥，并拒绝 Server 通知模式与快照不一致的连接。
+访问方 Agent 已通过现有独立客户端密钥注册；Server 从会话中取得调用方 ID，只按 Server 自己的已确认映射解析目标，不能相信请求自带目标 ID、目标端口或访问密钥。同一调用会话在最近两分钟内重复提交同一个 `requestId` 时，服务端以协议错误拒绝，不额外占用配额或中继；窗口过期后该标识可以再次使用。中继任务中的意外异常记入错误日志并清理该中继。Server 不把访问密钥塞进 `PeerOpen`；被访问 Agent 使用自己的已确认通道快照取密钥，并拒绝 Server 通知模式与快照不一致的连接。
 
 加密模式先完成内层 TLS 握手并验证目标证书指纹，再在 TLS 内交换访问证明。明文模式跳过 TLS，直接在帧化流上交换访问证明。两种模式下，被访问方都发出每连接 32 字节随机挑战；访问方返回带域分隔的 HMAC-SHA256，输入包含调用方 ID、目标通道 ID、连接 ID、`tls`/`plain` 模式和挑战。被访问方固定时间比较成功前不得连接业务目标。加密模式不允许握手失败后自动降级；明文模式只能来自服务端已确认的目标通道配置。
 
@@ -68,7 +68,7 @@ Server 只验证帧类型、长度、配对关系与资源限额，将 `Data/Fin
 
 ## 4. 顺序与失效
 
-Agent 每次应用服务端快照后，先绑定本机端口并保存端口状态，再在认证控制连接上上报 `PeerMappingStatus`。服务端校验会话、已确认的配置版本、映射归属、端口范围与同一报告内不重复，然后仅在该会话在线时展示上报地址。配置更新时先确认新版本，再上报新地址；断线时服务端清除会话状态。本机网页默认在 `http://127.0.0.1:18081/`，可用 `dashboardPort` 调整，设为 0 时网页和本机 API 一并关闭；二者由同一个 Kestrel 实例绑定 IPv4 loopback，不额外开放端口。
+Agent 先校验整份 `OutboundMappings`（地址、密钥 Base64 与长度、协议组合、映射 ID 唯一），全部通过后才停止旧入口并创建新入口。无效快照记为永久配置错误并保持已有入口，不在校验中途改监听。通过后先绑定本机端口并保存端口状态，再在认证控制连接上上报 `PeerMappingStatus`。服务端校验会话、已确认的配置版本、映射归属、端口范围与同一报告内不重复，然后仅在该会话在线时展示上报地址。配置更新时先确认新版本，再上报新地址；断线时服务端清除会话状态。本机网页默认在 `http://127.0.0.1:18081/`，可用 `dashboardPort` 调整，设为 0 时网页和本机 API 一并关闭；二者由同一个 Kestrel 实例绑定 IPv4 loopback，不额外开放端口。
 
 供第三方本机软件读取的现有稳定接口为 `GET /api/v1/status`、`GET /api/v1/channels` 和 `GET /api/v1/mappings`；旧 `GET /api/status` 保留兼容。聚合接口字段为 `clientId`、`online`、`updatedAtUtc`、`channels` 与 `outboundMappings`；两个资源接口保留相同的客户端状态元数据，并分别返回 `channels` 或 `mappings`。数据直接取自不可变的 `AgentStatusSnapshot`：在线时来自已确认的控制快照及实际端口绑定，离线时返回空列表，避免把旧地址表示为仍可用。当前接口只注册 GET 路由，写方法由框架返回 405；全部响应禁止缓存，不启用 CORS。视图模型只包含页面已经允许展示的字段，不包含客户端密钥、通道访问密钥、目标证书指纹、私钥或令牌。当前本机网页只读显示通道、访问目标及已监听地址；拟议的多服务端页面将另设受保护的服务端增删操作，见[多服务端技术设计](multi-server-agent.md)，不提供已保存注册密钥读取。服务端匿名状态页也按客户端以表格展示访问入口和当前上报地址；公开映射查询不返回访问密钥或目标证书指纹，写入仍受管理员会话及 CSRF 保护。
 
@@ -81,7 +81,7 @@ Agent 每次应用服务端快照后，先绑定本机端口并保存端口状�
         → 双向 TLS 记录或明文业务字节转发
 ```
 
-服务端 Bind 建立时限由 `openTimeoutSeconds` 控制；Agent 的可选内层 TLS、授权证明和目标 Connect 各受独立超时与取消约束。两端会话、映射或目标通道禁用时拒绝新请求；目标通道的加密模式或其他运行配置变化、访问方映射变化/删除时，服务端按连接归属主动撤销相关待建立及已建立互访连接，相同内容保存不撤销，其他通道保持运行。数据隧道断开或超时也会清理连接，详见 [ADR-0009](../adr/0009-revoke-connections-on-channel-change.md)。每次请求生成新的随机连接 ID 和双侧独立随机 Bind token；重放 token、跨会话 token、角色错置都拒绝。服务端监控累计互访帧载荷字节：加密通道包含 TLS 开销，明文通道包含访问证明和业务字节。历史 API 为兼容保留 `peerCiphertext*` 字段名，但界面统一称“互访转发字节”。
+服务端 Bind 建立时限由 `openTimeoutSeconds` 控制。`PeerOpen` 与 `PeerOpenGranted` 另携带 `setupTimeoutMilliseconds`，取值为 `openTimeoutSeconds + targetConnectTimeoutSeconds`。访问方在收到授权后按该值重置建立截止时间；被访问方取它和本通道 `targetConnectTimeoutSeconds` 的较大者。v3/v4 帧同样保留该字段；旧实现忽略未知 JSON 字段，因此已发布的旧 Agent 仍使用内置 20 秒。当前代码即使按 v3/v4 封帧，也会按字段等待超过 20 秒的建立预算。对端完全省略该字段时，访问方仍用 20 秒，被访问方用 `max(20 秒, targetConnectTimeoutSeconds)`。目标拨号本身仍受通道的 `targetConnectTimeoutSeconds` 约束。Agent 的可选内层 TLS、授权证明和目标 Connect 各受独立超时与取消约束。两端会话、映射或目标通道禁用时拒绝新请求；目标通道的加密模式或其他运行配置变化、访问方映射变化/删除时，服务端按连接归属主动撤销相关待建立及已建立互访连接，相同内容保存不撤销，其他通道保持运行。数据隧道断开或超时也会清理连接，详见 [ADR-0009](../adr/0009-revoke-connections-on-channel-change.md)。每次请求生成新的随机连接 ID 和双侧独立随机 Bind token；重放 token、跨会话 token、角色错置都拒绝。服务端监控累计互访帧载荷字节：加密通道包含 TLS 开销，明文通道包含访问证明和业务字节。历史 API 为兼容保留 `peerCiphertext*` 字段名，但界面统一称“互访转发字节”。
 
 UDP 互访使用同一访问证明和可选内层 TLS，证明完成后的流承载长度封装报文；来源会话、本机 UDP 入口、协议切换下发和空闲回收见 [UDP 设计](udp-forwarding.md)。TCP 半关闭设计不适用于 UDP。
 

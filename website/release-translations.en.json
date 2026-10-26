@@ -1,4 +1,59 @@
 {
+  "v0.1.0-rc.12": {
+    "title": "RelayLink v0.1.0-rc.12",
+    "intro": "A release candidate after v0.1.0-rc.11 that tightens Agent local writes, admin login lockout, configuration push, and runtime failure handling. Read-only status on the loopback admin page stays anonymous, and change endpoints require a local token. The admin endpoint stays plain HTTP by design.",
+    "sections": [
+      {
+        "title": "Highlights",
+        "items": [
+          "The Agent loopback page still has no password. Read-only status stays anonymous. Changes to /api/v2/admin/* must carry the X-RelayLink-Local-Token request header. The token is stored beside agent.json in local-management.token: Unix mode 0600, and a Windows DACL limited to the current identity, SYSTEM, and Administrators. Importing useTls=false must also submit confirmInsecureTransport=CONNECT_WITHOUT_TLS. Successful creates, updates, deletes, and enable or disable writes go to the Agent file log, recording the configuration-item identifier, host, port, useTls, and the client identifier, without secrets or tokens. Enable or disable records the result already persisted while the change lock was held.",
+          "Admin login lockout now counts by the direct connection address and username. The same pair locks after five failures. The same address also has a combined limit of 20. A full state table returns 503 with Retry-After. Unexpired history is still not evicted. Forwarded headers are not read.",
+          "After the client file and listeners have already been updated, a configuration push that fails before any frame bytes are written returns 200 or 201 with pushedToAgent=false, and the control session stays. A failure after a frame write or flush has started closes that session, because the byte stream may already be out of sync. Saved files are not rolled back.",
+          "PeerOpen and PeerOpenGranted carry setupTimeoutMilliseconds, the sum of openTimeoutSeconds and the target channel's targetConnectTimeoutSeconds. v3 and v4 frames keep the field. The current Agent uses that value when the frame version is 3 or 4, including budgets longer than 20 seconds. Agents released earlier ignore the unknown JSON and still use the built-in 20-second cap.",
+          "The Agent ApplyConfiguration validates every outbound mapping before it stops or creates listeners.",
+          "Heartbeat time and RTT are published from the same immutable snapshot. A failed TryRegister abandons the session that has not yet been used.",
+          "The proxy accept loop retries a recoverable socket error at most three times. Once those retries are exhausted it logs and degrades /health/ready. Retrying a single recoverable error does not clear readiness. A failed listener is replaced the next time configuration is applied successfully, and /health/ready returns to 200.",
+          "Each session keeps a two-minute deduplication window for RequestId before the quota check. An unexpected exception in the relay RunAsync is logged and cleanup is completed.",
+          "A newly created mapping uses the LoadedConfiguration just read from disk.",
+          "A configuration access failure exits with code 2. UnauthorizedAccessException, SecurityException, and a failure to access the client directory are converted to ConfigurationException.",
+          "The overview, dashboards, channel list, and mapping status share the same channel-availability decision, including UDP on v3 clients.",
+          "On initial registration and on configuration updates, the Agent requires the snapshot ClientId to match the configuration item's ClientId, otherwise it throws AgentPermanentException. A correct configuration hash alone does not prove that the snapshot belongs to that item.",
+          "Before writing any bytes, FrameWriter rejects invalid DATA and FIN using the reader-side length rules. The UDP listener holds the session before calling the handler. A synchronous or asynchronous handler failure only cleans up that session and logs it, and does not stop the listener. A full UDP queue still drops the newest datagram. Each drop increments udpDroppedTotal on the channel snapshot and the dashboard snapshot. The Agent logs the cumulative value for that configuration item at most once every 30 seconds."
+        ]
+      },
+      {
+        "title": "Upgrade and compatibility",
+        "items": [
+          "NTP1 remains v5, and JSON schemaVersion remains 1. Server continues to accept v3, v4, and v5.",
+          "The admin UI remains plain HTTP on loopback by design. Some frame deadlines remain a single overall time limit. Anonymous read-only admin status stays as designed.",
+          "When calling an Agent change endpoint, read the token from local-management.token and set X-RelayLink-Local-Token. When importing useTls=false, also submit confirmInsecureTransport=CONNECT_WITHOUT_TLS.",
+          "Agents that predate setupTimeoutMilliseconds ignore the field, and peer setup remains limited to 20 seconds. The current Agent also uses the server-supplied budget for v3 and v4 frames.",
+          "When the configuration is already on disk and the push fails before any frame bytes are written, the save succeeds with pushedToAgent=false and the files are not rolled back. A failure halfway through a write closes the control session.",
+          "When the snapshot ClientId does not match the configuration item, the Agent refuses registration and later configuration updates.",
+          "Ordinary TCP, UDP, and HTTP forwarding remains that of v0.1.0-rc.11. This candidate also rejects invalid DATA and FIN before writing, isolates a failed UDP session handler, and counts queue drops in udpDroppedTotal."
+        ]
+      },
+      {
+        "title": "Verification and limitations",
+        "items": [
+          "Since v0.1.0-rc.11 (45bd296), main has merged #13 (93599919), #14 (a037d3ce), #15 (4a522679), and #16 (f756c386), plus the earlier #9, #10, #11, and #12.",
+          "Verify on main at f756c386 passed, covering Ubuntu, Windows, the macOS Agent (arm64 and x86_64), and the website.",
+          "#9 moves test-fixture temporary directories off the shared ACL. #12 added a self-hosted review workflow in the private source repository; that private infrastructure configuration is excluded from the public repository.",
+          "This candidate has no new TestClient-01 Docker smoke record. Windows installers are unsigned, and macOS archives are unsigned and not notarized, the same as v0.1.0-rc.11."
+        ]
+      },
+      {
+        "title": "Release assets",
+        "items": [
+          "Self-contained Linux x64 and Windows x64 Server archives",
+          "Self-contained Linux x64 Agent archive",
+          "Self-contained and framework-dependent Windows x64 Agent archives and installers",
+          "Self-contained macOS Intel and Apple Silicon Agent archives",
+          "SHA256SUMS checksum manifest"
+        ]
+      }
+    ]
+  },
   "v0.1.0-rc.11": {
     "title": "RelayLink v0.1.0-rc.11",
     "intro": "A release candidate after v0.1.0-rc.10 that tightens the management plane, runtime connection limits, and secret-file permissions. The admin endpoint stays plain HTTP and the examples and Docker setup listen on loopback by default. Client connection limits apply immediately, and TCP connections that are silent in both directions close after the server idle timeout.",

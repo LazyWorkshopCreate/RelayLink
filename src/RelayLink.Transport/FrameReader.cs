@@ -52,7 +52,7 @@ public sealed class FrameReader(Stream stream, TimeSpan? partialFrameTimeout = n
             throw new ProtocolException("Frame payload exceeds its allowed limit.");
         }
 
-        ValidateLength(type, (int)payloadLength);
+        FrameConstraints.ValidateLength(type, (int)payloadLength);
         var payload = new byte[(int)payloadLength];
         if (payload.Length > 0 && await ReadAtLeastAsync(payload, allowEndOfStream: false, cancellationToken) != payload.Length)
         {
@@ -60,24 +60,6 @@ public sealed class FrameReader(Stream stream, TimeSpan? partialFrameTimeout = n
         }
 
         return new Frame(type, payload, flags);
-    }
-
-    private static void ValidateLength(FrameType type, int length)
-    {
-        if (type == FrameType.Data && (length < 1 || length > ProtocolConstants.MaxDataPayloadLength))
-        {
-            throw new ProtocolException("DATA payload length is invalid.");
-        }
-
-        if (type == FrameType.Fin && length != 0)
-        {
-            throw new ProtocolException("FIN payload must be empty.");
-        }
-
-        if ((type == FrameType.Error || type == FrameType.Reset) && length > ProtocolConstants.MaxErrorPayloadLength)
-        {
-            throw new ProtocolException("Error payload length is invalid.");
-        }
     }
 
     private async ValueTask<int> ReadAtLeastAsync(Memory<byte> buffer, bool allowEndOfStream, CancellationToken cancellationToken)

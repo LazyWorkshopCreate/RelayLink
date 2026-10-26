@@ -21,6 +21,21 @@ public sealed class FrameTests
     }
 
     [Fact]
+    public async Task Writer_rejects_frames_the_reader_cannot_accept_before_writing()
+    {
+        await using var stream = new MemoryStream();
+        var writer = new FrameWriter(stream);
+        await Assert.ThrowsAsync<ProtocolException>(() => writer.WriteAsync(new Frame(FrameType.Data, ReadOnlyMemory<byte>.Empty), CancellationToken.None).AsTask());
+        await Assert.ThrowsAsync<ProtocolException>(() => writer.WriteAsync(new Frame(FrameType.Data, new byte[ProtocolConstants.MaxDataPayloadLength + 1]), CancellationToken.None).AsTask());
+        await Assert.ThrowsAsync<ProtocolException>(() => writer.WriteAsync(new Frame(FrameType.Fin, new byte[] { 1 }), CancellationToken.None).AsTask());
+        Assert.Equal(0, stream.Length);
+
+        await writer.WriteAsync(new Frame(FrameType.Data, new byte[ProtocolConstants.MaxDataPayloadLength]), CancellationToken.None);
+        await writer.WriteAsync(new Frame(FrameType.Fin, ReadOnlyMemory<byte>.Empty), CancellationToken.None);
+        Assert.True(stream.Length > 0);
+    }
+
+    [Fact]
     public async Task Reader_rejects_empty_data_frame()
     {
         await using var stream = new MemoryStream(new byte[] { (byte)'N', (byte)'T', (byte)'P', (byte)'1', ProtocolConstants.Version, (byte)FrameType.Data, 0, 0, 0, 0, 0, 0 });

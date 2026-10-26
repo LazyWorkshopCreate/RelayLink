@@ -12,10 +12,7 @@ public sealed class FrameWriter(Stream stream, TimeSpan? blockedWriteTimeout = n
 
     public async ValueTask WriteAsync(Frame frame, CancellationToken cancellationToken)
     {
-        if (frame.Flags != 0 || frame.Payload.Length > ProtocolConstants.MaxControlPayloadLength)
-        {
-            throw new ProtocolException("Invalid frame to write.");
-        }
+        FrameConstraints.ValidateForWrite(frame);
 
         var header = new byte[ProtocolConstants.HeaderLength];
         "NTP1"u8.CopyTo(header);
@@ -29,13 +26,17 @@ public sealed class FrameWriter(Stream stream, TimeSpan? blockedWriteTimeout = n
         await writeLock.WaitAsync(timeout.Token);
         try
         {
-            await stream.WriteAsync(header, timeout.Token);
-            if (!frame.Payload.IsEmpty)
+            try
             {
-                await stream.WriteAsync(frame.Payload, timeout.Token);
+                await stream.WriteAsync(header, timeout.Token);
+                if (!frame.Payload.IsEmpty)
+                    await stream.WriteAsync(frame.Payload, timeout.Token);
+                await stream.FlushAsync(timeout.Token);
             }
-
-            await stream.FlushAsync(timeout.Token);
+            catch (Exception exception)
+            {
+                throw new FrameWriteException("A control frame write did not finish.", exception);
+            }
         }
         finally
         {
@@ -43,3 +44,5 @@ public sealed class FrameWriter(Stream stream, TimeSpan? blockedWriteTimeout = n
         }
     }
 }
+
+public sealed class FrameWriteException(string message, Exception inner) : IOException(message, inner);

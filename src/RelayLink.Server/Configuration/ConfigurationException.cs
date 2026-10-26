@@ -1,3 +1,7 @@
 namespace RelayLink.Server.Configuration;
 
-public sealed class ConfigurationException(string message) : Exception(message);
+public sealed class ConfigurationException : Exception
+{
+    public ConfigurationException(string message) : base(message) { }
+    public ConfigurationException(string message, Exception innerException) : base(message, innerException) { }
+}

@@ -1,11 +1,14 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Net.Sockets;
+using System.Security.AccessControl;
 using System.Security.Cryptography;
+using System.Security.Principal;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using RelayLink.Agent;
 using RelayLink.Protocol;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace RelayLink.UnitTests;
@@ -22,7 +25,9 @@ public sealed class AgentLocalApiTests
         var configuration = new AgentProcessConfiguration { DashboardPort = port, Servers = [] };
         File.WriteAllText(configurationPath, """{"dashboardPort":PORT,"servers":[]}""".Replace("PORT", port.ToString(System.Globalization.CultureInfo.InvariantCulture), StringComparison.Ordinal));
         var runtime = new AgentProcessRuntime(configuration, new AgentConfigurationPath(configurationPath), NullLoggerFactory.Instance);
-        using var dashboard = new AgentLocalDashboard(configuration, runtime);
+        var audit = new CollectingLoggerProvider();
+        using var auditFactory = LoggerFactory.Create(builder => builder.AddProvider(audit));
+        using var dashboard = new AgentLocalDashboard(configuration, runtime, loggerFactory: auditFactory);
         try
         {
             await runtime.StartAsync(CancellationToken.None);
@@ -39,6 +44,9 @@ public sealed class AgentLocalApiTests
                 catch (HttpRequestException) when (!deadline.IsCancellationRequested) { }
                 await Task.Delay(50, deadline.Token);
             }
+            var managementToken = (await File.ReadAllTextAsync(Path.Combine(directory.FullName, AgentLocalManagementToken.FileName), deadline.Token)).Trim();
+            if (!OperatingSystem.IsWindows())
+                Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(Path.Combine(directory.FullName, AgentLocalManagementToken.FileName)));
             var profileSecret = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
             var profile = new AgentServerProfile
             {
@@ -58,51 +66,65 @@ public sealed class AgentLocalApiTests
                 using var foreignSession = await http.SendAsync(foreignSessionRequest, deadline.Token);
                 Assert.Equal(HttpStatusCode.Forbidden, foreignSession.StatusCode);
             }
-            using (var noCsrf = await SendAsync(http, HttpMethod.Post, "/api/v2/admin/servers", origin, null, new { version, server = profile, confirmExistingState = false }))
+            using (var noToken = await SendAsync(http, HttpMethod.Post, "/api/v2/admin/servers", origin, csrf, new { version, server = profile, confirmExistingState = false, confirmInsecureTransport = AgentLocalManagementToken.InsecureTransportConfirmation }))
+                Assert.Equal(HttpStatusCode.Unauthorized, noToken.StatusCode);
+            using (var wrongToken = await SendAsync(http, HttpMethod.Post, "/api/v2/admin/servers", origin, csrf, new { version, server = profile, confirmExistingState = false, confirmInsecureTransport = AgentLocalManagementToken.InsecureTransportConfirmation }, "00"))
+                Assert.Equal(HttpStatusCode.Unauthorized, wrongToken.StatusCode);
+            using (var noConfirmation = await SendAsync(http, HttpMethod.Post, "/api/v2/admin/servers", origin, csrf, new { version, server = profile, confirmExistingState = false }, managementToken))
+            {
+                Assert.Equal(HttpStatusCode.BadRequest, noConfirmation.StatusCode);
+                Assert.Contains("CONNECT_WITHOUT_TLS", await noConfirmation.Content.ReadAsStringAsync(deadline.Token), StringComparison.Ordinal);
+            }
+            using (var noCsrf = await SendAsync(http, HttpMethod.Post, "/api/v2/admin/servers", origin, null, new { version, server = profile, confirmExistingState = false, confirmInsecureTransport = AgentLocalManagementToken.InsecureTransportConfirmation }, managementToken))
                 Assert.Equal(HttpStatusCode.Forbidden, noCsrf.StatusCode);
             using (var crossSite = await SendAsync(http, HttpMethod.Post, "/api/v2/admin/servers", "https://other.example", csrf, new { version, server = profile, confirmExistingState = false }))
                 Assert.Equal(HttpStatusCode.Forbidden, crossSite.StatusCode);
-            using (var added = await SendAsync(http, HttpMethod.Post, "/api/v2/admin/servers", origin, csrf, new { version, server = profile, confirmExistingState = false }))
+            using (var added = await SendAsync(http, HttpMethod.Post, "/api/v2/admin/servers", origin, csrf, new { version, server = profile, confirmExistingState = false, confirmInsecureTransport = AgentLocalManagementToken.InsecureTransportConfirmation }, managementToken))
             {
                 Assert.Equal(HttpStatusCode.OK, added.StatusCode);
                 Assert.DoesNotContain(profileSecret, await added.Content.ReadAsStringAsync(deadline.Token), StringComparison.Ordinal);
             }
+            Assert.Contains(audit.Messages, message => message.Contains("east", StringComparison.Ordinal) && message.Contains("127.0.0.1", StringComparison.Ordinal) && message.Contains("useTls", StringComparison.Ordinal));
+            Assert.DoesNotContain(audit.Messages, message => message.Contains(profileSecret, StringComparison.Ordinal));
             Assert.Single(runtime.Snapshot);
             using (var updated = await SendAsync(http, HttpMethod.Put, "/api/v2/admin/servers/east", origin, csrf,
-                new { version = runtime.ConfigurationVersion, server = profile with { ServerHost = "updated.example" } }))
+                new { version = runtime.ConfigurationVersion, server = profile with { ServerHost = "updated.example" }, confirmInsecureTransport = AgentLocalManagementToken.InsecureTransportConfirmation }, managementToken))
                 Assert.Equal(HttpStatusCode.OK, updated.StatusCode);
             Assert.Equal("updated.example", Assert.Single(runtime.Snapshot).ServerHost);
             using (var missingState = await SendAsync(http, HttpMethod.Put, "/api/v2/admin/servers/east/enabled", origin, csrf,
-                new { version = runtime.ConfigurationVersion }))
+                new { version = runtime.ConfigurationVersion }, managementToken))
                 Assert.Equal(HttpStatusCode.BadRequest, missingState.StatusCode);
             using (var noStateCsrf = await SendAsync(http, HttpMethod.Put, "/api/v2/admin/servers/east/enabled", origin, null,
-                new { version = runtime.ConfigurationVersion, enabled = false }))
+                new { version = runtime.ConfigurationVersion, enabled = false }, managementToken))
                 Assert.Equal(HttpStatusCode.Forbidden, noStateCsrf.StatusCode);
             using (var disabled = await SendAsync(http, HttpMethod.Put, "/api/v2/admin/servers/east/enabled", origin, csrf,
-                new { version = runtime.ConfigurationVersion, enabled = false }))
+                new { version = runtime.ConfigurationVersion, enabled = false }, managementToken))
                 Assert.Equal(HttpStatusCode.OK, disabled.StatusCode);
             Assert.False(Assert.Single(runtime.Snapshot).Enabled);
+            Assert.Contains(audit.Messages, message => AuditsProfile(message, "set-enabled", "updated.example", 7443, "same"));
             using (var status = await http.GetFromJsonAsync<JsonDocument>("/api/v2/status", deadline.Token))
                 Assert.False(status!.RootElement.GetProperty("servers")[0].GetProperty("enabled").GetBoolean());
             using (var enabled = await SendAsync(http, HttpMethod.Put, "/api/v2/admin/servers/east/enabled", origin, csrf,
-                new { version = runtime.ConfigurationVersion, enabled = true }))
+                new { version = runtime.ConfigurationVersion, enabled = true }, managementToken))
                 Assert.Equal(HttpStatusCode.OK, enabled.StatusCode);
             Assert.True(Assert.Single(runtime.Snapshot).Enabled);
             using (var wrongIdentity = await SendAsync(http, HttpMethod.Put, "/api/v2/admin/servers/east", origin, csrf,
-                new { version = runtime.ConfigurationVersion, server = profile with { ClientId = "other" } }))
+                new { version = runtime.ConfigurationVersion, server = profile with { ClientId = "other" }, confirmInsecureTransport = AgentLocalManagementToken.InsecureTransportConfirmation }, managementToken))
                 Assert.Equal(HttpStatusCode.Conflict, wrongIdentity.StatusCode);
-            using (var stale = await SendAsync(http, HttpMethod.Post, "/api/v2/admin/servers", origin, csrf, new { version, server = profile with { ProfileId = "west" }, confirmExistingState = false }))
+            using (var stale = await SendAsync(http, HttpMethod.Post, "/api/v2/admin/servers", origin, csrf, new { version, server = profile with { ProfileId = "west" }, confirmExistingState = false, confirmInsecureTransport = AgentLocalManagementToken.InsecureTransportConfirmation }, managementToken))
             {
                 Assert.Equal(HttpStatusCode.Conflict, stale.StatusCode);
                 Assert.DoesNotContain(profileSecret, await stale.Content.ReadAsStringAsync(deadline.Token), StringComparison.Ordinal);
             }
             using (var status = await http.GetAsync("/api/v2/status", deadline.Token))
                 Assert.DoesNotContain(profileSecret, await status.Content.ReadAsStringAsync(deadline.Token), StringComparison.Ordinal);
-            using (var removed = await SendAsync(http, HttpMethod.Delete, "/api/v2/admin/servers/east", origin, csrf, new { version = runtime.ConfigurationVersion }))
+            using (var removed = await SendAsync(http, HttpMethod.Delete, "/api/v2/admin/servers/east", origin, csrf, new { version = runtime.ConfigurationVersion }, managementToken))
                 Assert.Equal(HttpStatusCode.OK, removed.StatusCode);
             Assert.Empty(runtime.Snapshot);
+            Assert.Contains(audit.Messages, message => AuditsProfile(message, "delete", "updated.example", 7443, "same"));
+            Assert.DoesNotContain(audit.Messages, message => message.Contains(profileSecret, StringComparison.Ordinal));
             Assert.Empty(AgentProcessConfigurationLoader.Load(configurationPath).Servers);
-            using (var reused = await SendAsync(http, HttpMethod.Post, "/api/v2/admin/servers", origin, csrf, new { version = runtime.ConfigurationVersion, server = profile, confirmExistingState = false }))
+            using (var reused = await SendAsync(http, HttpMethod.Post, "/api/v2/admin/servers", origin, csrf, new { version = runtime.ConfigurationVersion, server = profile, confirmExistingState = false, confirmInsecureTransport = AgentLocalManagementToken.InsecureTransportConfirmation }, managementToken))
             {
                 Assert.Equal(HttpStatusCode.Conflict, reused.StatusCode);
                 Assert.DoesNotContain(profileSecret, await reused.Content.ReadAsStringAsync(deadline.Token), StringComparison.Ordinal);
@@ -117,11 +139,33 @@ public sealed class AgentLocalApiTests
         }
     }
 
-    private static Task<HttpResponseMessage> SendAsync(HttpClient http, HttpMethod method, string url, string origin, string? csrf, object body)
+    private static bool AuditsProfile(string message, string action, string host, int port, string clientId) =>
+        message.Contains(action, StringComparison.Ordinal)
+        && message.Contains($"{host}:{port}", StringComparison.Ordinal)
+        && message.Contains("useTls", StringComparison.Ordinal)
+        && message.Contains(clientId, StringComparison.Ordinal);
+
+    private sealed class CollectingLoggerProvider : ILoggerProvider
+    {
+        public List<string> Messages { get; } = [];
+        public ILogger CreateLogger(string categoryName) => new CollectingLogger(Messages);
+        public void Dispose() { }
+
+        private sealed class CollectingLogger(List<string> messages) : ILogger
+        {
+            public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+            public bool IsEnabled(LogLevel logLevel) => true;
+            public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) =>
+                messages.Add(formatter(state, exception));
+        }
+    }
+
+    private static Task<HttpResponseMessage> SendAsync(HttpClient http, HttpMethod method, string url, string origin, string? csrf, object body, string? managementToken = null)
     {
         var request = new HttpRequestMessage(method, url) { Content = JsonContent.Create(body) };
         request.Headers.TryAddWithoutValidation("Origin", origin);
         if (csrf is not null) request.Headers.TryAddWithoutValidation("X-RelayLink-CSRF", csrf);
+        if (managementToken is not null) request.Headers.TryAddWithoutValidation(AgentLocalManagementToken.HeaderName, managementToken);
         return http.SendAsync(request);
     }
 
@@ -287,6 +331,32 @@ public sealed class AgentLocalApiTests
             catch (HttpRequestException) when (!deadline.IsCancellationRequested) { }
 
             await Task.Delay(50, deadline.Token);
+        }
+    }
+
+    [Fact]
+    public void Windows_management_token_allows_only_the_documented_identities()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var directory = Directory.CreateTempSubdirectory("relaylink-token-acl-");
+        try
+        {
+            var token = AgentLocalManagementToken.LoadOrCreate(directory.FullName);
+            var security = new FileInfo(token.FilePath).GetAccessControl();
+            Assert.True(security.AreAccessRulesProtected);
+            var current = WindowsIdentity.GetCurrent().User;
+            foreach (FileSystemAccessRule rule in security.GetAccessRules(includeExplicit: true, includeInherited: true, typeof(SecurityIdentifier)))
+            {
+                if (rule.AccessControlType != AccessControlType.Allow) continue;
+                var sid = Assert.IsType<SecurityIdentifier>(rule.IdentityReference);
+                Assert.True(sid == current
+                    || sid.IsWellKnown(WellKnownSidType.LocalSystemSid)
+                    || sid.IsWellKnown(WellKnownSidType.BuiltinAdministratorsSid));
+            }
+        }
+        finally
+        {
+            directory.Delete(recursive: true);
         }
     }
 

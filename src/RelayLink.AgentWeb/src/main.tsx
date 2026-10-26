@@ -110,7 +110,24 @@ function App() {
     const [profile, setProfile] = useState<Profile | null>(null);
     const [fileName, setFileName] = useState("");
     const [confirmExistingState, setConfirmExistingState] = useState(false);
+    const [insecureConfirmation, setInsecureConfirmation] = useState("");
+    const [localToken, setLocalToken] = useState(
+        () => sessionStorage.getItem("relaylink.agent.localToken") ?? "",
+    );
     const [busy, setBusy] = useState(false);
+
+    function rememberToken(value: string) {
+        setLocalToken(value);
+        sessionStorage.setItem("relaylink.agent.localToken", value.trim());
+    }
+
+    function writeHeaders(csrf: string): HeadersInit {
+        return {
+            "Content-Type": "application/json",
+            "X-RelayLink-CSRF": csrf,
+            "X-RelayLink-Local-Token": localToken.trim(),
+        };
+    }
 
     const refresh = useCallback(async () => {
         try {
@@ -142,6 +159,7 @@ function App() {
         setProfile(null);
         setFileName("");
         setConfirmExistingState(false);
+        setInsecureConfirmation("");
         setError("");
     }
 
@@ -226,14 +244,17 @@ function App() {
                     : "/api/v2/admin/servers",
                 {
                     method: updating ? "PUT" : "POST",
-                    headers: {
-                        "Content-Type": "application/json",
-                        "X-RelayLink-CSRF": session.csrfToken,
-                    },
+                    headers: writeHeaders(session.csrfToken),
                     body: JSON.stringify({
                         version: session.version,
                         server: profile,
                         ...(updating ? {} : { confirmExistingState }),
+                        ...(profile.useTls
+                            ? {}
+                            : {
+                                  confirmInsecureTransport:
+                                      insecureConfirmation.trim(),
+                              }),
                     }),
                 },
             );
@@ -261,10 +282,7 @@ function App() {
                 `/api/v2/admin/servers/${encodeURIComponent(removeId)}`,
                 {
                     method: "DELETE",
-                    headers: {
-                        "Content-Type": "application/json",
-                        "X-RelayLink-CSRF": session.csrfToken,
-                    },
+                    headers: writeHeaders(session.csrfToken),
                     body: JSON.stringify({ version: session.version }),
                 },
             );
@@ -288,10 +306,7 @@ function App() {
                 `/api/v2/admin/servers/${encodeURIComponent(profileId)}/enabled`,
                 {
                     method: "PUT",
-                    headers: {
-                        "Content-Type": "application/json",
-                        "X-RelayLink-CSRF": session.csrfToken,
-                    },
+                    headers: writeHeaders(session.csrfToken),
                     body: JSON.stringify({ version: session.version, enabled }),
                 },
             );
@@ -354,6 +369,19 @@ function App() {
                         <h1>Agent 连接概览</h1>
                         <p>查看各服务端的连接、通道和本机互访入口。</p>
                     </div>
+                    <label className="agent-token">
+                        本机管理令牌
+                        <input
+                            type="password"
+                            autoComplete="off"
+                            spellCheck={false}
+                            value={localToken}
+                            placeholder="local-management.token"
+                            onChange={(event) =>
+                                rememberToken(event.target.value)
+                            }
+                        />
+                    </label>
                     <button
                         className="ghost refresh"
                         onClick={() => void refresh()}
@@ -815,6 +843,22 @@ function App() {
                                 <p>注册密钥与 CA 内容不会在页面中回显。</p>
                             </div>
                         )}
+                        {profile && !profile.useTls && (
+                            <label className="agent-token agent-confirm-phrase">
+                                明文控制会把注册密钥发给 {profile.serverHost}
+                                。输入 CONNECT_WITHOUT_TLS 以确认。
+                                <input
+                                    value={insecureConfirmation}
+                                    autoComplete="off"
+                                    spellCheck={false}
+                                    onChange={(event) =>
+                                        setInsecureConfirmation(
+                                            event.target.value,
+                                        )
+                                    }
+                                />
+                            </label>
+                        )}
                         {editorId === null && profile && (
                             <label className="agent-checkbox agent-state-confirm">
                                 <input
@@ -851,7 +895,15 @@ function App() {
                             <button
                                 className="primary"
                                 onClick={() => void saveImport()}
-                                disabled={busy || !session || !profile}
+                                disabled={
+                                    busy ||
+                                    !session ||
+                                    !profile ||
+                                    !localToken.trim() ||
+                                    (!profile.useTls &&
+                                        insecureConfirmation.trim() !==
+                                            "CONNECT_WITHOUT_TLS")
+                                }
                             >
                                 {busy
                                     ? "正在保存…"
