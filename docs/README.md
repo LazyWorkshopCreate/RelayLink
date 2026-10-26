@@ -2,7 +2,16 @@
 
 | 文档 | ID | 状态 | 用途 |
 |---|---|---|---|
-| [需求文档索引](requirements/README.md) | REQ-001A–REQ-001K | Draft / Accepted / Done | 按日期与主题拆分的需求范围、功能与验收；实现进度见验证状态 |
+| [公开仓库同步](development/public-repository-sync.md) | DEV-006 | Active | 版本来源、脱敏和公开适配 |
+| [需求文档索引](requirements/README.md) | REQ-001A–REQ-001M | Draft / Accepted / Done | 按日期与主题拆分的需求范围、功能与验收；实现进度见验证状态 |
+| [UDP 转发需求](requirements/2026-10-05-udp-forwarding.md) | REQ-001L | Draft | 普通和授权互访 UDP、会话隔离、空闲回收、A75–A79 |
+| [UDP 转发技术设计](design/udp-forwarding.md) | DES-006 | Draft | UDP 报文封装、来源会话、协议 v4 与部署边界 |
+| [v3 客户端兼容](adr/0025-v3-client-compatibility.md) | ADR-0025 | Accepted | 非破坏性增量保留 v3 TCP，UDP 按会话版本隔离 |
+| [UDP 独立隧道方案](adr/0024-udp-over-independent-tunnels.md) | ADR-0024 | Proposed | UDP over TCP 取舍及兼容性 |
+| [网站多页重构需求](requirements/2026-10-05-website-multipage.md) | REQ-001M | Accepted | 首页基本信息、使用/文档/发布列表与详情、A80–A84 |
+| [网站多页设计与调研](design/website-multipage.md) | DES-007 | Draft | 静态页面生成、内容来源、路径与语言处理 |
+| [网站维护说明](development/website.md) | DEV-004 | Active | 构建、预览、内容清单、翻译与部署 |
+| [网站重构验证](testing/website-multipage-verification.md) | TST-004 | Active | 全站静态检查、内容完整性及浏览器验收 |
 | [日志与诊断需求](requirements/2026-09-30-logging-and-diagnostics.md) | REQ-001K | Accepted | 两端文件日志、拒绝原因、敏感信息边界与 A72–A74 |
 | [日志与诊断技术设计](design/logging-and-diagnostics.md) | DES-005 | Accepted | Serilog 共享库、轮转保留、错误帧兼容及诊断关联 |
 | [技术实现文档](design/technical-design.md) | DES-001 | Draft | 架构、协议、配置与部署设计 |
@@ -37,6 +46,7 @@
 | [GitHub Actions 流水线](development/ci.md) | DEV-003 | Active | CI 检查、构建产物和安全边界 |
 | [发布说明](releases/README.md) | DOC-002 | Active | 各版本 GitHub Release 的仓库内唯一说明来源 |
 | [安装与使用指南](operations/installation-and-usage.md) | OPS-001 | Active | Docker/原生 Server 部署、Agent 安装、通道配置和排障 |
+| [UDP 转发使用指南](operations/udp-forwarding.md) | OPS-002 | Active | UDP 版本要求、普通与授权入口、网络放行、报文和排障 |
 | [验证状态](testing/verification-status.md) | TST-001 | Active | 已执行检查与未完成验收证据 |
 | [本地多场景验收方案](testing/local-acceptance-plan.md) | TST-002 | Active | 隔离启动、场景判定、运行记录与安全停止 |
 | [Agent 多服务端验收记录](testing/multi-server-agent-verification.md) | TST-003 | Active | REQ-001J 的自动化测试与 Windows Sandbox 安装验收证据 |

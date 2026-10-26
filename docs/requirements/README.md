@@ -15,6 +15,8 @@
 | [Server Docker Compose 部署](2026-09-23-server-docker-deployment.md) | REQ-001I | Accepted | Linux Server 一键容器启动、持久化、安全边界与安装文档重构、A58–A60 |
 | [Agent 多服务端连接需求](2026-09-28-multi-server-agent.md) | REQ-001J | Draft | 多服务端隔离、启动前转换、新版安装配置与本机页面管理，A61–A71；A72 日志验收归入 REQ-001K |
 | [日志与诊断需求](2026-09-30-logging-and-diagnostics.md) | REQ-001K | Accepted | Server/Agent 文件日志、明确拒绝原因、诊断关联与敏感信息边界，A72–A74 |
+| [UDP 转发需求](2026-10-05-udp-forwarding.md) | REQ-001L | Draft | 普通/授权互访 UDP、配置和资源边界、A75–A79 |
+| [网站多页重构](2026-10-05-website-multipage.md) | REQ-001M | Accepted | 首页精简、使用/文档/发布列表与详情、A80–A84 |
 
 需求编号和验收编号沿用原文，不因拆分重排。当前存在两个历史 `A28`：一个属于 Windows 安装包升级，一个属于控制/数据入口验证；本次只做结构拆分，不改写既有编号语义。
 

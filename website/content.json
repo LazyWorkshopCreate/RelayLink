@@ -1,0 +1,128 @@
+[
+  {
+    "slug": "installation-and-usage",
+    "section": "guides",
+    "source": "docs/operations/installation-and-usage.md",
+    "title": "安装与使用指南",
+    "summary": "选择部署方式、启动 Server、安装 Agent、创建通道"
+  },
+  {
+    "slug": "udp-forwarding",
+    "section": "guides",
+    "source": "docs/operations/udp-forwarding.md",
+    "title": "UDP 转发使用指南",
+    "summary": "普通与授权互访、协议升级、端口放行及报文限制"
+  },
+  {
+    "slug": "docker",
+    "section": "guides",
+    "source": "deploy/docker/README.md",
+    "title": "Docker Compose 部署",
+    "summary": "Linux Server 容器化启动与数据目录"
+  },
+  {
+    "slug": "linux",
+    "section": "guides",
+    "source": "deploy/linux/README.md",
+    "title": "Linux 部署",
+    "summary": "Server 与 Agent 的 systemd 部署"
+  },
+  {
+    "slug": "windows",
+    "section": "guides",
+    "source": "deploy/windows/README.md",
+    "title": "Windows 部署",
+    "summary": "Windows Service 与 Agent 安装包"
+  },
+  {
+    "slug": "macos",
+    "section": "guides",
+    "source": "deploy/macos/README.md",
+    "title": "macOS Agent",
+    "summary": "Intel / Apple Silicon Agent 与 launchd"
+  },
+  {
+    "slug": "overview",
+    "section": "docs",
+    "source": "README.md",
+    "title": "项目概览",
+    "summary": "定位、连接模式、能力边界与仓库入口"
+  },
+  {
+    "slug": "technical-design",
+    "section": "docs",
+    "source": "docs/design/technical-design.md",
+    "title": "技术设计",
+    "summary": "总体架构、协议、配置与故障处理"
+  },
+  {
+    "slug": "udp-forwarding",
+    "section": "docs",
+    "source": "docs/design/udp-forwarding.md",
+    "title": "UDP 转发技术设计",
+    "summary": "来源会话、TCP 隧道封装、空闲回收与资源边界"
+  },
+  {
+    "slug": "udp-requirements",
+    "section": "docs",
+    "source": "docs/requirements/2026-10-05-udp-forwarding.md",
+    "title": "UDP 转发需求",
+    "summary": "单播转发范围、配置与安全要求、A75–A79"
+  },
+  {
+    "slug": "udp-tunnels",
+    "section": "docs",
+    "source": "docs/adr/0024-udp-over-independent-tunnels.md",
+    "title": "UDP 独立隧道方案",
+    "summary": "UDP over TCP 的取舍、兼容性与限制"
+  },
+  {
+    "slug": "logging-and-diagnostics",
+    "section": "docs",
+    "source": "docs/design/logging-and-diagnostics.md",
+    "title": "日志与诊断",
+    "summary": "文件路径、保留策略与连接拒绝原因"
+  },
+  {
+    "slug": "agent-to-agent",
+    "section": "docs",
+    "source": "docs/design/agent-to-agent.md",
+    "title": "Agent 安全互访",
+    "summary": "访问授权、内层 TLS 与身份校验"
+  },
+  {
+    "slug": "multi-server-agent",
+    "section": "docs",
+    "source": "docs/design/multi-server-agent.md",
+    "title": "Agent 多服务端",
+    "summary": "独立身份、导入管理与停用连接项"
+  },
+  {
+    "slug": "repository-layout",
+    "section": "docs",
+    "source": "docs/development/repository-layout.md",
+    "title": "仓库目录",
+    "summary": "项目职责、文件归属与命名规则"
+  },
+  {
+    "slug": "verification-status",
+    "section": "docs",
+    "source": "docs/testing/verification-status.md",
+    "title": "验证状态",
+    "summary": "已经执行的检查与仍待补齐的证据"
+  },
+  {
+    "slug": "contributing",
+    "section": "docs",
+    "source": "CONTRIBUTING.md",
+    "title": "贡献指南",
+    "summary": "本地检查与协作约定"
+  },
+  {
+    "slug": "index",
+    "section": "docs",
+    "source": "docs/README.md",
+    "title": "文档索引",
+    "summary": "需求、设计、架构决策与验证入口"
+  }
+]

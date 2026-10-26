@@ -33,6 +33,11 @@ public sealed class PeerRelayRegistry(ServerRuntime runtime, MetricsRegistry met
             await RejectAsync(caller, request.RequestId, ErrorCode.ChannelUnavailable, cancellationToken);
             return;
         }
+        if (targetChannel.TransportProtocol == "udp" && (caller.ProtocolVersion < 4 || targetSession.ProtocolVersion < 4))
+        {
+            await RejectAsync(caller, request.RequestId, ErrorCode.ChannelUnavailable, cancellationToken);
+            return;
+        }
         if (!await limit.WaitAsync(0, cancellationToken))
         {
             await RejectAsync(caller, request.RequestId, ErrorCode.CapacityExceeded, cancellationToken);
@@ -74,8 +79,8 @@ public sealed class PeerRelayRegistry(ServerRuntime runtime, MetricsRegistry met
         }
         try
         {
-            await targetSession.SendAsync(new Frame(FrameType.PeerOpen, JsonProtocolSerializer.Serialize(new PeerOpenMessage(relay.ConnectionId, targetSession.SessionId, caller.ClientId, targetChannel.ChannelId, relay.TargetToken, targetChannel.EndToEndEncryptionEnabled))), cancellationToken);
-            await caller.SendAsync(new Frame(FrameType.PeerOpenGranted, JsonProtocolSerializer.Serialize(new PeerOpenGrantedMessage(request.RequestId, relay.ConnectionId, caller.SessionId, relay.CallerToken, targetChannel.EndToEndEncryptionEnabled))), cancellationToken);
+            await targetSession.SendAsync(new Frame(FrameType.PeerOpen, JsonProtocolSerializer.Serialize(new PeerOpenMessage(relay.ConnectionId, targetSession.SessionId, caller.ClientId, targetChannel.ChannelId, relay.TargetToken, targetChannel.EndToEndEncryptionEnabled, targetChannel.TransportProtocol), targetSession.ProtocolVersion)), cancellationToken);
+            await caller.SendAsync(new Frame(FrameType.PeerOpenGranted, JsonProtocolSerializer.Serialize(new PeerOpenGrantedMessage(request.RequestId, relay.ConnectionId, caller.SessionId, relay.CallerToken, targetChannel.EndToEndEncryptionEnabled, targetChannel.TransportProtocol), caller.ProtocolVersion)), cancellationToken);
             _ = RunAsync(relay);
         }
         catch
@@ -88,7 +93,9 @@ public sealed class PeerRelayRegistry(ServerRuntime runtime, MetricsRegistry met
     public bool TryBind(PeerBindDataMessage message, DataTunnel tunnel, out PeerRelay? relay)
     {
         relay = null;
-        if (!relays.TryGetValue(message.ConnectionId, out var candidate) || !candidate.TryBind(message, tunnel)) return false;
+        if (!relays.TryGetValue(message.ConnectionId, out var candidate) ||
+            tunnel.Writer.ProtocolVersion != (message.Role == "caller" ? candidate.Caller : candidate.Target).ProtocolVersion ||
+            !candidate.TryBind(message, tunnel)) return false;
         relay = candidate;
         return true;
     }

@@ -39,8 +39,12 @@ jobs:
         with:
           node-version: "24"
           package-manager-cache: false
-      - name: Build static website
+      - name: Install website dependencies
+        run: npm --prefix website ci
+      - name: Generate static website
         run: node scripts/build-website.mjs
+      - name: Verify static pages
+        run: npm --prefix website test
       - uses: actions/configure-pages@v5
         with:
           enablement: true

@@ -10,6 +10,36 @@ namespace RelayLink.UnitTests;
 public sealed class ProxyListenerTests
 {
     [Fact]
+    public async Task Failed_udp_bind_keeps_existing_binding_and_tcp_can_share_its_port()
+    {
+        using var reservation = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
+        var port = ((IPEndPoint)reservation.Client.LocalEndPoint!).Port;
+        reservation.Dispose();
+        var initial = Configuration("127.0.0.1", port);
+        var client = initial.Clients["agent"];
+        initial = initial with { Clients = new Dictionary<string, ClientConfiguration>
+        { ["agent"] = client with { Channels = [client.Channels[0] with { TransportProtocol = "udp" }] } } };
+        var runtime = new ServerRuntime(initial, new SessionRegistry());
+        using var service = new ProxyListenerService(runtime, new PendingConnectionRegistry(), new MetricsRegistry(initial),
+            new AuditService(runtime, NullLogger<AuditService>.Instance), NullLogger<ProxyListenerService>.Instance);
+        await service.ApplyConfigurationAsync(initial, CancellationToken.None);
+        using var tcp = new TcpListener(IPAddress.Loopback, port);
+        tcp.Start();
+        using var competitor = new UdpClient(AddressFamily.InterNetwork);
+        competitor.Client.ExclusiveAddressUse = true;
+        competitor.Client.Bind(new IPEndPoint(IPAddress.Any, 0));
+        var occupied = ((IPEndPoint)competitor.Client.LocalEndPoint!).Port;
+        var replacement = client.Channels[0] with { TransportProtocol = "udp", ListenPort = occupied };
+        var updated = initial with { Clients = new Dictionary<string, ClientConfiguration>
+        { ["agent"] = client with { Channels = [replacement] } } };
+        await Assert.ThrowsAsync<ConfigurationException>(() => service.ApplyConfigurationAsync(updated, CancellationToken.None));
+        using var probe = new UdpClient(AddressFamily.InterNetwork);
+        probe.Client.ExclusiveAddressUse = true;
+        Assert.Throws<SocketException>(() => probe.Client.Bind(new IPEndPoint(IPAddress.Loopback, port)));
+        await service.StopAsync(CancellationToken.None);
+    }
+
+    [Fact]
     public async Task Loopback_listener_can_change_to_wildcard_on_same_port()
     {
         var port = FreePort();

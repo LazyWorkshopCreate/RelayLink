@@ -99,6 +99,8 @@ public sealed record ChannelConfiguration(
     int MaxConnections,
     int TargetConnectTimeoutSeconds)
 {
+    public string TransportProtocol { get; init; } = "tcp";
+    public int UdpIdleTimeoutSeconds { get; init; } = 60;
     public IReadOnlyList<string> Tags { get; init; } = [];
     public bool AuthorizedClientsOnly { get; init; }
     public bool EndToEndEncryptionEnabled { get; init; } = true;
@@ -112,6 +114,8 @@ public sealed record ChannelConfiguration(
         ChannelId == other.ChannelId &&
         DisplayName == other.DisplayName &&
         Enabled == other.Enabled &&
+        TransportProtocol == other.TransportProtocol &&
+        UdpIdleTimeoutSeconds == other.UdpIdleTimeoutSeconds &&
         ListenAddress == other.ListenAddress &&
         ListenPort == other.ListenPort &&
         TargetHost == other.TargetHost &&

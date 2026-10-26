@@ -29,7 +29,7 @@ public sealed class AgentPortAllocator
     {
         lock (PortGate)
         {
-            if (saved.TryGetValue(mappingId, out var preferred) && preferred >= first && preferred <= last && TryStart(preferred, out var existing))
+            if (saved.TryGetValue(mappingId, out var preferred) && preferred >= first && preferred <= last && !saved.Any(pair => pair.Key != mappingId && pair.Value == preferred) && TryStart(preferred, out var existing))
                 return existing!;
 
             var count = last - first + 1;
@@ -37,7 +37,7 @@ public sealed class AgentPortAllocator
             for (var index = 0; index < count; index++)
             {
                 var port = first + (offset + index) % count;
-                if (port == preferred || !TryStart(port, out var listener)) continue;
+                if (port == preferred || saved.Any(pair => pair.Key != mappingId && pair.Value == port) || !TryStart(port, out var listener)) continue;
                 try
                 {
                     saved[mappingId] = port;
@@ -49,6 +49,33 @@ public sealed class AgentPortAllocator
                     listener!.Stop();
                     throw;
                 }
+            }
+            throw new SocketException((int)SocketError.AddressAlreadyInUse);
+        }
+    }
+
+    public UdpClient BindUdp(string mappingId)
+    {
+        lock (PortGate)
+        {
+            saved.TryGetValue(mappingId, out var preferred);
+            var count = last - first + 1;
+            var offset = RandomNumberGenerator.GetInt32(count);
+            var candidates = Enumerable.Range(0, count).Select(index => first + (offset + index) % count);
+            foreach (var port in new[] { preferred }.Concat(candidates).Distinct())
+            {
+                if (port < first || port > last || saved.Any(pair => pair.Key != mappingId && pair.Value == port)) continue;
+                var socket = new UdpClient(AddressFamily.InterNetwork);
+                try
+                {
+                    socket.Client.ExclusiveAddressUse = true;
+                    socket.Client.Bind(new IPEndPoint(IPAddress.Loopback, port));
+                }
+                catch (SocketException exception) when (exception.SocketErrorCode is SocketError.AddressAlreadyInUse or SocketError.AccessDenied)
+                { socket.Dispose(); continue; }
+                catch { socket.Dispose(); throw; }
+                try { saved[mappingId] = port; Persist(); return socket; }
+                catch { socket.Dispose(); throw; }
             }
             throw new SocketException((int)SocketError.AddressAlreadyInUse);
         }

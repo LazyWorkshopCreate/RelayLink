@@ -4,13 +4,13 @@ namespace RelayLink.Protocol;
 
 public static class ConfigurationSnapshotHasher
 {
-    public static string Compute(ClientConfigSnapshot snapshot)
+    public static string Compute(ClientConfigSnapshot snapshot, byte protocolVersion = ProtocolConstants.Version)
     {
         var canonical = snapshot with
         {
             Channels = snapshot.Channels.OrderBy(channel => channel.ChannelId, StringComparer.Ordinal).ToArray(),
             OutboundMappings = snapshot.OutboundMappings.OrderBy(mapping => mapping.MappingId, StringComparer.Ordinal).ToArray()
         };
-        return Convert.ToHexStringLower(SHA256.HashData(JsonProtocolSerializer.Serialize(canonical)));
+        return Convert.ToHexStringLower(SHA256.HashData(JsonProtocolSerializer.Serialize(canonical, protocolVersion)));
     }
 }

@@ -15,10 +15,10 @@ public sealed class AgentStatus(AgentConfiguration configuration)
         var byId = addresses.ToDictionary(address => address.MappingId, StringComparer.Ordinal);
         var channels = configurationSnapshot.Channels.Select(channel => new AgentChannelView(
             channel.ChannelId, channel.DisplayName, channel.Enabled, channel.AuthorizedClientsOnly,
-            channel.EndToEndEncryptionEnabled, channel.TargetHost, channel.TargetPort)).ToArray();
+            channel.EndToEndEncryptionEnabled, channel.TargetHost, channel.TargetPort) { TransportProtocol = channel.TransportProtocol }).ToArray();
         var mappings = configurationSnapshot.OutboundMappings.Select(mapping => new AgentMappingView(
             mapping.MappingId, mapping.Enabled, mapping.TargetClientId, mapping.TargetChannelId,
-            byId.TryGetValue(mapping.MappingId, out var address) ? $"127.0.0.1:{address.LocalPort}" : null)).ToArray();
+            byId.TryGetValue(mapping.MappingId, out var address) ? $"127.0.0.1:{address.LocalPort}" : null) { TransportProtocol = mapping.TransportProtocol }).ToArray();
         Volatile.Write(ref current, new AgentStatusSnapshot(configuration.ClientId, true, DateTimeOffset.UtcNow, channels, mappings));
     }
 
@@ -26,8 +26,14 @@ public sealed class AgentStatus(AgentConfiguration configuration)
 }
 
 public sealed record AgentStatusSnapshot(string ClientId, bool Online, DateTimeOffset? UpdatedAtUtc, IReadOnlyList<AgentChannelView> Channels, IReadOnlyList<AgentMappingView> OutboundMappings);
-public sealed record AgentChannelView(string ChannelId, string DisplayName, bool Enabled, bool AuthorizedClientsOnly, bool EndToEndEncryptionEnabled, string TargetHost, int TargetPort);
-public sealed record AgentMappingView(string MappingId, bool Enabled, string TargetClientId, string TargetChannelId, string? LocalAddress);
+public sealed record AgentChannelView(string ChannelId, string DisplayName, bool Enabled, bool AuthorizedClientsOnly, bool EndToEndEncryptionEnabled, string TargetHost, int TargetPort)
+{
+    public string TransportProtocol { get; init; } = "tcp";
+}
+public sealed record AgentMappingView(string MappingId, bool Enabled, string TargetClientId, string TargetChannelId, string? LocalAddress)
+{
+    public string TransportProtocol { get; init; } = "tcp";
+}
 
 public sealed class AgentLocalDashboard : BackgroundService
 {

@@ -1,0 +1,97 @@
+            <section class="section guide-section" id="guide" aria-labelledby="guide-title">
+                <div class="shell">
+                    <div class="section-heading split-heading">
+                        <div>
+                            <p class="section-number">02 / 使用说明</p>
+                            <h2 id="guide-title">从一台 Server，<br />到第一条可用通道。</h2>
+                        </div>
+                        <p>
+                            Linux Docker 主机是最快的起点。下面保留关键路径；生产部署前请完整阅读安装指南并配置
+                            TLS、网络访问控制与备份。
+                        </p>
+                    </div>
+
+                    <div class="quickstart-grid">
+                        <div class="steps" aria-label="部署步骤">
+                            <article class="step active" data-step="1">
+                                <button type="button" aria-expanded="true" aria-controls="step-1-panel">
+                                    <span>01</span>
+                                    <span><strong>启动 Server</strong><small>Docker Compose · Linux</small></span>
+                                    <svg aria-hidden="true" viewBox="0 0 16 16"><path d="m4 6 4 4 4-4" /></svg>
+                                </button>
+                                <div class="step-panel" id="step-1-panel">
+                                    <p>准备 Linux Docker Engine、Compose v2 与 PowerShell 7，然后在仓库根目录执行：</p>
+                                    <div class="code-block">
+                                        <code>pwsh ./scripts/start-server-compose.ps1 -AgentServerHost tunnel.example.com</code>
+                                        <button class="copy-button" type="button" data-copy="pwsh ./scripts/start-server-compose.ps1 -AgentServerHost tunnel.example.com">复制</button>
+                                    </div>
+                                    <p class="hint">将域名替换为 Agent 实际可达的 DNS 名称或 IP。</p>
+                                </div>
+                            </article>
+                            <article class="step" data-step="2">
+                                <button type="button" aria-expanded="false" aria-controls="step-2-panel">
+                                    <span>02</span>
+                                    <span><strong>创建客户端</strong><small>管理页面 · 独立凭据</small></span>
+                                    <svg aria-hidden="true" viewBox="0 0 16 16"><path d="m4 6 4 4 4-4" /></svg>
+                                </button>
+                                <div class="step-panel" id="step-2-panel" hidden>
+                                    <p>打开管理页面并登录，为每台 Agent 创建独立客户端，再下载专属 JSON 配置。</p>
+                                    <p class="hint">客户端配置含访问密钥，不得共用，也不要提交到仓库。</p>
+                                </div>
+                            </article>
+                            <article class="step" data-step="3">
+                                <button type="button" aria-expanded="false" aria-controls="step-3-panel">
+                                    <span>03</span>
+                                    <span><strong>安装 Agent</strong><small>Windows / Linux / macOS</small></span>
+                                    <svg aria-hidden="true" viewBox="0 0 16 16"><path d="m4 6 4 4 4-4" /></svg>
+                                </button>
+                                <div class="step-panel" id="step-3-panel" hidden>
+                                    <p>Windows 使用安装包；Linux 使用 systemd；macOS 使用 launchd。安装时使用刚下载的配置。</p>
+                                    <p class="hint">Agent 本机状态页默认位于 <code>http://127.0.0.1:18081/</code>。</p>
+                                    <p class="hint">要连接第二台 Server，在此页面导入另一份单服务端 JSON。</p>
+                                </div>
+                            </article>
+                            <article class="step" data-step="4">
+                                <button type="button" aria-expanded="false" aria-controls="step-4-panel">
+                                    <span>04</span>
+                                    <span><strong>添加通道</strong><small>目标地址 · 授权范围</small></span>
+                                    <svg aria-hidden="true" viewBox="0 0 16 16"><path d="m4 6 4 4 4-4" /></svg>
+                                </button>
+                                <div class="step-panel" id="step-4-panel" hidden>
+                                    <p>确认客户端在线后创建通道，选择 TCP 或 UDP，填写 Agent 所在内网可达的固定目标主机和端口。</p>
+                                    <p class="hint">普通通道可配置来源 IP 安全组；Agent 互访则创建访问映射。</p>
+                                </div>
+                            </article>
+                        </div>
+
+                        <aside class="endpoint-card">
+                            <div class="terminal-title"><span></span><span></span><span></span><strong>默认端点</strong></div>
+                            <dl>
+                                <div><dt>管理页面</dt><dd>127.0.0.1:18080</dd></div>
+                                <div><dt>控制连接</dt><dd>7443 / TCP</dd></div>
+                                <div><dt>数据连接</dt><dd>7444 / TCP</dd></div>
+                                <div><dt>Agent 状态</dt><dd>127.0.0.1:18081</dd></div>
+                            </dl>
+                            <div class="endpoint-warning">
+                                <strong>投产前检查</strong>
+                                <p>限制端口来源、启用控制 TLS、备份配置和 SQLite 数据，并在目标环境完成验证。</p>
+                            </div>
+                        </aside>
+                    </div>
+
+                    <div class="doc-links" aria-label="部署文档">
+                        <a href="https://github.com/LazyWorkshopCreate/RelayLink/blob/main/docs/operations/installation-and-usage.md" target="_blank" rel="noreferrer">
+                            <span>完整安装与使用指南</span><b>总览 →</b>
+                        </a>
+                        <a href="https://github.com/LazyWorkshopCreate/RelayLink/blob/main/deploy/docker/README.md" target="_blank" rel="noreferrer">
+                            <span>Docker Compose 部署</span><b>Linux →</b>
+                        </a>
+                        <a href="https://github.com/LazyWorkshopCreate/RelayLink/blob/main/deploy/windows/README.md" target="_blank" rel="noreferrer">
+                            <span>Windows 部署</span><b>Service →</b>
+                        </a>
+                        <a href="https://github.com/LazyWorkshopCreate/RelayLink/blob/main/deploy/macos/README.md" target="_blank" rel="noreferrer">
+                            <span>macOS Agent</span><b>launchd →</b>
+                        </a>
+                    </div>
+                </div>
+            </section>

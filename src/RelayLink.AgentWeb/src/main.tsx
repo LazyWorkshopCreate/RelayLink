@@ -27,12 +27,14 @@ type Channel = {
     endToEndEncryptionEnabled: boolean;
     targetHost: string;
     targetPort: number;
+    transportProtocol?: "tcp" | "udp";
 };
 type Mapping = {
     mappingId: string;
     enabled: boolean;
     targetClientId: string;
     targetChannelId: string;
+    transportProtocol?: "tcp" | "udp";
     localAddress: string | null;
 };
 type AgentServer = {
@@ -590,9 +592,12 @@ function App() {
                                                                 </td>
                                                                 <td>
                                                                     <code>
-                                                                        {
-                                                                            channel.targetHost
-                                                                        }
+                                                                        {(
+                                                                            channel.transportProtocol ??
+                                                                            "tcp"
+                                                                        ).toUpperCase() +
+                                                                            " " +
+                                                                            channel.targetHost}
                                                                         :
                                                                         {
                                                                             channel.targetPort
@@ -660,9 +665,12 @@ function App() {
                                                                 <td>
                                                                     {mapping.localAddress ? (
                                                                         <code>
-                                                                            {
-                                                                                mapping.localAddress
-                                                                            }
+                                                                            {(
+                                                                                mapping.transportProtocol ??
+                                                                                "tcp"
+                                                                            ).toUpperCase() +
+                                                                                " " +
+                                                                                mapping.localAddress}
                                                                         </code>
                                                                     ) : (
                                                                         <span className="agent-unavailable">

@@ -72,8 +72,8 @@ public sealed class TunnelAcceptorService(
             {
                 handshakeTimeout.CancelAfter(TimeSpan.FromSeconds(runtime.Configuration.Server.Tunnel.HandshakeTimeoutSeconds));
                 var reader = new FrameReader(stream);
-                var writer = new FrameWriter(stream);
                 var first = await reader.ReadAsync(ProtocolConstants.MaxInitialPayloadLength, handshakeTimeout.Token);
+                var writer = new FrameWriter(stream, protocolVersion: reader.ProtocolVersion ?? ProtocolConstants.Version);
                 if (first?.Type != FrameType.Register)
                 {
                     await RecordRejectionAsync(null, "invalid_first_frame", ErrorCode.ProtocolError, ControlRejectionReason.InvalidFirstFrame);
@@ -140,9 +140,10 @@ public sealed class TunnelAcceptorService(
                         ["sessionId"] = session.SessionId
                     });
                     session.AgentVersion = register.AgentVersion;
+                    session.ProtocolVersion = writer.ProtocolVersion;
                     session.AttachControlWriter(writer);
-                    var (snapshot, configVersion) = ConfigurationSnapshotFactory.Create(clientConfiguration!);
-                    await writer.WriteAsync(new Frame(FrameType.RegisterAccepted, JsonProtocolSerializer.Serialize(new RegisterAcceptedMessage(session.SessionId, configVersion, snapshot, runtime.Configuration.Server.Tunnel.HeartbeatIntervalSeconds, runtime.Configuration.Server.Tunnel.HeartbeatTimeoutSeconds))), serverStoppingToken);
+                    var (snapshot, configVersion) = ConfigurationSnapshotFactory.Create(clientConfiguration!, runtime.Configuration, session.ProtocolVersion);
+                    await writer.WriteAsync(new Frame(FrameType.RegisterAccepted, JsonProtocolSerializer.Serialize(new RegisterAcceptedMessage(session.SessionId, configVersion, snapshot, runtime.Configuration.Server.Tunnel.HeartbeatIntervalSeconds, runtime.Configuration.Server.Tunnel.HeartbeatTimeoutSeconds), session.ProtocolVersion)), serverStoppingToken);
                     var acknowledgement = await reader.ReadAsync(ProtocolConstants.MaxControlPayloadLength, handshakeTimeout.Token);
                     if (acknowledgement?.Type != FrameType.ConfigAck)
                     {

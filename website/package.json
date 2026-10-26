@@ -1,0 +1,1 @@
+{"name":"relaylink-website","private":true,"type":"module","scripts":{"build":"node ../scripts/build-website.mjs","test":"node --test tests/*.test.mjs"},"engines":{"node":">=24"},"dependencies":{"jsdom":"29.1.1","marked":"18.0.14","sanitize-html":"2.18.0"}}

@@ -2,8 +2,8 @@
 
 文档 ID：DEV-001\
 状态：Active\
-版本：v1.9.0\
-更新日期：2026-09-30
+版本：v1.10.0\
+更新日期：2026-10-05
 
 ```text
 RelayLink/
@@ -54,7 +54,7 @@ RelayLink/
 - deploy 保存实际部署模板；docs/design 解释策略。模板形成后，设计文档链接它，避免长期维护两份相同模板。
 - scripts 保存可重复执行的工具脚本；实验文件放被忽略的 work/，构建产物放被忽略的 artifacts/。
 - .github/workflows 保存日常验证、tag 发行与 GitHub Pages 部署流水线，不存真实配置或部署凭据。
-- website 保存 GitHub Pages 中英文静态网站、文档中心和英文发布说明翻译；`scripts/build-website.mjs` 在构建时从 `docs/releases` 生成双语发布动态，并在英文翻译缺失时失败。构建输出写入被忽略的 `artifacts/site/`，中文位于根路径，英文位于 `/en/`。
+- website 保存 GitHub Pages 静态网站模板、文章目录、快速开始片段、英文界面及发布说明翻译、锁定构建依赖和站点测试；`scripts/build-website.mjs` 从仓库 Markdown 生成使用/文档/发布列表及详情，缺少发布英文版本、章节或条目时失败。输出位于被忽略的 `artifacts/site/`，中文位于根路径，英文位于 `/en/`；维护方法见 [网站维护说明](website.md)。
 - tools 保存独立的模拟目标与模拟调用方程序，不作为服务端或 Agent 的运行依赖。
 - 需要新增 docs/operations 等类别时，须在有实际内容后创建并加入索引，不预建大量空文档。
 - docs/intro 是演示文稿与公众号文章的唯一位置，`pages.json` 是页码来源；生成的 PPTX 与插图提交，`.build/`、`.cache/`、`.slidep/` 和 `legacy-bak/` 由目录内 .gitignore 排除。

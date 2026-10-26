@@ -6,6 +6,15 @@ namespace RelayLink.UnitTests;
 public sealed class ChannelPortSuggestionTests
 {
     [Fact]
+    public void Udp_suggestion_reuses_tcp_ports_and_skips_udp_assignments()
+    {
+        var configuration = Configuration(19000, 19001, 19002,
+            [Channel("tcp", 19000), Channel("udp", 19001) with { TransportProtocol = "udp" }]);
+        Assert.Equal(19000, ChannelPortSuggestion.Find(configuration, _ => true, "udp"));
+        Assert.Equal(19002, ChannelPortSuggestion.Find(configuration, port => port != 19000, "udp"));
+    }
+
+    [Fact]
     public void Starts_at_first_cloud_port_when_it_is_available()
     {
         Assert.Equal(19000, ChannelPortSuggestion.Find(Configuration(7443, 7444, 18080, []), _ => true));

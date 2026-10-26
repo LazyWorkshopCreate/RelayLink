@@ -1,6 +1,46 @@
 const siteLocale = document.documentElement.lang.toLowerCase().startsWith("en") ? "en" : "zh";
 
 const english = {
+    "RelayLink · 让内网 TCP / UDP 服务可控地被访问": "RelayLink · Controlled access to private TCP / UDP services",
+    "RelayLink 是一个基于 .NET 的开源反向 TCP / UDP 代理，让云端应用在内网无需开放公网入站端口的情况下访问 TCP 与单播 UDP 服务。": "RelayLink is an open-source reverse TCP / UDP proxy built on .NET. Access private TCP and unicast UDP services without exposing inbound ports on the private network.",
+    "开源 · .NET · TCP / UDP": "OPEN SOURCE · .NET · TCP / UDP",
+    "RelayLink 让 Agent 主动连接服务端，把分散在不同内网中的 SQL Server、RDP 与其他 TCP / UDP 服务，变成可集中配置、可授权、可审计的连接。": "RelayLink lets Agents connect outward to the Server, providing centrally configured, authorized, and auditable access to SQL Server, RDP, and other TCP / UDP services across private networks.",
+    "TCP / 单播 UDP": "TCP / Unicast UDP",
+    "RelayLink 不做 VPN、P2P 打洞，也不解析业务协议。它只负责转发受控的 TCP 字节流与单播 UDP 报文，让应用继续使用原来的地址、账号、权限和 TLS。": "RelayLink relays controlled TCP streams and unicast UDP datagrams without inspecting application protocols. Applications keep their existing addresses, accounts, permissions, and TLS. It does not provide VPNs or P2P hole punching.",
+    "不提供 UDP 广播/组播、VPN 或 IP 层组网": "No UDP broadcast/multicast, VPN, or IP-layer networking",
+    "普通 TCP 字节流与 UDP 报文均经数据隧道转发，普通代理不提供链路加密。敏感业务应启用业务自身 TLS，或部署在受保护的网络链路中；应用层安全组不能替代加密。": "Both TCP streams and UDP datagrams use data tunnels. Standard proxy tunnels do not add encryption. Sensitive applications should use their own TLS or a protected network path; security groups do not replace encryption.",
+    "开源反向 TCP / UDP 代理 · Built with .NET": "Open-source reverse TCP / UDP proxy · Built with .NET",
+    "UDP 使用与升级说明 →": "UDP usage and upgrade notes →",
+    "rc.9 重建版兼容 v3 TCP；UDP 需相关 Agent 支持 v4。": "The rebuilt rc.9 supports v3 TCP clients. UDP requires v4-capable Agents.",
+    "确认客户端在线后创建通道，选择 TCP 或 UDP，填写 Agent 所在内网可达的固定目标主机和端口。": "After the client is online, create a TCP or UDP channel with a fixed target host and port reachable from the Agent.",
+    "UDP 转发使用指南": "UDP forwarding guide",
+    "普通与授权互访、协议升级、端口放行及报文限制": "Standard and authorized peer access, upgrades, firewall ports, and datagram limits",
+    "UDP 转发技术设计": "UDP forwarding design",
+    "来源会话、TCP 隧道封装、空闲回收与资源边界": "Source sessions, TCP tunnel framing, idle cleanup, and resource limits",
+    "UDP 转发需求": "UDP forwarding requirements",
+    "单播转发范围、配置与安全要求、A75–A79": "Unicast scope, configuration, security, and acceptance criteria A75–A79",
+    "UDP 独立隧道方案": "Dedicated UDP tunnels",
+    "UDP over TCP 的取舍、兼容性与限制": "UDP-over-TCP tradeoffs, compatibility, and limitations",
+    "Linux 部署": "Linux deployment",
+    "文档索引": "Documentation index",
+    "需求、设计、架构决策与验证入口": "Requirements, design, architecture decisions, and validation",
+    "首页": "Home",
+    "使用说明": "Guides",
+    "文档中心": "Documentation",
+    "发布日志": "Release notes",
+    "返回列表": "Back to list",
+    "上一篇": "Previous",
+    "下一篇": "Next",
+    "目录": "On this page",
+    "仓库原文": "Repository source",
+    "开始使用": "Get started",
+    "按部署方式选择指南，查看完整步骤。": "Choose a deployment guide and read the complete steps.",
+    "查阅设计、安全边界与开发规范。": "Explore design, security boundaries, and development conventions.",
+    "查看各版本的更新、兼容性与验证限制。": "Read changes, compatibility notes, and validation limits for each version.",
+    "快速开始": "Quick start",
+    "四个步骤建立第一条通道": "Four steps to your first channel",
+    "正文沿用仓库中文原文；页面导航提供英文。": "This article uses the original Chinese repository text; navigation is available in English.",
+
     "LOGGING / 日志与诊断": "LOGGING / DIAGNOSTICS",
     "连接失败，原因有据可查。": "Connection failures with actionable reasons.",
     "Server 与 Agent 统一记录结构化文件日志，按客户端、连接项和会话关联事件；拒绝连接时返回并记录明确原因。": "Server and Agent write structured file logs with client, profile, and session context. Rejected connections return and log explicit reasons.",
@@ -163,6 +203,7 @@ if (siteLocale === "en") {
     const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
     let node;
     while ((node = walker.nextNode())) {
+        if (node.parentElement?.closest(".prose") && !node.parentElement.closest(".repository-source")) continue;
         const original = node.nodeValue;
         const key = original.trim().replace(/\s+/g, " ");
         if (english[key]) {
@@ -180,20 +221,5 @@ if (siteLocale === "en") {
     });
 }
 
-const languageLink = document.querySelector(".language-link");
-if (languageLink) {
-    if (siteLocale === "en") {
-        languageLink.href = "../";
-        languageLink.textContent = "中文";
-        languageLink.setAttribute("aria-label", "Switch to Chinese");
-    }
-
-    const syncLanguageHash = () => {
-        const base = siteLocale === "en" ? "../" : "./en/";
-        languageLink.href = `${base}${window.location.hash}`;
-    };
-    syncLanguageHash();
-    window.addEventListener("hashchange", syncLanguageHash);
-}
 
 window.RELAYLINK_LOCALE = siteLocale;

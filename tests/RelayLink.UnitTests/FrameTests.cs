@@ -27,11 +27,27 @@ public sealed class FrameTests
         await Assert.ThrowsAsync<ProtocolException>(async () => await new FrameReader(stream).ReadAsync(ProtocolConstants.MaxDataPayloadLength, CancellationToken.None));
     }
 
-    [Fact]
-    public async Task Reader_rejects_pre_split_protocol_version()
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(5)]
+    public async Task Reader_rejects_unsupported_protocol_version(byte version)
     {
-        await using var stream = new MemoryStream(new byte[] { (byte)'N', (byte)'T', (byte)'P', (byte)'1', 1, (byte)FrameType.Register, 0, 0, 0, 0, 0, 0 });
+        await using var stream = new MemoryStream(new byte[] { (byte)'N', (byte)'T', (byte)'P', (byte)'1', version, (byte)FrameType.Register, 0, 0, 0, 0, 0, 0 });
         await Assert.ThrowsAsync<ProtocolException>(async () => await new FrameReader(stream).ReadAsync(ProtocolConstants.MaxInitialPayloadLength, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Reader_accepts_v3_and_rejects_version_change_within_connection()
+    {
+        await using var stream = new MemoryStream();
+        await new FrameWriter(stream, protocolVersion: 3).WriteAsync(new Frame(FrameType.Ping, new byte[] { 1 }), CancellationToken.None);
+        await new FrameWriter(stream).WriteAsync(new Frame(FrameType.Ping, new byte[] { 1 }), CancellationToken.None);
+        stream.Position = 0;
+        var reader = new FrameReader(stream);
+        Assert.Equal(FrameType.Ping, (await reader.ReadAsync(100, CancellationToken.None))!.Type);
+        Assert.Equal((byte)3, reader.ProtocolVersion);
+        await Assert.ThrowsAsync<ProtocolException>(async () => await reader.ReadAsync(100, CancellationToken.None));
     }
 
     [Fact]

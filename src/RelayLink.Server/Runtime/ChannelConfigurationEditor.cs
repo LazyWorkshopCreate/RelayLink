@@ -24,6 +24,8 @@ public sealed class ChannelConfigurationEditor(
             var existing = client.Channels.SingleOrDefault(channel => channel.ChannelId == channelId) ?? throw new ChannelUpdateException("Channel was not found.");
             var updated = ToChannel(channelId, request) with
             {
+                TransportProtocol = request.TransportProtocol ?? existing.TransportProtocol,
+                UdpIdleTimeoutSeconds = request.UdpIdleTimeoutSeconds ?? existing.UdpIdleTimeoutSeconds,
                 AuthorizedClientsOnly = request.AuthorizedClientsOnly ?? existing.AuthorizedClientsOnly,
                 EndToEndEncryptionEnabled = request.EndToEndEncryptionEnabled ?? existing.EndToEndEncryptionEnabled,
                 AccessSecret = request.AccessSecret ?? existing.AccessSecret,
@@ -44,6 +46,8 @@ public sealed class ChannelConfigurationEditor(
             if (client.Channels.Any(channel => channel.ChannelId == request.ChannelId)) throw new ChannelUpdateException("Channel ID already exists.");
             var created = new ChannelConfiguration(request.ChannelId, request.DisplayName, request.Enabled, request.ListenAddress, request.ListenPort, request.TargetHost, request.TargetPort, request.MaxConnections, request.TargetConnectTimeoutSeconds)
             {
+                TransportProtocol = request.TransportProtocol ?? "tcp",
+                UdpIdleTimeoutSeconds = request.UdpIdleTimeoutSeconds ?? 60,
                 AuthorizedClientsOnly = request.AuthorizedClientsOnly ?? false,
                 EndToEndEncryptionEnabled = request.AuthorizedClientsOnly == true ? request.EndToEndEncryptionEnabled ?? true : true,
                 AccessSecret = (request.AuthorizedClientsOnly ?? false) && string.IsNullOrWhiteSpace(request.AccessSecret) ? NewAccessSecret() : request.AccessSecret,
@@ -111,10 +115,19 @@ public sealed class ChannelConfigurationEditor(
                     pair.First.HasSameRuntimeSettings(pair.Second)) &&
                 client.Channels.Zip(updatedClient.Channels).Any(pair =>
                     !pair.First.Tags.SequenceEqual(pair.Second.Tags, StringComparer.Ordinal));
-            var (snapshot, version) = ConfigurationSnapshotFactory.Create(updatedClient);
             if (!onlyTagsChanged && sessions.TryGet(clientId, out var session) && session is not null)
             {
+                var (snapshot, version) = ConfigurationSnapshotFactory.Create(updatedClient, updatedConfiguration, session.ProtocolVersion);
                 await session.SendConfigurationUpdateAsync(snapshot, version, cancellationToken);
+            }
+            foreach (var dependent in updatedConfiguration.Clients.Values.Where(c => c.ClientId != clientId &&
+                c.OutboundMappings.Any(m => m.TargetClientId == clientId)))
+            {
+                if (!sessions.TryGet(dependent.ClientId, out var dependentSession) || dependentSession is null) continue;
+                var before = ConfigurationSnapshotFactory.Create(dependent, current, dependentSession.ProtocolVersion);
+                var after = ConfigurationSnapshotFactory.Create(dependent, updatedConfiguration, dependentSession.ProtocolVersion);
+                if (before.Version != after.Version)
+                    await dependentSession.SendConfigurationUpdateAsync(after.Snapshot, after.Version, cancellationToken);
             }
             return result;
         }
@@ -148,6 +161,8 @@ public sealed class ChannelConfigurationEditor(
 
 public sealed record ChannelUpdateRequest(string DisplayName, bool Enabled, string ListenAddress, int ListenPort, string TargetHost, int TargetPort, int MaxConnections, int TargetConnectTimeoutSeconds)
 {
+    public string? TransportProtocol { get; init; }
+    public int? UdpIdleTimeoutSeconds { get; init; }
     public bool? AuthorizedClientsOnly { get; init; }
     public bool? EndToEndEncryptionEnabled { get; init; }
     public string? AccessSecret { get; init; }
@@ -156,6 +171,8 @@ public sealed record ChannelUpdateRequest(string DisplayName, bool Enabled, stri
 }
 public sealed record ChannelCreateRequest(string ChannelId, string DisplayName, bool Enabled, string ListenAddress, int ListenPort, string TargetHost, int TargetPort, int MaxConnections, int TargetConnectTimeoutSeconds)
 {
+    public string? TransportProtocol { get; init; }
+    public int? UdpIdleTimeoutSeconds { get; init; }
     public bool? AuthorizedClientsOnly { get; init; }
     public bool? EndToEndEncryptionEnabled { get; init; }
     public string? AccessSecret { get; init; }

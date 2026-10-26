@@ -49,9 +49,13 @@ internal sealed class PeerSessionCoordinator(
             if (listeners.ContainsKey(mapping.MappingId)) continue;
             try
             {
-                var binding = new LocalBinding(mapping, ports.Bind(mapping.MappingId));
+                var binding = mapping.TransportProtocol == "udp"
+                    ? new LocalBinding(mapping, null, new DatagramListener(ports.BindUdp(mapping.MappingId)))
+                    : new LocalBinding(mapping, ports.Bind(mapping.MappingId), null);
                 listeners.Add(mapping.MappingId, binding);
-                Track(AcceptLoopAsync(binding));
+                Track(binding.Udp is { } udp
+                    ? udp.RunAsync(configuration.MaxConnections, _ => true, datagram => HandleDatagramCallerAsync(datagram, mapping), sessionToken)
+                    : AcceptLoopAsync(binding));
                 logger.LogInformation("Peer loopback listener {MappingId} started on 127.0.0.1:{Port}.", mapping.MappingId, binding.Port);
             }
             catch (Exception exception) when (exception is SocketException or IOException or UnauthorizedAccessException)
@@ -113,7 +117,7 @@ internal sealed class PeerSessionCoordinator(
         {
             while (!sessionToken.IsCancellationRequested && !binding.Stopped)
             {
-                var caller = await binding.Listener.AcceptSocketAsync(sessionToken);
+                var caller = await binding.Listener!.AcceptSocketAsync(sessionToken);
                 var lease = quota.TryAcquirePending();
                 if (lease is null)
                 {
@@ -134,6 +138,19 @@ internal sealed class PeerSessionCoordinator(
         catch (SocketException) when (binding.Stopped) { }
     }
 
+    private async Task HandleDatagramCallerAsync(DatagramSession datagram, OutboundMappingSnapshot mapping)
+    {
+        using var lease = quota.TryAcquirePending();
+        if (lease is null) return;
+        lock (quotaLock)
+        {
+            if (openConnections >= Volatile.Read(ref snapshot).MaxConnections) return;
+            openConnections++;
+        }
+        try { await HandleCallerAsync(null, mapping, lease, datagram); }
+        finally { lock (quotaLock) openConnections--; }
+    }
+
     private async Task HandleCallerWithLeaseAsync(Socket caller, OutboundMappingSnapshot mapping, AgentConnectionQuota.Lease lease)
     {
         using (lease)
@@ -141,10 +158,10 @@ internal sealed class PeerSessionCoordinator(
         finally { lock (quotaLock) openConnections--; }
     }
 
-    private async Task HandleCallerAsync(Socket caller, OutboundMappingSnapshot mapping, AgentConnectionQuota.Lease lease)
+    private async Task HandleCallerAsync(Socket? caller, OutboundMappingSnapshot mapping, AgentConnectionQuota.Lease lease, DatagramSession? datagram = null)
     {
         using (caller)
-        using (var deadline = CancellationTokenSource.CreateLinkedTokenSource(sessionToken))
+        using (var deadline = CancellationTokenSource.CreateLinkedTokenSource(sessionToken, datagram?.Token ?? CancellationToken.None))
         {
             deadline.CancelAfter(TimeSpan.FromSeconds(20));
             var requestId = Guid.NewGuid();
@@ -154,6 +171,7 @@ internal sealed class PeerSessionCoordinator(
             {
                 await controlWriter.WriteAsync(new Frame(FrameType.PeerOpenRequest, JsonProtocolSerializer.Serialize(new PeerOpenRequestMessage(requestId, mapping.MappingId))), deadline.Token);
                 var grant = await reply.Task.WaitAsync(deadline.Token);
+                if (grant.TransportProtocol != mapping.TransportProtocol) throw new ProtocolException("Peer transport changed; wait for updated configuration.");
                 await using var connection = await ConnectDataAsync(grant.ConnectionId, grant.SessionId, grant.Token, "caller", deadline.Token);
                 using var tls = grant.EndToEndEncryptionEnabled ? new SslStream(connection.Framed, leaveInnerStreamOpen: true) : null;
                 Stream peerStream = connection.Framed;
@@ -179,8 +197,9 @@ internal sealed class PeerSessionCoordinator(
                 if (status[0] != 1) throw new IOException("Peer target was not ready.");
                 lease.MarkActive();
                 deadline.CancelAfter(Timeout.InfiniteTimeSpan);
-                if (tls is not null) await RelayEncryptedSocketAsync(caller, tls, connection.Framed, sessionToken);
-                else await RelayPlainSocketAsync(caller, connection.Framed, sessionToken);
+                if (datagram is not null) await datagram.RelayAsync(peerStream, mapping.UdpIdleTimeoutSeconds, deadline.Token);
+                else if (tls is not null) await RelayEncryptedSocketAsync(caller!, tls, connection.Framed, sessionToken);
+                else await RelayPlainSocketAsync(caller!, connection.Framed, sessionToken);
             }
             catch (Exception exception) when (exception is IOException or SocketException or OperationCanceledException or AuthenticationException or ProtocolException)
             {
@@ -194,7 +213,7 @@ internal sealed class PeerSessionCoordinator(
     {
         var current = Volatile.Read(ref snapshot);
         var channel = current.Channels.SingleOrDefault(candidate => candidate.ChannelId == open.ChannelId && candidate.Enabled && candidate.AuthorizedClientsOnly);
-        if (channel is null || string.IsNullOrWhiteSpace(channel.AccessSecret) || channel.EndToEndEncryptionEnabled != open.EndToEndEncryptionEnabled) return;
+        if (channel is null || string.IsNullOrWhiteSpace(channel.AccessSecret) || channel.EndToEndEncryptionEnabled != open.EndToEndEncryptionEnabled || channel.TransportProtocol != open.TransportProtocol) return;
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(sessionToken);
         deadline.CancelAfter(TimeSpan.FromSeconds(20));
         try
@@ -221,6 +240,17 @@ internal sealed class PeerSessionCoordinator(
             var expected = ComputeProof(channel.AccessSecret, open.CallerClientId, channel.ChannelId, open.ConnectionId, open.EndToEndEncryptionEnabled, challenge);
             if (!CryptographicOperations.FixedTimeEquals(provided, expected)) throw new AuthenticationException("Peer access proof was invalid.");
 
+            if (channel.TransportProtocol == "udp")
+            {
+                using var targetTimeout = CancellationTokenSource.CreateLinkedTokenSource(deadline.Token);
+                targetTimeout.CancelAfter(TimeSpan.FromSeconds(channel.TargetConnectTimeoutSeconds));
+                using var udp = await DatagramRelay.ConnectTargetAsync(channel.TargetHost, channel.TargetPort, targetTimeout.Token);
+                await peerStream.WriteAsync(new byte[] { 1 }, deadline.Token);
+                lease.MarkActive();
+                deadline.CancelAfter(Timeout.InfiniteTimeSpan);
+                await DatagramRelay.RunTargetAsync(peerStream, udp, channel.UdpIdleTimeoutSeconds, sessionToken);
+                return;
+            }
             using var target = new TcpClient();
             using var targetDeadline = CancellationTokenSource.CreateLinkedTokenSource(deadline.Token);
             targetDeadline.CancelAfter(TimeSpan.FromSeconds(channel.TargetConnectTimeoutSeconds));
@@ -376,13 +406,14 @@ internal sealed class PeerSessionCoordinator(
         }
     }
 
-    private sealed class LocalBinding(OutboundMappingSnapshot mapping, TcpListener listener)
+    private sealed class LocalBinding(OutboundMappingSnapshot mapping, TcpListener? listener, DatagramListener? udp)
     {
         public OutboundMappingSnapshot Mapping { get; } = mapping;
-        public TcpListener Listener { get; } = listener;
-        public int Port => ((IPEndPoint)Listener.LocalEndpoint).Port;
+        public TcpListener? Listener { get; } = listener;
+        public DatagramListener? Udp { get; } = udp;
+        public int Port => Udp?.Port ?? ((IPEndPoint)Listener!.LocalEndpoint).Port;
         public bool Stopped { get; private set; }
-        public void Stop() { Stopped = true; Listener.Stop(); }
+        public void Stop() { Stopped = true; Listener?.Stop(); Udp?.Stop(); }
     }
 
     private sealed class PeerDataConnection(TcpClient client, Stream transport, FramedDuplexStream framed) : IAsyncDisposable

@@ -247,6 +247,22 @@ public sealed class ControlSessionWorker(AgentConfiguration configuration, Agent
             phase = "data_bound";
             await diagnostics.WriteAsync(open.ConnectionId, open.ChannelId, phase, elapsedMs: (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds);
 
+            if (channel.TransportProtocol == "udp")
+            {
+                using var targetDeadline = CancellationTokenSource.CreateLinkedTokenSource(deadline.Token);
+                targetDeadline.CancelAfter(TimeSpan.FromSeconds(channel.TargetConnectTimeoutSeconds));
+                using var udpTarget = await DatagramRelay.ConnectTargetAsync(channel.TargetHost, channel.TargetPort, targetDeadline.Token);
+                await controlWriter.WriteAsync(new Frame(FrameType.TargetReady, JsonProtocolSerializer.Serialize(new TargetReadyMessage(open.ConnectionId, 0))), deadline.Token);
+                await startSignal.Task.WaitAsync(deadline.Token);
+                lease.MarkActive();
+                phase = "udp_relay_started";
+                await diagnostics.WriteAsync(open.ConnectionId, open.ChannelId, phase);
+                await DatagramRelay.RunTargetAsync(dataStream, udpTarget, channel.UdpIdleTimeoutSeconds, sessionCancellation,
+                    count => { Interlocked.Add(ref toServerBytes, count); Interlocked.Exchange(ref lastToServer, Stopwatch.GetTimestamp()); },
+                    count => { Interlocked.Add(ref toTargetBytes, count); Interlocked.Exchange(ref lastToTarget, Stopwatch.GetTimestamp()); });
+                outcome = "udp_idle_timeout";
+                return;
+            }
             using var target = new TcpClient();
             using var targetTimeout = CancellationTokenSource.CreateLinkedTokenSource(deadline.Token);
             targetTimeout.CancelAfter(TimeSpan.FromSeconds(channel.TargetConnectTimeoutSeconds));
@@ -379,6 +395,9 @@ public sealed class ControlSessionWorker(AgentConfiguration configuration, Agent
             throw new AgentPermanentException("Server returned an invalid configuration snapshot.");
         }
 
+        if (config.Channels.Any(c => c.TransportProtocol is not ("tcp" or "udp") || c.UdpIdleTimeoutSeconds is < 1 or > 3600) ||
+            config.OutboundMappings.Any(m => m.TransportProtocol is not ("tcp" or "udp") || m.UdpIdleTimeoutSeconds is < 1 or > 3600))
+            throw new AgentPermanentException("Server returned invalid UDP settings.");
         var computedVersion = ConfigurationSnapshotHasher.Compute(config);
         if (!string.Equals(computedVersion, version, StringComparison.Ordinal)) throw new AgentPermanentException("Configuration snapshot hash did not match.");
     }

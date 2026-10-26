@@ -2,14 +2,16 @@
 
 <img src="src/RelayLink.AdminWeb/public/relaylink-icon.svg" alt="RelayLink 项目图标" width="48" height="48">
 
-RelayLink 是基于 .NET 的反向 TCP 代理，用于让云端内网应用访问分布在不同内网中的 TCP 服务，例如 SQL Server。部署在内网的 Windows、Linux 或 macOS Agent 主动连接服务端，不需要为 Agent 所在网络开放公网入站端口。
+RelayLink 是基于 .NET 的反向 TCP / UDP 代理，用于让云端内网应用访问分布在不同内网中的 TCP 或 UDP 服务，例如 SQL Server 的固定 TCP 端口。部署在内网的 Windows、Linux 或 macOS Agent 主动连接服务端，不需要为 Agent 所在网络开放公网入站端口。
 
 ## 连接模式
 
 - **云端访问内网目标**：云端应用连接服务端的内网代理端口；服务端通过已认证 Agent 建立数据隧道，由 Agent 连接对应的内网目标。
 - **客户端授权互访**：访问方 Agent 在本机 `127.0.0.1` 提供入口，经服务端转发到被访问方 Agent。被访问通道可以限定为仅授权客户端访问；两端始终使用访问密钥校验，业务流默认使用内层 TLS，也可由管理员按通道明确关闭加密并直接复制。
 
-两种模式均只代理 TCP 字节流，不解析或修改 SQL/TDS 内容。客户端互访的本机入口端口由访问方 Agent 在配置范围内选择，并在端口冲突时轮换。
+两种模式支持 TCP 字节流和单播 UDP 报文，不解析或修改 SQL/TDS 内容。UDP 按来源地址和端口隔离会话，通过现有 TCP 数据隧道转发，保留报文边界并空闲回收；UDP 设计与兼容性见 [UDP 转发](docs/design/udp-forwarding.md)。客户端互访的本机入口端口由访问方 Agent 在配置范围内选择，并在端口冲突时轮换。
+
+Server 兼容 v3 Agent 的 TCP 连接，可先升级服务端；UDP 需要相关 Agent 支持 v4。v0.1.0-rc.9 重建版包含此兼容修复；同名旧包仍拒绝 v3，下载时须核对最新 SHA256SUMS，详见[使用指南](docs/operations/udp-forwarding.md)。
 
 ## 主要能力
 
@@ -22,7 +24,7 @@ RelayLink 是基于 .NET 的反向 TCP 代理，用于让云端内网应用访�
 
 服务端支持 Linux 与 Windows，Agent 支持 Windows、Linux 与 macOS（Intel 和 Apple Silicon）。后端使用 C# / .NET，服务端管理页面与 Agent 本机页面分别使用 React 和 TypeScript。控制与数据入口只应对 Agent 开放；普通数据入口为明文 TCP，敏感业务必须使用业务自身 TLS 或受保护的网络链路。普通通道可用应用层安全组限制来源 IP；部署环境的安全组或防火墙仍须限制业务端口及管理页面的可达范围。
 
-RelayLink 不提供 UDP、VPN/IP 层组网或 P2P 打洞，也不替代目标服务自身的身份认证。TCP 连接中断后不会重放业务请求或恢复原连接。
+RelayLink 不提供 UDP 广播/组播、VPN/IP 层组网或 P2P 打洞，也不替代目标服务自身的身份认证。TCP 连接中断后不会重放业务请求或恢复原连接。
 
 ## 快速开始
 
@@ -67,7 +69,7 @@ RelayLink/
 
 ## 文档
 
-- [产品网站](https://deronqi.github.io/RelayLink/)
+- [产品网站](https://lazyworkshopcreate.github.io/RelayLink/)
 - [文档索引](docs/README.md)
 - [需求与功能边界](docs/requirements/README.md)
 - [技术设计](docs/design/technical-design.md)

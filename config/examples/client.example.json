@@ -2,7 +2,10 @@
   "schemaVersion": 1,
   "clientId": "shanghai-01",
   "displayName": "上海节点 01",
-  "tags": ["生产", "上海"],
+  "tags": [
+    "生产",
+    "上海"
+  ],
   "enabled": true,
   "secret": "REPLACE_WITH_UNIQUE_32_RANDOM_BYTES_BASE64",
   "maxConnections": 100,
@@ -12,7 +15,10 @@
     {
       "channelId": "erp-sql",
       "displayName": "ERP SQL Server",
-      "tags": ["数据库", "ERP"],
+      "tags": [
+        "数据库",
+        "ERP"
+      ],
       "enabled": true,
       "authorizedClientsOnly": false,
       "endToEndEncryptionEnabled": true,
@@ -22,7 +28,29 @@
       "targetHost": "192.168.10.20",
       "targetPort": 1433,
       "maxConnections": 50,
-      "targetConnectTimeoutSeconds": 5
+      "targetConnectTimeoutSeconds": 5,
+      "transportProtocol": "tcp",
+      "udpIdleTimeoutSeconds": 60
+    },
+    {
+      "channelId": "udp-echo",
+      "displayName": "UDP Echo",
+      "tags": [
+        "UDP",
+        "测试"
+      ],
+      "enabled": true,
+      "authorizedClientsOnly": false,
+      "endToEndEncryptionEnabled": true,
+      "securityGroupId": "office",
+      "listenAddress": "0.0.0.0",
+      "listenPort": 19053,
+      "targetHost": "192.0.2.53",
+      "targetPort": 5353,
+      "maxConnections": 50,
+      "targetConnectTimeoutSeconds": 5,
+      "transportProtocol": "udp",
+      "udpIdleTimeoutSeconds": 60
     }
   ],
   "outboundMappings": []

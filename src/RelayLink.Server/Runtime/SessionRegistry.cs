@@ -41,11 +41,15 @@ public sealed class Session(Guid sessionId, string clientId, DateTimeOffset conn
     public DateTimeOffset LastHeartbeatUtc { get; set; } = connectedAtUtc;
     public TimeSpan? LastHeartbeatRtt { get; set; }
     public string? AgentVersion { get; set; }
+    public byte ProtocolVersion { get; set; } = ProtocolConstants.Version;
     private FrameWriter? ControlWriter { get; set; }
     private long expectedPongSequence;
     private long pingTimestamp;
     private string configVersion = string.Empty;
-    private string? pendingConfigVersion;
+    private const int MaximumPendingConfigurations = 32;
+    private readonly SemaphoreSlim configUpdateLock = new(1, 1);
+    private readonly object configAckLock = new();
+    private readonly Queue<string> pendingConfigVersions = new();
     private IReadOnlyList<PeerMappingAddress> peerAddresses = [];
 
     public void AttachControlWriter(FrameWriter writer) => ControlWriter = writer;
@@ -59,14 +63,29 @@ public sealed class Session(Guid sessionId, string clientId, DateTimeOffset conn
     public void SetPeerAddresses(IReadOnlyList<PeerMappingAddress> addresses) => Volatile.Write(ref peerAddresses, addresses.ToArray());
     public async ValueTask SendConfigurationUpdateAsync(ClientConfigSnapshot snapshot, string version, CancellationToken cancellationToken)
     {
-        Volatile.Write(ref pendingConfigVersion, version);
-        await SendAsync(new Frame(FrameType.ConfigUpdate, JsonProtocolSerializer.Serialize(new ConfigUpdateMessage(SessionId, version, snapshot))), cancellationToken);
+        await configUpdateLock.WaitAsync(cancellationToken);
+        try
+        {
+            lock (configAckLock)
+            {
+                if (pendingConfigVersions.Count >= MaximumPendingConfigurations)
+                    throw new ProtocolException("Too many unacknowledged configuration updates.");
+                pendingConfigVersions.Enqueue(version);
+            }
+            await SendAsync(new Frame(FrameType.ConfigUpdate, JsonProtocolSerializer.Serialize(new ConfigUpdateMessage(SessionId, version, snapshot), ProtocolVersion)), cancellationToken);
+        }
+        catch { Close(); throw; }
+        finally { configUpdateLock.Release(); }
     }
     public void ConfirmConfiguration(string version)
     {
-        if (!string.Equals(Volatile.Read(ref pendingConfigVersion), version, StringComparison.Ordinal)) throw new ProtocolException("Unexpected configuration acknowledgement.");
-        SetConfigVersion(version);
-        Volatile.Write(ref pendingConfigVersion, null);
+        lock (configAckLock)
+        {
+            if (!pendingConfigVersions.TryPeek(out var expected) || !string.Equals(expected, version, StringComparison.Ordinal))
+                throw new ProtocolException("Unexpected configuration acknowledgement.");
+            pendingConfigVersions.Dequeue();
+            SetConfigVersion(version);
+        }
     }
 
     public void MarkPing(long sequence, long timestamp)

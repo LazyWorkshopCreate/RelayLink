@@ -20,6 +20,150 @@ namespace RelayLink.IntegrationTests;
 
 public sealed class ServerTunnelTests
 {
+#if LEGACY_AGENT_TESTS
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Legacy_v3_binary_connects_and_only_relays_tcp(bool udp)
+    {
+        var legacy = Environment.GetEnvironmentVariable("RELAYLINK_LEGACY_AGENT_ASSEMBLY")
+            ?? throw new InvalidOperationException("Set RELAYLINK_LEGACY_AGENT_ASSEMBLY to an unmodified v0.1.0-rc.8 Agent DLL.");
+        using var fixture = new TunnelFixture();
+        await fixture.StartAsync(transportProtocol: udp ? "udp" : "tcp");
+        await fixture.StartAgentAsync(legacy);
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        if (udp)
+        {
+            using var caller = new UdpClient();
+            caller.Connect(IPAddress.Loopback, fixture.ProxyPort);
+            await caller.SendAsync(new byte[] { 42 }, deadline.Token);
+            using var timeout = new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await caller.ReceiveAsync(timeout.Token));
+        }
+        else
+        {
+            using var caller = new TcpClient();
+            await caller.ConnectAsync(IPAddress.Loopback, fixture.ProxyPort, deadline.Token);
+            var payload = RandomNumberGenerator.GetBytes(4096);
+            await caller.GetStream().WriteAsync(payload, deadline.Token);
+            var response = new byte[payload.Length];
+            await caller.GetStream().ReadExactlyAsync(response, deadline.Token);
+            Assert.Equal(payload, response);
+        }
+    }
+#endif
+    [Fact]
+    public async Task V3_configuration_updates_keep_legacy_hash_and_remove_udp_channels()
+    {
+        using var fixture = new TunnelFixture();
+        await fixture.StartAsync();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(25));
+        var token = deadline.Token;
+        using var control = new TcpClient();
+        await control.ConnectAsync(IPAddress.Loopback, fixture.TunnelPort, token);
+        var reader = new FrameReader(control.GetStream());
+        var writer = new FrameWriter(control.GetStream(), protocolVersion: 3);
+        await writer.WriteAsync(new Frame(FrameType.Register, JsonProtocolSerializer.Serialize(
+            new RegisterMessage("test-agent", fixture.Secret, "v3-test", new string('A', 64)))), token);
+        var accepted = JsonProtocolSerializer.Deserialize<RegisterAcceptedMessage>((await reader.ReadAsync(ProtocolConstants.MaxControlPayloadLength, token))!.Payload.Span);
+        await writer.WriteAsync(new Frame(FrameType.ConfigAck, JsonProtocolSerializer.Serialize(new ConfigAckMessage(accepted.SessionId, accepted.ConfigVersion))), token);
+        Assert.Equal(FrameType.Ready, (await reader.ReadAsync(ProtocolConstants.MaxControlPayloadLength, token))?.Type);
+        using var http = new HttpClient(new HttpClientHandler { UseCookies = true });
+        using var login = await http.PostAsJsonAsync($"http://127.0.0.1:{fixture.DashboardPort}/api/v1/admin/session",
+            new { username = "admin", password = "test-password" }, token);
+        login.EnsureSuccessStatusCode();
+        var csrf = (await login.Content.ReadFromJsonAsync<JsonElement>(cancellationToken: token)).GetProperty("csrfToken").GetString();
+        foreach (var protocol in new[] { "udp", "tcp" })
+        {
+            using var update = new HttpRequestMessage(HttpMethod.Put,
+                $"http://127.0.0.1:{fixture.DashboardPort}/api/v1/admin/clients/test-agent/channels/echo")
+            { Content = JsonContent.Create(new { displayName = "Echo", enabled = true, listenAddress = "127.0.0.1", listenPort = fixture.ProxyPort,
+                targetHost = "127.0.0.1", targetPort = fixture.TargetPort, maxConnections = 5, targetConnectTimeoutSeconds = 5, transportProtocol = protocol }) };
+            update.Headers.Add("X-RelayLink-CSRF", csrf);
+            using var saved = await http.SendAsync(update, token);
+            saved.EnsureSuccessStatusCode();
+            var frame = await reader.ReadAsync(ProtocolConstants.MaxControlPayloadLength, token);
+            Assert.Equal(FrameType.ConfigUpdate, frame?.Type);
+            var message = JsonProtocolSerializer.Deserialize<ConfigUpdateMessage>(frame!.Payload.Span);
+            using var document = JsonDocument.Parse(frame.Payload);
+            // The old binary hashes its own deserialized v3 shape; this wire fixture has exactly that shape.
+            var rawConfig = document.RootElement.GetProperty("config").GetRawText();
+            Assert.DoesNotContain("transportProtocol", rawConfig);
+            Assert.DoesNotContain("udpIdleTimeoutSeconds", rawConfig);
+            Assert.Equal(Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(rawConfig))), message.ConfigVersion);
+            Assert.Equal(protocol == "tcp" ? 1 : 0, message.Config.Channels.Count);
+            await writer.WriteAsync(new Frame(FrameType.ConfigAck, JsonProtocolSerializer.Serialize(new ConfigAckMessage(message.SessionId, message.ConfigVersion))), token);
+        }
+        var ping = await reader.ReadAsync(ProtocolConstants.MaxControlPayloadLength, token);
+        Assert.Equal(FrameType.Ping, ping?.Type);
+        var sequence = JsonProtocolSerializer.Deserialize<PingMessage>(ping!.Payload.Span).Sequence;
+        await writer.WriteAsync(new Frame(FrameType.Pong, JsonProtocolSerializer.Serialize(new PongMessage(sequence))), token);
+    }
+
+    [Fact]
+    public async Task Udp_proxy_preserves_datagrams_isolates_sources_and_reclaims_idle_sessions()
+    {
+        using var fixture = new TunnelFixture();
+        await fixture.StartAsync(transportProtocol: "udp");
+        await fixture.StartAgentAsync();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(25));
+        using var first = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
+        using var second = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
+        first.Client.SendBufferSize = 128 * 1024;
+        first.Connect(IPAddress.Loopback, fixture.ProxyPort);
+        second.Connect(IPAddress.Loopback, fixture.ProxyPort);
+        foreach (var size in new[] { 0, 1, 32769, 65507 })
+        {
+            var a = RandomNumberGenerator.GetBytes(size);
+            var b = RandomNumberGenerator.GetBytes(19);
+            await first.SendAsync(a, deadline.Token);
+            await second.SendAsync(b, deadline.Token);
+            Assert.Equal(a, (await first.ReceiveAsync(deadline.Token)).Buffer);
+            Assert.Equal(b, (await second.ReceiveAsync(deadline.Token)).Buffer);
+        }
+        using var http = new HttpClient();
+        var url = $"http://127.0.0.1:{fixture.DashboardPort}/api/v1/clients/test-agent/channels/echo/connections";
+        JsonElement status;
+        do
+        {
+            await Task.Delay(100, deadline.Token);
+            status = await http.GetFromJsonAsync<JsonElement>(url, deadline.Token);
+        } while (status.GetProperty("connections").GetArrayLength() != 0);
+        await first.SendAsync(new byte[] { 8, 9 }, deadline.Token);
+        Assert.Equal(new byte[] { 8, 9 }, (await first.ReceiveAsync(deadline.Token)).Buffer);
+        using var logs = await http.GetFromJsonAsync<JsonDocument>($"http://127.0.0.1:{fixture.DashboardPort}/api/v1/clients/test-agent/channels", deadline.Token);
+        Assert.Contains("udp", logs!.RootElement.ToString());
+    }
+
+    [Fact]
+    public async Task Udp_security_group_denies_unlisted_source_without_opening_a_session()
+    {
+        using var fixture = new TunnelFixture();
+        await fixture.StartAsync(transportProtocol: "udp", restrictSource: true);
+        await fixture.StartAgentAsync();
+        using var denied = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
+        denied.Connect(IPAddress.Loopback, fixture.ProxyPort);
+        await denied.SendAsync(new byte[] { 42 });
+        using var timeout = new CancellationTokenSource(TimeSpan.FromMilliseconds(400));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await denied.ReceiveAsync(timeout.Token));
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var http = new HttpClient(new HttpClientHandler { UseCookies = true });
+        using var login = await http.PostAsJsonAsync($"http://127.0.0.1:{fixture.DashboardPort}/api/v1/admin/session",
+            new { username = "admin", password = "test-password" }, deadline.Token);
+        login.EnsureSuccessStatusCode();
+        var csrf = (await login.Content.ReadFromJsonAsync<JsonElement>(cancellationToken: deadline.Token)).GetProperty("csrfToken").GetString();
+        using var update = new HttpRequestMessage(HttpMethod.Put,
+            $"http://127.0.0.1:{fixture.DashboardPort}/api/v1/admin/security-groups/local")
+        { Content = JsonContent.Create(new { name = "Local", entries = new[] { "127.0.0.1" } }) };
+        update.Headers.Add("X-RelayLink-CSRF", csrf);
+        using var saved = await http.SendAsync(update, deadline.Token);
+        saved.EnsureSuccessStatusCode();
+        using var allowed = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
+        allowed.Connect(IPAddress.Loopback, fixture.ProxyPort);
+        await allowed.SendAsync(new byte[] { 7 }, deadline.Token);
+        Assert.Equal(new byte[] { 7 }, (await allowed.ReceiveAsync(deadline.Token)).Buffer);
+    }
+
     [Theory]
     [InlineData(ControlRejectionReason.ClientNotFound)]
     [InlineData(ControlRejectionReason.ClientDisabled)]
@@ -587,8 +731,10 @@ public sealed class ServerTunnelTests
         Assert.Equal(firstPin, persisted.RootElement.GetProperty("e2eCertificateSha256").GetString());
     }
 
-    [Fact]
-    public async Task Server_forwards_bytes_after_authenticated_data_tunnel_binds()
+    [Theory]
+    [InlineData((byte)3)]
+    [InlineData((byte)4)]
+    public async Task Server_forwards_bytes_after_authenticated_data_tunnel_binds(byte protocolVersion)
     {
         using var fixture = new TunnelFixture();
         await fixture.StartAsync();
@@ -599,11 +745,14 @@ public sealed class ServerTunnelTests
         await controlClient.ConnectAsync(IPAddress.Loopback, fixture.TunnelPort, token);
         var controlStream = controlClient.GetStream();
         var controlReader = new FrameReader(controlStream);
-        var controlWriter = new FrameWriter(controlStream);
+        var controlWriter = new FrameWriter(controlStream, protocolVersion: protocolVersion);
         await controlWriter.WriteAsync(new Frame(FrameType.Register, JsonProtocolSerializer.Serialize(new RegisterMessage("test-agent", fixture.Secret, "integration-test", new string('A', 64)))), token);
         var accepted = await controlReader.ReadAsync(ProtocolConstants.MaxControlPayloadLength, token);
         Assert.Equal(FrameType.RegisterAccepted, accepted?.Type);
+        Assert.Equal(protocolVersion, controlReader.ProtocolVersion);
         var registered = JsonProtocolSerializer.Deserialize<RegisterAcceptedMessage>(accepted!.Payload.Span);
+        Assert.Equal(ConfigurationSnapshotHasher.Compute(registered.Config, protocolVersion), registered.ConfigVersion);
+        if (protocolVersion == 3) Assert.DoesNotContain("transportProtocol", Encoding.UTF8.GetString(accepted.Payload.Span));
         await controlWriter.WriteAsync(new Frame(FrameType.ConfigAck, JsonProtocolSerializer.Serialize(new ConfigAckMessage(registered.SessionId, registered.ConfigVersion))), token);
         var ready = await controlReader.ReadAsync(ProtocolConstants.MaxControlPayloadLength, token);
         Assert.Equal(FrameType.Ready, ready?.Type);
@@ -619,9 +768,10 @@ public sealed class ServerTunnelTests
         await dataClient.ConnectAsync(IPAddress.Loopback, fixture.DataPort, token);
         var dataStream = dataClient.GetStream();
         var dataReader = new FrameReader(dataStream);
-        var dataWriter = new FrameWriter(dataStream);
+        var dataWriter = new FrameWriter(dataStream, protocolVersion: protocolVersion);
         await dataWriter.WriteAsync(new Frame(FrameType.BindData, JsonProtocolSerializer.Serialize(new BindDataMessage(open.SessionId, open.ConnectionId, open.ChannelId, open.Token))), token);
         Assert.Equal(FrameType.BindAccepted, (await dataReader.ReadAsync(ProtocolConstants.MaxInitialPayloadLength, token))?.Type);
+        Assert.Equal(protocolVersion, dataReader.ProtocolVersion);
 
         using var target = new TcpClient();
         await target.ConnectAsync(IPAddress.Loopback, fixture.TargetPort, token);
@@ -768,6 +918,8 @@ public sealed class ServerTunnelTests
         private readonly string directory = Path.Combine(Path.GetTempPath(), $"relaylink-integration-{Guid.NewGuid():N}");
         private readonly TcpListener targetListener = new(IPAddress.Loopback, 0);
         private Process? server;
+        private Process? udpAgent;
+        private UdpClient? udpTarget;
         private readonly StringBuilder serverOutput = new();
         private readonly StringBuilder serverError = new();
         private Task? echoTask;
@@ -775,7 +927,7 @@ public sealed class ServerTunnelTests
         public int DataPort { get; } = GetFreePort();
         public int ProxyPort { get; } = GetFreePort();
         public int DashboardPort { get; } = GetFreePort();
-        public int TargetPort => ((IPEndPoint)targetListener.LocalEndpoint).Port;
+        public int TargetPort => udpTarget is not null ? ((IPEndPoint)udpTarget.Client.LocalEndPoint!).Port : ((IPEndPoint)targetListener.LocalEndpoint).Port;
         public string Secret { get; } = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
         public string ClientPath => Path.Combine(directory, "clients", "test-agent.json");
         public string ServerPath => Path.Combine(directory, "server.json");
@@ -783,15 +935,21 @@ public sealed class ServerTunnelTests
 
         public string ReadLogs() => string.Concat(Directory.GetFiles(Path.Combine(directory, "logs"), "*.jsonl").Select(ReadActiveLog));
 
-        public async Task StartAsync(string? pinnedIdentity = null, bool enabled = true)
+        public async Task StartAsync(string? pinnedIdentity = null, bool enabled = true, string transportProtocol = "tcp", bool restrictSource = false)
         {
             Directory.CreateDirectory(Path.Combine(directory, "clients"));
             targetListener.Start();
-            echoTask = EchoOnceAsync();
+            if (transportProtocol == "udp")
+            {
+                udpTarget = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
+                udpTarget.Client.SendBufferSize = 128 * 1024;
+                echoTask = EchoUdpAsync(udpTarget);
+            }
+            else echoTask = EchoOnceAsync();
             await File.WriteAllTextAsync(Path.Combine(directory, "clients", "test-agent.json"), JsonSerializer.Serialize(new
             {
                 schemaVersion = 1, clientId = "test-agent", displayName = "Test Agent", enabled, secret = Secret, e2eCertificateSha256 = pinnedIdentity, maxConnections = 10, maxPendingConnections = 5,
-                channels = new[] { new { channelId = "echo", displayName = "Echo", enabled = true, listenAddress = "127.0.0.1", listenPort = ProxyPort, targetHost = "127.0.0.1", targetPort = TargetPort, maxConnections = 5, targetConnectTimeoutSeconds = 5 } }
+                channels = new[] { new { channelId = "echo", displayName = "Echo", enabled = true, listenAddress = "127.0.0.1", listenPort = ProxyPort, targetHost = "127.0.0.1", targetPort = TargetPort, maxConnections = 5, targetConnectTimeoutSeconds = 5, transportProtocol, udpIdleTimeoutSeconds = 1, securityGroupId = restrictSource ? "local" : null } }
             }, new JsonSerializerOptions { DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull }));
             var configPath = Path.Combine(directory, "server.json");
             await File.WriteAllTextAsync(configPath, JsonSerializer.Serialize(new
@@ -799,6 +957,7 @@ public sealed class ServerTunnelTests
                 schemaVersion = 1,
                 tunnel = new { listenAddress = "127.0.0.1", port = TunnelPort, dataPort = DataPort, tlsEnabled = false, certificatePemPath = "", privateKeyPemPath = "", handshakeTimeoutSeconds = 10, heartbeatIntervalSeconds = 15, heartbeatTimeoutSeconds = 45 },
                 dashboard = new { listenAddress = "127.0.0.1", port = DashboardPort, refreshSeconds = 5, admin = new { username = "admin", passwordHash = PasswordHash(), sessionLifetimeMinutes = 60 } },
+                securityGroups = restrictSource ? new[] { new { id = "local", name = "Local", entries = new[] { "192.0.2.1" } } } : [],
                 clientsDirectory = Path.Combine(directory, "clients"),
                 limits = new { maxConnections = 20, maxPendingConnections = 10, maxUnauthenticatedConnections = 10, maxChannelsPerClient = 10, openTimeoutSeconds = 10, blockedWriteTimeoutSeconds = 120, halfCloseDrainTimeoutSeconds = 300 }
             }));
@@ -830,6 +989,48 @@ public sealed class ServerTunnelTests
             throw new TimeoutException($"Server did not become ready. {DiagnosticOutput()}");
         }
 
+        public async Task StartAgentAsync(string? assembly = null)
+        {
+            var path = Path.Combine(directory, "agent.json");
+            var localDashboardPort = GetFreePort();
+            await File.WriteAllTextAsync(path, JsonSerializer.Serialize(new
+            {
+                dashboardPort = localDashboardPort,
+                servers = new[] { new { profileId = "udp", serverHost = "127.0.0.1", serverPort = TunnelPort,
+                    dataPort = DataPort, clientId = "test-agent", secret = Secret, useTls = false,
+                    reconnect = new { initialDelaySeconds = 1, maxDelaySeconds = 2, permanentErrorDelaySeconds = 2 } } }
+            }));
+            udpAgent = Process.Start(new ProcessStartInfo("dotnet", $"\"{assembly ?? typeof(ControlSessionWorker).Assembly.Location}\" --config \"{path}\"")
+                { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true })!;
+            udpAgent.BeginOutputReadLine(); udpAgent.BeginErrorReadLine();
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            using var http = new HttpClient();
+            while (true)
+            {
+                try
+                {
+                    var status = await http.GetFromJsonAsync<JsonElement>($"http://127.0.0.1:{localDashboardPort}/api/v2/status", deadline.Token);
+                    if (status.GetProperty("servers")[0].GetProperty("online").GetBoolean()) return;
+                }
+                catch (HttpRequestException) { }
+                if (udpAgent.HasExited) throw new InvalidOperationException("UDP Agent exited.");
+                await Task.Delay(50, deadline.Token);
+            }
+        }
+
+        private static async Task EchoUdpAsync(UdpClient socket)
+        {
+            try
+            {
+                while (true)
+                {
+                    var packet = await socket.ReceiveAsync();
+                    await socket.SendAsync(packet.Buffer, packet.RemoteEndPoint);
+                }
+            }
+            catch (Exception exception) when (exception is SocketException or ObjectDisposedException) { }
+        }
+
         private async Task EchoOnceAsync()
         {
             using var client = await targetListener.AcceptTcpClientAsync();
@@ -842,6 +1043,9 @@ public sealed class ServerTunnelTests
         public void Dispose()
         {
             targetListener.Stop();
+            udpTarget?.Dispose();
+            if (udpAgent is { HasExited: false }) udpAgent.Kill(entireProcessTree: true);
+            udpAgent?.Dispose();
             if (server is { HasExited: false }) server.Kill(entireProcessTree: true);
             server?.Dispose();
             try { Directory.Delete(directory, recursive: true); } catch (IOException) { }

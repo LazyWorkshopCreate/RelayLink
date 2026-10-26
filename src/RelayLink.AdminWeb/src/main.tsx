@@ -65,6 +65,8 @@ type Channel = {
     targetPort: number;
     maxConnections: number;
     targetConnectTimeoutSeconds: number;
+    transportProtocol?: 'tcp' | 'udp';
+    udpIdleTimeoutSeconds?: number;
     pendingConnections: number;
     activeConnections: number;
     bytesToTarget: number;
@@ -74,6 +76,7 @@ type Channel = {
     targetLastResult?: string;
 };
 type Mapping = {
+    transportProtocol?: 'tcp' | 'udp';
     mappingId: string;
     enabled: boolean;
     localAddress: string | null;
@@ -157,6 +160,8 @@ type ChannelForm = {
     targetPort: number;
     maxConnections: number;
     targetConnectTimeoutSeconds: number;
+    transportProtocol?: 'tcp' | 'udp';
+    udpIdleTimeoutSeconds?: number;
     authorizedClientsOnly: boolean;
     endToEndEncryptionEnabled: boolean;
     securityGroupId: string;
@@ -186,6 +191,8 @@ const emptyChannel: ChannelForm = {
     targetPort: 19001,
     maxConnections: 100,
     targetConnectTimeoutSeconds: 10,
+    transportProtocol: 'tcp',
+    udpIdleTimeoutSeconds: 60,
     authorizedClientsOnly: false,
     endToEndEncryptionEnabled: true,
     securityGroupId: '',
@@ -1142,8 +1149,8 @@ export function App() {
                                                         </td>
                                                         <td className="mono">
                                                             {ch.authorizedClientsOnly
-                                                                ? `仅客户端互访 · ${ch.endToEndEncryptionEnabled !== false ? '加密' : '明文'}`
-                                                                : `${ch.listenAddress}:${ch.listenPort}`}
+                                                                ? `${(ch.transportProtocol ?? 'tcp').toUpperCase()} · 仅客户端互访 · ${ch.endToEndEncryptionEnabled !== false ? '加密' : '明文'}`
+                                                                : `${(ch.transportProtocol ?? 'tcp').toUpperCase()} ${ch.listenAddress}:${ch.listenPort}`}
                                                             {ch.securityGroupId && (
                                                                 <small>安全组：{ch.securityGroupId}</small>
                                                             )}
@@ -1239,6 +1246,12 @@ export function App() {
                                                                                     listenAddress:
                                                                                         ch.listenAddress,
                                                                                     listenPort: ch.listenPort,
+                                                                                    transportProtocol:
+                                                                                        ch.transportProtocol ??
+                                                                                        'tcp',
+                                                                                    udpIdleTimeoutSeconds:
+                                                                                        ch.udpIdleTimeoutSeconds ??
+                                                                                        60,
                                                                                     targetHost: ch.targetHost,
                                                                                     targetPort: ch.targetPort,
                                                                                     maxConnections:
@@ -1319,7 +1332,7 @@ export function App() {
                                                             </td>
                                                             <td className="mono">
                                                                 {mapping.available && mapping.localPort
-                                                                    ? `${mapping.localAddress || '127.0.0.1'}:${mapping.localPort}`
+                                                                    ? `${(mapping.transportProtocol ?? 'tcp').toUpperCase()} ${mapping.localAddress || '127.0.0.1'}:${mapping.localPort}`
                                                                     : '—'}
                                                             </td>
                                                             <td
@@ -1368,7 +1381,7 @@ export function App() {
                     )}
                 </div>
                 <footer>
-                    RelayLink · 安全的内网 TCP 连接管理 <span>数据每 5 秒更新，编辑时暂停自动刷新</span>
+                    RelayLink · 内网 TCP / UDP 转发管理 <span>数据每 5 秒更新，编辑时暂停自动刷新</span>
                 </footer>
             </main>
 
@@ -1860,6 +1873,58 @@ export function App() {
             >
                 {channelDialog && (
                     <form className="form" onSubmit={saveChannel}>
+                        <label>
+                            传输协议
+                            <select
+                                value={channelDialog.form.transportProtocol ?? 'tcp'}
+                                onChange={async (e) => {
+                                    const transportProtocol = e.target.value as 'tcp' | 'udp';
+                                    setChannelDialog({
+                                        ...channelDialog,
+                                        form: { ...channelDialog.form, transportProtocol },
+                                    });
+                                    if (!channelDialog.original) {
+                                        try {
+                                            const suggestion = await api<{ listenPort: number }>(
+                                                `/api/v1/admin/next-channel-port?transportProtocol=${transportProtocol}`,
+                                            );
+                                            setChannelDialog((current) =>
+                                                current &&
+                                                current.form.transportProtocol === transportProtocol
+                                                    ? {
+                                                          ...current,
+                                                          form: {
+                                                              ...current.form,
+                                                              listenPort: suggestion.listenPort,
+                                                          },
+                                                      }
+                                                    : current,
+                                            );
+                                        } catch (e) {
+                                            setError(e instanceof Error ? e.message : String(e));
+                                        }
+                                    }
+                                }}
+                            >
+                                <option value="tcp">TCP</option>
+                                <option value="udp">UDP</option>
+                            </select>
+                        </label>
+                        {channelDialog.form.transportProtocol === 'udp' && (
+                            <NumberField
+                                label="UDP 会话空闲超时（秒）"
+                                value={channelDialog.form.udpIdleTimeoutSeconds ?? 60}
+                                min={1}
+                                max={3600}
+                                onChange={(n) =>
+                                    setChannelDialog({
+                                        ...channelDialog,
+                                        form: { ...channelDialog.form, udpIdleTimeoutSeconds: n },
+                                    })
+                                }
+                            />
+                        )}
+
                         <div className="form-grid">
                             <label className="field">
                                 通道 ID

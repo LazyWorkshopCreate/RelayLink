@@ -124,7 +124,7 @@ function fakeApi(withMapping = false) {
             );
             return new Response(null, { status: 204 });
         }
-        if (path === '/api/v1/admin/next-channel-port') {
+        if (path.startsWith('/api/v1/admin/next-channel-port')) {
             const used = new Set(
                 Object.values(channelSets)
                     .flat()
@@ -251,6 +251,39 @@ afterEach(() => {
 });
 
 describe('管理控制台', () => {
+    it('可创建 UDP 通道并保留协议与空闲超时', async () => {
+        const calls = fakeApi();
+        const user = userEvent.setup();
+        render(<App />);
+        await screen.findByText('测试节点');
+        await user.click(screen.getByRole('button', { name: /未登录/ }));
+        await user.type(screen.getByRole('textbox', { name: '用户名' }), 'admin');
+        await user.type(screen.getByLabelText('密码'), 'test-password');
+        await user.click(screen.getByRole('button', { name: '登录' }));
+        await user.click(await screen.findByRole('button', { name: '添加通道' }));
+        await user.type(screen.getByRole('textbox', { name: '通道 ID' }), 'udp-test');
+        await user.type(screen.getByRole('textbox', { name: '显示名称' }), 'UDP 测试');
+        await user.selectOptions(screen.getByRole('combobox', { name: '传输协议' }), 'udp');
+        const timeout = screen.getByRole('spinbutton', { name: 'UDP 会话空闲超时（秒）' });
+        expect(timeout).toHaveProperty('value', '60');
+        await user.clear(timeout);
+        await user.type(timeout, '15');
+        await user.click(screen.getByRole('button', { name: '保存并下发' }));
+        await screen.findByText('UDP 测试');
+        const saved = calls.find((c) => c.method === 'POST' && c.path.endsWith('/channels'));
+        expect(saved?.body).toHaveProperty('transportProtocol', 'udp');
+        expect(saved?.body).toHaveProperty('udpIdleTimeoutSeconds', 15);
+        expect(calls.some((c) => c.path.includes('next-channel-port?transportProtocol=udp'))).toBe(true);
+        await user.click(
+            within(screen.getByText('UDP 测试').closest('tr')!).getByRole('button', { name: '编辑' }),
+        );
+        expect(screen.getByRole('combobox', { name: '传输协议' })).toHaveProperty('value', 'udp');
+        expect(screen.getByRole('spinbutton', { name: 'UDP 会话空闲超时（秒）' })).toHaveProperty(
+            'value',
+            '15',
+        );
+    });
+
     it('支持按一个或多个客户端和通道 tag 筛选', async () => {
         fakeApi(true);
         const user = userEvent.setup();
@@ -357,7 +390,7 @@ describe('管理控制台', () => {
         });
         expect(within(mappingTable).getByRole('columnheader', { name: '入口 ID' })).toBeTruthy();
         expect(within(mappingTable).getByText('node-a-echo')).toBeTruthy();
-        expect(within(mappingTable).getByText('127.0.0.1:23456')).toBeTruthy();
+        expect(within(mappingTable).getByText('TCP 127.0.0.1:23456')).toBeTruthy();
         expect(within(mappingTable).queryByRole('button', { name: '删除' })).toBeNull();
         expect(calls.filter((call) => call.path.startsWith('/api/v1/dashboard/snapshot?'))).toHaveLength(1);
         expect(calls.some((call) => call.path === '/api/v1/overview')).toBe(false);

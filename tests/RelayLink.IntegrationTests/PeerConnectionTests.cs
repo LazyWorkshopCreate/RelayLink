@@ -17,7 +17,137 @@ namespace RelayLink.IntegrationTests;
 
 public sealed class PeerConnectionTests
 {
+#if LEGACY_AGENT_TESTS
+    [Fact]
+    public async Task Udp_peer_request_to_real_v3_target_is_rejected_without_disconnect()
+    {
+        var legacy = Environment.GetEnvironmentVariable("RELAYLINK_LEGACY_AGENT_ASSEMBLY")
+            ?? throw new InvalidOperationException("Set RELAYLINK_LEGACY_AGENT_ASSEMBLY to an unmodified v0.1.0-rc.8 Agent DLL.");
+        using var fixture = new Fixture();
+        await fixture.StartAsync(udp: true, targetAssembly: legacy);
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        await fixture.WaitOnlineAsync(deadline.Token);
+        using var caller = new UdpClient();
+        caller.Connect(IPAddress.Loopback, fixture.LocalPort);
+        await caller.SendAsync(new byte[] { 42 }, deadline.Token);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await caller.ReceiveAsync(timeout.Token));
+        await fixture.WaitOnlineAsync(deadline.Token);
+    }
+
+    [Theory]
+    [InlineData(true, true, true)]
+    [InlineData(true, false, true)]
+    [InlineData(false, true, true)]
+    [InlineData(true, true, false)]
+    [InlineData(true, false, false)]
+    [InlineData(false, true, false)]
+    public async Task Legacy_v3_agents_relay_tcp_with_old_and_new_peers(bool oldCaller, bool oldTarget, bool encryption)
+    {
+        var legacy = Environment.GetEnvironmentVariable("RELAYLINK_LEGACY_AGENT_ASSEMBLY")
+            ?? throw new InvalidOperationException("Set RELAYLINK_LEGACY_AGENT_ASSEMBLY to an unmodified v0.1.0-rc.8 Agent DLL.");
+        using var fixture = new Fixture();
+        await fixture.StartAsync(encryption: encryption, callerAssembly: oldCaller ? legacy : null, targetAssembly: oldTarget ? legacy : null);
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        await fixture.WaitOnlineAsync(deadline.Token);
+        using var caller = new TcpClient();
+        await caller.ConnectAsync(IPAddress.Loopback, fixture.LocalPort, deadline.Token);
+        var stream = caller.GetStream();
+        var payload = RandomNumberGenerator.GetBytes(100_000);
+        await stream.WriteAsync(payload, deadline.Token);
+        caller.Client.Shutdown(SocketShutdown.Send);
+        var response = new byte[payload.Length];
+        await stream.ReadExactlyAsync(response, deadline.Token);
+        Assert.Equal(payload, response);
+        Assert.Equal(0, await stream.ReadAsync(new byte[1], deadline.Token));
+    }
+#endif
 #if PEER_TLS_TESTS
+    [Theory]
+#else
+    [Theory(Skip = "Opt in on a TLS-capable host with -p:EnablePeerTlsTests=true.")]
+#endif
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Udp_peer_preserves_empty_large_and_isolated_datagrams(bool encryption)
+    {
+        using var fixture = new Fixture();
+        await fixture.StartAsync(udp: true, encryption: encryption);
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        await fixture.WaitOnlineAsync(deadline.Token);
+        using var a = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
+        using var b = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
+        a.Client.SendBufferSize = 128 * 1024;
+        a.Connect(IPAddress.Loopback, fixture.LocalPort);
+        b.Connect(IPAddress.Loopback, fixture.LocalPort);
+        foreach (var size in new[] { 0, 1, 32769, 65507 })
+        {
+            var first = RandomNumberGenerator.GetBytes(size);
+            var second = RandomNumberGenerator.GetBytes(17);
+            await a.SendAsync(first, deadline.Token);
+            await b.SendAsync(second, deadline.Token);
+            try
+            {
+                Assert.Equal(first, (await a.ReceiveAsync(deadline.Token)).Buffer);
+                Assert.Equal(second, (await b.ReceiveAsync(deadline.Token)).Buffer);
+            }
+            catch (Exception exception) { throw new InvalidOperationException($"UDP exchange of {size} bytes failed. {fixture.Logs()}", exception); }
+        }
+    }
+
+#if PEER_TLS_TESTS
+    [Fact]
+    public async Task Peer_transport_changes_push_dependent_mapping_and_rebuild_the_local_listener()
+    {
+        using var fixture = new Fixture();
+        await fixture.StartAsync(udp: true);
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(40));
+        var token = deadline.Token;
+        await fixture.WaitOnlineAsync(token);
+        using var http = new HttpClient(new HttpClientHandler { UseCookies = true });
+        using var login = await http.PostAsJsonAsync($"http://{fixture.DashboardAddress}/api/v1/admin/session",
+            new { username = "admin", password = "test-password" }, token);
+        login.EnsureSuccessStatusCode();
+        var csrf = (await login.Content.ReadFromJsonAsync<JsonElement>(cancellationToken: token)).GetProperty("csrfToken").GetString();
+        async Task ChangeAsync(string protocol, int targetPort)
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Put,
+                $"http://{fixture.DashboardAddress}/api/v1/admin/clients/visited/channels/private")
+            { Content = JsonContent.Create(new { displayName = "Private", enabled = true, listenAddress = "127.0.0.1",
+                listenPort = fixture.ProxyPort, targetHost = "127.0.0.1", targetPort, maxConnections = 10,
+                targetConnectTimeoutSeconds = 5, transportProtocol = protocol }) };
+            request.Headers.Add("X-RelayLink-CSRF", csrf);
+            using var response = await http.SendAsync(request, token);
+            response.EnsureSuccessStatusCode();
+            while (true)
+            {
+                var status = await http.GetFromJsonAsync<JsonElement>($"http://127.0.0.1:{fixture.AgentDashboardPort}/api/v2/status", token);
+                var mapping = status.GetProperty("servers")[0].GetProperty("mappings").EnumerateArray().Single(m => m.GetProperty("mappingId").GetString() == "to-visited");
+                if (mapping.GetProperty("transportProtocol").GetString() == protocol) return;
+                await Task.Delay(50, token);
+            }
+        }
+        using var first = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
+        first.Connect(IPAddress.Loopback, fixture.LocalPort);
+        await first.SendAsync(new byte[] { 1 }, token);
+        Assert.Equal(new byte[] { 1 }, (await first.ReceiveAsync(token)).Buffer);
+        await ChangeAsync("tcp", fixture.TcpTargetPort);
+        using (var tcp = await fixture.ConnectLocalAsync(token))
+        {
+            var stream = tcp.GetStream();
+            await stream.WriteAsync(new byte[] { 2, 3 }, token);
+            tcp.Client.Shutdown(SocketShutdown.Send);
+            var reply = new byte[2];
+            await stream.ReadExactlyAsync(reply, token);
+            Assert.Equal(new byte[] { 2, 3 }, reply);
+        }
+        await ChangeAsync("udp", fixture.TargetPort);
+        using var last = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
+        last.Connect(IPAddress.Loopback, fixture.LocalPort);
+        await last.SendAsync(new byte[] { 4 }, token);
+        Assert.Equal(new byte[] { 4 }, (await last.ReceiveAsync(token)).Buffer);
+    }
+
     [Fact]
     public async Task Standard_private_channel_can_reach_server_dashboard_through_target_agent()
     {
@@ -641,6 +771,7 @@ public sealed class PeerConnectionTests
     {
         private readonly string directory = Path.Combine(Path.GetTempPath(), $"relaylink-peer-{Guid.NewGuid():N}");
         private readonly TcpListener target = new(IPAddress.Loopback, 0);
+        private UdpClient? udpTarget;
         private readonly TcpListener targetB = new(IPAddress.Loopback, 0);
         private readonly List<Process> processes = [];
         private readonly List<StringBuilder> processLogs = [];
@@ -652,8 +783,10 @@ public sealed class PeerConnectionTests
         public int LocalPort => ReadPort("to-visited");
         public int LocalPortB => ReadPort("to-visited-b");
         public int AgentDashboardPort { get; }
+        private int VisitedDashboardPort { get; }
         public int ProxyPort { get; }
         public int TargetPort { get; private set; }
+        public int TcpTargetPort => ((IPEndPoint)target.LocalEndpoint).Port;
         public int TargetPortB { get; private set; }
         public int TunnelPort { get; }
         public int DataPort { get; }
@@ -668,13 +801,14 @@ public sealed class PeerConnectionTests
         public Fixture()
         {
             AgentDashboardPort = AllocatePort();
+            VisitedDashboardPort = AllocatePort();
             ProxyPort = AllocatePort();
             TunnelPort = AllocatePort();
             DataPort = AllocatePort();
             DashboardPort = AllocatePort();
         }
 
-        public async Task StartAsync(bool startCallerAgent = true, bool mapDashboard = false)
+        public async Task StartAsync(bool startCallerAgent = true, bool mapDashboard = false, bool udp = false, bool encryption = true, string? callerAssembly = null, string? targetAssembly = null)
         {
             var clients = Path.Combine(directory, "clients");
             var visitedDirectory = Path.Combine(directory, "visited");
@@ -687,6 +821,13 @@ public sealed class PeerConnectionTests
             _ = EchoAsync(target, false);
             _ = EchoAsync(targetB, true);
             var targetPort = ((IPEndPoint)target.LocalEndpoint).Port;
+            if (udp)
+            {
+                udpTarget = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
+                udpTarget.Client.SendBufferSize = 128 * 1024;
+                targetPort = ((IPEndPoint)udpTarget.Client.LocalEndPoint!).Port;
+                _ = EchoUdpAsync(udpTarget);
+            }
             TargetPort = targetPort;
             var targetPortB = ((IPEndPoint)targetB.LocalEndpoint).Port;
             TargetPortB = targetPortB;
@@ -699,7 +840,7 @@ public sealed class PeerConnectionTests
             TargetFingerprint = fingerprint;
             var visitedChannels = new List<ChannelConfiguration>
             { new ChannelConfiguration("private", "Private", true, "127.0.0.1", ProxyPort, "127.0.0.1", targetPort, 10, 5)
-            { AuthorizedClientsOnly = true, AccessSecret = accessSecret },
+            { AuthorizedClientsOnly = true, AccessSecret = accessSecret, TransportProtocol = udp ? "udp" : "tcp", EndToEndEncryptionEnabled = encryption },
              new ChannelConfiguration("private-b", "Private B", true, "127.0.0.1", AllocatePort(), "127.0.0.1", targetPortB, 10, 5)
             { AuthorizedClientsOnly = true, AccessSecret = accessSecretB } };
             if (mapDashboard)
@@ -736,8 +877,8 @@ public sealed class PeerConnectionTests
 
             await File.WriteAllTextAsync(Path.Combine(visitedDirectory, "agent.json"), AgentJson("visited", secret));
             await File.WriteAllTextAsync(Path.Combine(callerDirectory, "agent.json"), AgentJson("caller", callerSecret));
-            StartProcess(typeof(ControlSessionWorker).Assembly.Location, Path.Combine(visitedDirectory, "agent.json"));
-            if (startCallerAgent) StartProcess(typeof(ControlSessionWorker).Assembly.Location, Path.Combine(callerDirectory, "agent.json"));
+            StartProcess(targetAssembly ?? typeof(ControlSessionWorker).Assembly.Location, Path.Combine(visitedDirectory, "agent.json"));
+            if (startCallerAgent) StartProcess(callerAssembly ?? typeof(ControlSessionWorker).Assembly.Location, Path.Combine(callerDirectory, "agent.json"));
         }
 
         public async Task WaitOnlineAsync(CancellationToken token, int expected = 2)
@@ -749,7 +890,12 @@ public sealed class PeerConnectionTests
                 {
                     using var response = await http.GetAsync($"http://127.0.0.1:{DashboardPort}/api/v1/overview", token);
                     var json = await response.Content.ReadFromJsonAsync<JsonElement>(cancellationToken: token);
-                    if (json.GetProperty("clientsOnline").GetInt32() == expected && (expected == 1 || (TryReadPort("to-visited", out _) && TryReadPort("to-visited-b", out _)))) return;
+                    if (json.GetProperty("clientsOnline").GetInt32() == expected && (expected == 1 || (TryReadPort("to-visited", out _) && TryReadPort("to-visited-b", out _))))
+                    {
+                        if (expected == 1) return;
+                        var targetStatus = await http.GetFromJsonAsync<JsonElement>($"http://127.0.0.1:{VisitedDashboardPort}/api/v2/status", token);
+                        if (targetStatus.GetProperty("servers")[0].GetProperty("online").GetBoolean()) return;
+                    }
                 }
                 catch (HttpRequestException) { }
                 catch (OperationCanceledException) when (token.IsCancellationRequested)
@@ -857,6 +1003,19 @@ public sealed class PeerConnectionTests
             }
         }
 
+        private static async Task EchoUdpAsync(UdpClient socket)
+        {
+            try
+            {
+                while (true)
+                {
+                    var packet = await socket.ReceiveAsync();
+                    await socket.SendAsync(packet.Buffer, packet.RemoteEndPoint);
+                }
+            }
+            catch (Exception exception) when (exception is SocketException or ObjectDisposedException) { }
+        }
+
         private async Task EchoAsync(TcpListener listener, bool second)
         {
             try
@@ -883,7 +1042,7 @@ public sealed class PeerConnectionTests
 
         private string AgentJson(string clientId, string secret) => JsonSerializer.Serialize(new
         {
-            dashboardPort = clientId == "caller" ? AgentDashboardPort : 0,
+            dashboardPort = clientId == "caller" ? AgentDashboardPort : VisitedDashboardPort,
             servers = new[]
             {
                 new
@@ -953,6 +1112,7 @@ public sealed class PeerConnectionTests
         public void Dispose()
         {
             target.Stop();
+            udpTarget?.Dispose();
             targetB.Stop();
             foreach (var process in processes)
             {

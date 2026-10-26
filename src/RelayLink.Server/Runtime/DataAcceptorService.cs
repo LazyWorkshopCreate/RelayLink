@@ -49,12 +49,12 @@ public sealed class DataAcceptorService(
                 deadline.CancelAfter(TimeSpan.FromSeconds(runtime.Configuration.Server.Tunnel.HandshakeTimeoutSeconds));
                 var stream = client.GetStream();
                 var reader = new FrameReader(stream);
-                var writer = new FrameWriter(stream);
                 var first = await reader.ReadAsync(ProtocolConstants.MaxInitialPayloadLength, deadline.Token);
+                var writer = new FrameWriter(stream, protocolVersion: reader.ProtocolVersion ?? ProtocolConstants.Version);
                 if (first?.Type == FrameType.BindData)
                 {
                     var bind = JsonProtocolSerializer.Deserialize<BindDataMessage>(first.Payload.Span);
-                    if (!pendingConnections.TryBind(bind.SessionId, bind.ConnectionId, bind.ChannelId, bind.Token, out var pending) ||
+                    if (!pendingConnections.TryBind(bind.SessionId, bind.ConnectionId, bind.ChannelId, bind.Token, out var pending, writer.ProtocolVersion) ||
                         pending is null || !pending.TrySetTunnel(new DataTunnel(stream, reader, writer, client.Client)))
                     {
                         await TryRejectAsync(writer, deadline.Token);

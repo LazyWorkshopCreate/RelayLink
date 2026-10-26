@@ -95,7 +95,7 @@ public sealed class ProxyListenerService(ServerRuntime runtime, PendingConnectio
 
     private static bool EndpointsOverlap(ChannelConfiguration first, ChannelConfiguration second)
     {
-        if (first.ListenPort != second.ListenPort) return false;
+        if (first.TransportProtocol != second.TransportProtocol || first.ListenPort != second.ListenPort) return false;
         var left = IPAddress.Parse(first.ListenAddress);
         var right = IPAddress.Parse(second.ListenAddress);
         return left.AddressFamily == right.AddressFamily &&
@@ -105,11 +105,19 @@ public sealed class ProxyListenerService(ServerRuntime runtime, PendingConnectio
 
     private async Task AcceptLoopAsync(ListenerBinding binding, CancellationToken cancellationToken)
     {
+        if (binding.UdpListener is { } udp)
+        {
+            await udp.RunAsync(binding.Channel.MaxConnections, source =>
+                runtime.Sessions.TryGet(binding.Client.ClientId, out var session) && session is { IsReady: true } &&
+                SecurityGroupMatcher.IsAllowed(binding.Channel, runtime.Configuration.Server, source.Address),
+                datagram => TrackDatagramAsync(datagram, binding, cancellationToken), cancellationToken);
+            return;
+        }
         try
         {
             while (!cancellationToken.IsCancellationRequested)
             {
-                var caller = await binding.Listener.AcceptSocketAsync(cancellationToken);
+                var caller = await binding.Listener!.AcceptSocketAsync(cancellationToken);
                 caller.NoDelay = true;
                 TrackConnection(caller, binding, cancellationToken);
             }
@@ -163,6 +171,19 @@ public sealed class ProxyListenerService(ServerRuntime runtime, PendingConnectio
                 !SecurityGroupMatcher.IsAllowed(connection.Channel, server, source)) connection.Revoke();
     }
 
+    private async Task TrackDatagramAsync(DatagramSession datagram, ListenerBinding binding, CancellationToken token)
+    {
+        var id = Interlocked.Increment(ref connectionTaskSequence);
+        using var connection = new ActiveProxyConnection(binding.Client.ClientId, binding.Channel, datagram.Source);
+        activeConnections[id] = connection;
+        try
+        {
+            connection.Task = HandleCallerAsync(null, binding, connection, token, datagram);
+            await connection.Task;
+        }
+        finally { activeConnections.TryRemove(id, out _); }
+    }
+
     private void TrackConnection(Socket caller, ListenerBinding binding, CancellationToken stoppingToken)
     {
         var id = Interlocked.Increment(ref connectionTaskSequence);
@@ -176,9 +197,9 @@ public sealed class ProxyListenerService(ServerRuntime runtime, PendingConnectio
         }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
     }
 
-    private async Task HandleCallerAsync(Socket caller, ListenerBinding binding, ActiveProxyConnection connection, CancellationToken stoppingToken)
+    private async Task HandleCallerAsync(Socket? caller, ListenerBinding binding, ActiveProxyConnection connection, CancellationToken stoppingToken, DatagramSession? datagram = null)
     {
-        using var connectionCancellation = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken, connection.RevocationToken);
+        using var connectionCancellation = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken, connection.RevocationToken, datagram?.Token ?? CancellationToken.None);
         var cancellationToken = connectionCancellation.Token;
         var globalHeld = false; var clientHeld = false; var channelHeld = false; var globalPendingHeld = false; var clientPendingHeld = false;
         PendingConnection? pending = null; var relaying = false; var auditOpened = false; var relayCompletedNormally = false;
@@ -196,15 +217,16 @@ public sealed class ProxyListenerService(ServerRuntime runtime, PendingConnectio
             channelMetrics.Accepted();
             if (!runtime.Configuration.Clients.TryGetValue(client.ClientId, out var currentClient) || !currentClient.Enabled ||
                 currentClient.Channels.SingleOrDefault(current => current.ChannelId == channel.ChannelId) is not { Enabled: true, AuthorizedClientsOnly: false } currentChannel)
-            { outcome = "channel_unavailable"; caller.Dispose(); return; }
+            { outcome = "channel_unavailable"; caller?.Dispose(); return; }
             if (connection.SourceAddress is not { } source || !SecurityGroupMatcher.IsAllowed(currentChannel, runtime.Configuration.Server, source))
-            { outcome = "security_group_denied"; caller.Dispose(); return; }
-            if (!runtime.Sessions.TryGet(client.ClientId, out var session) || session is not { IsReady: true }) { outcome = "agent_offline"; caller.Dispose(); return; }
-            globalHeld = await globalLimit.WaitAsync(0, cancellationToken); if (!globalHeld) { caller.Dispose(); return; }
-            clientHeld = await clientLimits[client.ClientId].WaitAsync(0, cancellationToken); if (!clientHeld) { caller.Dispose(); return; }
-            channelHeld = await binding.ChannelLimit.WaitAsync(0, cancellationToken); if (!channelHeld) { caller.Dispose(); return; }
-            globalPendingHeld = await globalPendingLimit.WaitAsync(0, cancellationToken); if (!globalPendingHeld) { caller.Dispose(); return; }
-            clientPendingHeld = await clientPendingLimits[client.ClientId].WaitAsync(0, cancellationToken); if (!clientPendingHeld) { caller.Dispose(); return; }
+            { outcome = "security_group_denied"; caller?.Dispose(); return; }
+            if (!runtime.Sessions.TryGet(client.ClientId, out var session) || session is not { IsReady: true }) { outcome = "agent_offline"; caller?.Dispose(); return; }
+            if (channel.TransportProtocol == "udp" && session.ProtocolVersion < 4) { outcome = "udp_not_supported"; caller?.Dispose(); return; }
+            globalHeld = await globalLimit.WaitAsync(0, cancellationToken); if (!globalHeld) { caller?.Dispose(); return; }
+            clientHeld = await clientLimits[client.ClientId].WaitAsync(0, cancellationToken); if (!clientHeld) { caller?.Dispose(); return; }
+            channelHeld = await binding.ChannelLimit.WaitAsync(0, cancellationToken); if (!channelHeld) { caller?.Dispose(); return; }
+            globalPendingHeld = await globalPendingLimit.WaitAsync(0, cancellationToken); if (!globalPendingHeld) { caller?.Dispose(); return; }
+            clientPendingHeld = await clientPendingLimits[client.ClientId].WaitAsync(0, cancellationToken); if (!clientPendingHeld) { caller?.Dispose(); return; }
             pending = pendingConnections.Create(session, channel, caller, TimeSpan.FromSeconds(runtime.Configuration.Server.Limits.OpenTimeoutSeconds), connection.ConnectionId);
             phase = "open_sent";
             logger.LogInformation("Proxy {ConnectionId} opened for {ClientId}/{ChannelId}.", pending.ConnectionId, client.ClientId, channel.ChannelId);
@@ -232,11 +254,21 @@ public sealed class ProxyListenerService(ServerRuntime runtime, PendingConnectio
                 progressCancellation.Token);
             try
             {
-                var toAgent = CopyDirectionAsync(pending.ConnectionId, "caller_to_agent", caller, tunnel.Socket, relayCancellation.Token,
-                    count => { channelMetrics.AddToTarget(count); connection.AddToTarget(count); Interlocked.Add(ref toAgentBytes, count); Interlocked.Exchange(ref lastToAgent, Stopwatch.GetTimestamp()); }, writeTimeout);
-                var toCaller = CopyDirectionAsync(pending.ConnectionId, "agent_to_caller", tunnel.Socket, caller, relayCancellation.Token,
-                    count => { channelMetrics.AddToCaller(count); connection.AddToCaller(count); Interlocked.Add(ref toCallerBytes, count); Interlocked.Exchange(ref lastToCaller, Stopwatch.GetTimestamp()); }, writeTimeout);
-                await RelayPump.CompleteBidirectionalAsync(toAgent, toCaller, () => { relayCancellation.Cancel(); caller.Dispose(); tunnel.Socket.Dispose(); }, TimeSpan.FromSeconds(runtime.Configuration.Server.Limits.HalfCloseDrainTimeoutSeconds));
+                if (datagram is not null)
+                {
+                    await datagram.RelayAsync(tunnel.Stream, channel.UdpIdleTimeoutSeconds, relayCancellation.Token,
+                        count => { channelMetrics.AddToTarget(count); connection.AddToTarget(count); Interlocked.Add(ref toAgentBytes, count); Interlocked.Exchange(ref lastToAgent, Stopwatch.GetTimestamp()); },
+                        count => { channelMetrics.AddToCaller(count); connection.AddToCaller(count); Interlocked.Add(ref toCallerBytes, count); Interlocked.Exchange(ref lastToCaller, Stopwatch.GetTimestamp()); },
+                        runtime.Configuration.Server.Limits.BlockedWriteTimeoutSeconds);
+                }
+                else
+                {
+                    var toAgent = CopyDirectionAsync(pending.ConnectionId, "caller_to_agent", caller!, tunnel.Socket, relayCancellation.Token,
+                        count => { channelMetrics.AddToTarget(count); connection.AddToTarget(count); Interlocked.Add(ref toAgentBytes, count); Interlocked.Exchange(ref lastToAgent, Stopwatch.GetTimestamp()); }, writeTimeout);
+                    var toCaller = CopyDirectionAsync(pending.ConnectionId, "agent_to_caller", tunnel.Socket, caller!, relayCancellation.Token,
+                        count => { channelMetrics.AddToCaller(count); connection.AddToCaller(count); Interlocked.Add(ref toCallerBytes, count); Interlocked.Exchange(ref lastToCaller, Stopwatch.GetTimestamp()); }, writeTimeout);
+                    await RelayPump.CompleteBidirectionalAsync(toAgent, toCaller, () => { relayCancellation.Cancel(); caller?.Dispose(); tunnel.Socket.Dispose(); }, TimeSpan.FromSeconds(runtime.Configuration.Server.Limits.HalfCloseDrainTimeoutSeconds));
+                }
                 relayCompletedNormally = true;
                 outcome = "completed";
             }
@@ -324,12 +356,22 @@ public sealed class ProxyListenerService(ServerRuntime runtime, PendingConnectio
         public string Key => $"{Client.ClientId}/{Channel.ChannelId}";
         public ClientConfiguration Client { get; private set; } = client;
         public ChannelConfiguration Channel { get; private set; } = channel;
-        public TcpListener Listener { get; } = new(channel.ListenEndPoint);
+        public TcpListener? Listener { get; } = channel.TransportProtocol == "tcp" ? new(channel.ListenEndPoint) : null;
+        public DatagramListener? UdpListener { get; private set; }
         public SemaphoreSlim ChannelLimit { get; } = new(channel.MaxConnections);
         public bool Stopped { get; private set; }
-        public void Start() => Listener.Start();
-        public void Stop() { Stopped = true; Listener.Stop(); }
-        public bool HasSameListener(ListenerBinding other) => Channel.ListenAddress == other.Channel.ListenAddress && Channel.ListenPort == other.Channel.ListenPort;
+        public void Start()
+        {
+            if (Channel.TransportProtocol == "tcp") Listener!.Start();
+            else
+            {
+                var socket = new UdpClient(Channel.ListenEndPoint.AddressFamily);
+                try { socket.Client.ExclusiveAddressUse = true; socket.Client.Bind(Channel.ListenEndPoint); UdpListener = new(socket); }
+                catch { socket.Dispose(); throw; }
+            }
+        }
+        public void Stop() { Stopped = true; Listener?.Stop(); UdpListener?.Stop(); }
+        public bool HasSameListener(ListenerBinding other) => Channel.ListenAddress == other.Channel.ListenAddress && Channel.ListenPort == other.Channel.ListenPort && Channel.TransportProtocol == other.Channel.TransportProtocol && Channel.MaxConnections == other.Channel.MaxConnections;
         public void Update(ClientConfiguration client, ChannelConfiguration channel) { Client = client; Channel = channel; }
     }
 

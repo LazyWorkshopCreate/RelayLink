@@ -3,8 +3,10 @@ using RelayLink.Protocol;
 
 namespace RelayLink.Transport;
 
-public sealed class FrameWriter(Stream stream, TimeSpan? blockedWriteTimeout = null)
+public sealed class FrameWriter(Stream stream, TimeSpan? blockedWriteTimeout = null, byte protocolVersion = ProtocolConstants.Version)
 {
+    public byte ProtocolVersion { get; } = protocolVersion is 3 or ProtocolConstants.Version
+        ? protocolVersion : throw new ArgumentOutOfRangeException(nameof(protocolVersion));
     private readonly SemaphoreSlim writeLock = new(1, 1);
     private readonly TimeSpan blockedWriteTimeout = blockedWriteTimeout ?? TimeSpan.FromSeconds(120);
 
@@ -17,7 +19,7 @@ public sealed class FrameWriter(Stream stream, TimeSpan? blockedWriteTimeout = n
 
         var header = new byte[ProtocolConstants.HeaderLength];
         "NTP1"u8.CopyTo(header);
-        header[4] = ProtocolConstants.Version;
+        header[4] = ProtocolVersion;
         header[5] = (byte)frame.Type;
         BinaryPrimitives.WriteUInt16BigEndian(header.AsSpan(6, 2), frame.Flags);
         BinaryPrimitives.WriteUInt32BigEndian(header.AsSpan(8, 4), checked((uint)frame.Payload.Length));

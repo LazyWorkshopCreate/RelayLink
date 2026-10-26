@@ -2,8 +2,8 @@
 
 文档 ID：REQ-001A\
 状态：Accepted\
-版本：v1.0\
-更新日期：2026-09-21\
+版本：v1.1.0\
+更新日期：2026-10-05\
 需求日期：2026-09-15\
 需求索引：[RelayLink 需求索引](README.md)\
 配套文档：[技术实现文档](../design/technical-design.md)
@@ -24,7 +24,7 @@
 | U02 | 服务端运行在有公网 IP 的 Linux 或 Windows 云虚拟机 |
 | U03 | 控制和数据接入端口供 Agent 访问，业务调用和仪表盘走内网 |
 | U04 | Agent 运行在 Windows、Linux 或 macOS；Windows 以 Windows Service、Linux 以 systemd、macOS 以 launchd 托管，也可用控制台调试 |
-| U05 | 首期仅支持 TCP，主要代理各地 SQL Server |
+| U05 | 首期 TCP 基线主要代理各地 SQL Server；后续单播 UDP 扩展见 [REQ-001L](2026-10-05-udp-forwarding.md) |
 | U06 | 仪表盘匿名只读，按客户端分组展示通道、状态与流量历史；管理员登录后可管理客户端与通道配置 |
 | U07 | 注册必须提供密钥，每客户端一个独立密钥，由服务端配置维护 |
 | U08 | 通道由服务端集中维护，每客户端一个 JSON 文件 |
@@ -149,7 +149,7 @@
 
 ## 5. SQL Server 接入要求
 
-1. 在目标 SQL Server 启用 TCP 并设置固定端口。访问方使用 `tcp:服务端内网地址,代理端口`，不依赖实例自动发现。SQL Browser 使用 UDP 1434，超出首期 TCP 范围。[SQL Server 官方连接排障说明](https://learn.microsoft.com/en-us/troubleshoot/sql/database-engine/connect/network-related-or-instance-specific-error-occurred-while-establishing-connection)
+1. 在目标 SQL Server 启用 TCP 并设置固定端口。访问方使用 `tcp:服务端内网地址,代理端口`，不依赖实例自动发现。SQL Browser 使用 UDP 1434，首期未支持；后续可配置单播 UDP 通道，但不提供发现响应改写和动态端口映射，见 [REQ-001L](2026-10-05-udp-forwarding.md)。[SQL Server 官方连接排障说明](https://learn.microsoft.com/en-us/troubleshoot/sql/database-engine/connect/network-related-or-instance-specific-error-occurred-while-establishing-connection)
 2. SQL 登录和权限仍由数据库负责，代理不持有数据库账号密码。
 3. SQL TLS 与 RelayLink 控制 TLS 是不同机制；普通数据通道不再提供外层 TLS，敏感数据库连接须启用 SQL 自身 TLS。使用代理地址连接时，要验证数据库证书名称是否匹配；支持的 SqlClient 可配置 `HostNameInCertificate`。[SqlClient 官方属性说明](https://learn.microsoft.com/en-us/dotnet/api/microsoft.data.sqlclient.sqlconnectionstringbuilder.hostnameincertificate?view=sqlclient-dotnet-core-6.1)
 4. 首期验收以固定 TCP 端点、SQL 认证为基准。Windows 集成认证、Kerberos/SPN、Always On 路由、故障转移、多子网和额外反向连接不纳入首期兼容承诺，需要专项验证。
@@ -206,7 +206,7 @@
 
 ## 8. 首期不包含
 
-UDP、SQL Browser、HTTP 域名路由、SOCKS、VPN/IP 层组网、P2P 打洞、客户端远程升级、SQL 审计、数据库健康查询、告警发送、集群和无损会话迁移。通道运行时配置和历史统计已由后续明确需求纳入，参见 [ADR-0002](../adr/0002-runtime-channel-configuration.md) 与 [ADR-0003](../adr/0003-traffic-history-persistence.md)。
+UDP 广播/组播、SQL Browser 自动发现与动态端口改写、HTTP 域名路由、SOCKS、VPN/IP 层组网、P2P 打洞、客户端远程升级、SQL 审计、数据库健康查询、告警发送、集群和无损会话迁移。通道运行时配置和历史统计已由后续明确需求纳入，参见 [ADR-0002](../adr/0002-runtime-channel-configuration.md) 与 [ADR-0003](../adr/0003-traffic-history-persistence.md)。
 
 ## 9. 实施前需要补齐的信息
 

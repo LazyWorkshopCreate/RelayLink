@@ -247,6 +247,8 @@ public sealed class ConfigurationLoader
                 throw new ConfigurationException($"Invalid or duplicate channelId for {client.ClientId}.");
             }
 
+            if (channel.TransportProtocol is not ("tcp" or "udp") || channel.UdpIdleTimeoutSeconds is < 1 or > 3600)
+                throw new ConfigurationException($"Invalid transport or UDP idle timeout for {client.ClientId}/{channel.ChannelId}.");
             ValidateAddressAndPort(channel.ListenAddress, channel.ListenPort, $"channel {channel.ChannelId} listener");
             ValidatePort(channel.TargetPort, $"channel {channel.ChannelId} target");
             if (string.IsNullOrWhiteSpace(channel.TargetHost) || channel.MaxConnections < 1 || channel.MaxConnections > client.MaxConnections || channel.TargetConnectTimeoutSeconds is < 1 or > 300)
@@ -285,6 +287,7 @@ public sealed class ConfigurationLoader
         if (!server.Tunnel.TlsEnabled && clients.Any(client => client.Channels.Any(channel => channel.AuthorizedClientsOnly) || client.OutboundMappings.Count > 0))
             throw new ConfigurationException("Agent-to-Agent authorization requires tunnel TLS to protect access-secret distribution.");
         var endpoints = new HashSet<string>(StringComparer.Ordinal);
+        var listeners = new List<ChannelConfiguration>();
         var secrets = new HashSet<string>(StringComparer.Ordinal);
         foreach (var client in clients)
         {
@@ -295,15 +298,17 @@ public sealed class ConfigurationLoader
 
             foreach (var channel in client.Channels.Where(channel => channel.Enabled && !channel.AuthorizedClientsOnly))
             {
-                var endpoint = $"{channel.ListenAddress}:{channel.ListenPort}";
-                if (!endpoints.Add(endpoint))
+                var endpoint = $"{channel.TransportProtocol}:{channel.ListenAddress}:{channel.ListenPort}";
+                if (!endpoints.Add(endpoint) || listeners.Any(other => other.TransportProtocol == channel.TransportProtocol &&
+                    other.ListenPort == channel.ListenPort && EndpointsOverlap(other.ListenAddress, channel.ListenAddress)))
                 {
                     throw new ConfigurationException($"Duplicate enabled channel endpoint: {endpoint}");
                 }
 
-                if ((channel.ListenPort == server.Tunnel.Port && EndpointsOverlap(channel.ListenAddress, server.Tunnel.ListenAddress)) ||
+                listeners.Add(channel);
+                if (channel.TransportProtocol == "tcp" && ((channel.ListenPort == server.Tunnel.Port && EndpointsOverlap(channel.ListenAddress, server.Tunnel.ListenAddress)) ||
                     (channel.ListenPort == server.Tunnel.EffectiveDataPort && EndpointsOverlap(channel.ListenAddress, server.Tunnel.ListenAddress)) ||
-                    (channel.ListenPort == server.Dashboard.Port && EndpointsOverlap(channel.ListenAddress, server.Dashboard.ListenAddress)))
+                    (channel.ListenPort == server.Dashboard.Port && EndpointsOverlap(channel.ListenAddress, server.Dashboard.ListenAddress))))
                 {
                     throw new ConfigurationException($"Channel endpoint conflicts with a server endpoint: {endpoint}");
                 }

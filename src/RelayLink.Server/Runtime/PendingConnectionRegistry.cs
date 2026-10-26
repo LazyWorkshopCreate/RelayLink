@@ -10,17 +10,17 @@ public sealed class PendingConnectionRegistry
 {
     private readonly ConcurrentDictionary<Guid, PendingConnection> pending = new();
 
-    public PendingConnection Create(Session session, ChannelConfiguration channel, Socket caller, TimeSpan timeout, Guid connectionId)
+    public PendingConnection Create(Session session, ChannelConfiguration channel, Socket? caller, TimeSpan timeout, Guid connectionId)
     {
-        var connection = new PendingConnection(session.SessionId, channel, caller, DateTimeOffset.UtcNow.Add(timeout), session.LifetimeToken, connectionId);
+        var connection = new PendingConnection(session.SessionId, channel, caller, DateTimeOffset.UtcNow.Add(timeout), session.LifetimeToken, connectionId) { ProtocolVersion = session.ProtocolVersion };
         if (!pending.TryAdd(connection.ConnectionId, connection)) throw new InvalidOperationException("Connection ID collision.");
         return connection;
     }
 
-    public bool TryBind(Guid sessionId, Guid connectionId, string channelId, string token, out PendingConnection? connection)
+    public bool TryBind(Guid sessionId, Guid connectionId, string channelId, string token, out PendingConnection? connection, byte protocolVersion = RelayLink.Protocol.ProtocolConstants.Version)
     {
         connection = null;
-        if (!pending.TryGetValue(connectionId, out var candidate) || candidate.SessionId != sessionId || !candidate.Channel.ChannelId.Equals(channelId, StringComparison.Ordinal) || candidate.DeadlineUtc < DateTimeOffset.UtcNow || !candidate.TryConsumeToken(token))
+        if (!pending.TryGetValue(connectionId, out var candidate) || candidate.ProtocolVersion != protocolVersion || candidate.SessionId != sessionId || !candidate.Channel.ChannelId.Equals(channelId, StringComparison.Ordinal) || candidate.DeadlineUtc < DateTimeOffset.UtcNow || !candidate.TryConsumeToken(token))
         {
             return false;
         }
@@ -46,7 +46,7 @@ public sealed class PendingConnectionRegistry
     public bool TryGet(Guid connectionId, out PendingConnection? connection) => pending.TryGetValue(connectionId, out connection);
 }
 
-public sealed class PendingConnection(Guid sessionId, ChannelConfiguration channel, Socket caller, DateTimeOffset deadlineUtc, CancellationToken sessionToken = default, Guid? connectionId = null) : IDisposable
+public sealed class PendingConnection(Guid sessionId, ChannelConfiguration channel, Socket? caller, DateTimeOffset deadlineUtc, CancellationToken sessionToken = default, Guid? connectionId = null) : IDisposable
 {
     private readonly byte[] tokenBytes = RandomNumberGenerator.GetBytes(32);
     private int tokenConsumed;
@@ -56,9 +56,10 @@ public sealed class PendingConnection(Guid sessionId, ChannelConfiguration chann
     private readonly TaskCompletionSource completed = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     public Guid SessionId { get; } = sessionId;
+    public byte ProtocolVersion { get; init; } = RelayLink.Protocol.ProtocolConstants.Version;
     public Guid ConnectionId { get; } = connectionId ?? Guid.NewGuid();
     public ChannelConfiguration Channel { get; } = channel;
-    public Socket Caller { get; } = caller;
+    public Socket? Caller { get; } = caller;
     public DateTimeOffset DeadlineUtc { get; } = deadlineUtc;
     public string Token => Convert.ToBase64String(tokenBytes);
 
@@ -83,7 +84,7 @@ public sealed class PendingConnection(Guid sessionId, ChannelConfiguration chann
         if (Interlocked.Exchange(ref disposed, 1) == 0)
         {
             CryptographicOperations.ZeroMemory(tokenBytes);
-            Caller.Dispose();
+            Caller?.Dispose();
             completed.TrySetResult();
         }
     }

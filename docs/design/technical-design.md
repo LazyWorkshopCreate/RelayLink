@@ -2,14 +2,14 @@
 
 文档 ID：DES-001\
 状态：Draft（待评审）\
-版本：v2.18.0 设计评审稿\
-更新日期：2026-09-30\
+版本：v2.20.1 设计评审稿\
+更新日期：2026-10-05\
 调研日期：2026-09-15\
 配套文档：[需求文档索引](../requirements/README.md)
 
 ## 1. 技术结论
 
-采用 **.NET 10 / C# + Socket + 可选 SslStream + ASP.NET Core** 实现专用反向 TCP 代理。控制连接默认启用 TLS；普通数据连接为独立端口上的原始 TCP，安全取舍见 [ADR-0008](../adr/0008-separated-control-and-raw-data.md)。
+采用 **.NET 10 / C# + Socket + 可选 SslStream + ASP.NET Core** 实现专用反向 TCP / UDP 代理。控制连接默认启用 TLS；普通数据连接为独立端口上的原始 TCP，安全取舍见 [ADR-0008](../adr/0008-separated-control-and-raw-data.md)。
 
 - Linux 或 Windows 服务端分别提供控制端口与数据端口；只有已认证控制会话能授权建立数据连接。
 - 当前 Windows/Linux/macOS Agent 按 `servers[]` 配置项分别保持控制连接；每条业务 TCP 连接按需建立一条独立数据 TCP 连接。多服务端 Agent 的拟议扩展见[多服务端技术设计](multi-server-agent.md)，各服务端分别保持自己的控制会话与数据连接。
@@ -19,6 +19,8 @@
 - ASP.NET Core 提供内网只读页面和 JSON API；运行状态和计数保存在内存。
 
 这是本项目设计决策，不是声称存在一个原样满足所有要求的现成 .NET 产品。
+
+UDP 使用来源会话与长度封装，复用独立 TCP 隧道；普通 TCP 原始复制保持不变。协议版本 4 的增量、超时、统计口径与兼容性见 [UDP 设计](udp-forwarding.md)。
 
 ## 2. 调研与方案比较
 
@@ -183,7 +185,7 @@ Agent 主程序现在仅接受包含 `servers[]` 的新格式；配置示例见[
 
 只下发该客户端的 ID、展示名、限制、通道信息，以及 `configVersion`。显式 DTO 白名单序列化；绝不将原始配置对象直接作为响应。密钥、证书路径、其他客户端配置均不下发。
 
-`configVersion` 是固定字段顺序、按 channelId 排序后 UTF-8 JSON 的 SHA-256 十六进制摘要；不包含密钥和机器路径。双方使用共享序列化规则校验摘要。所有通道，包括禁用通道，可以在快照中出现；Agent 只接受已启用通道的 Open 请求。
+`configVersion` 是固定字段顺序、按 channelId 排序后 UTF-8 JSON 的 SHA-256 十六进制摘要；不包含密钥和机器路径。双方使用共享序列化规则校验摘要。支持的通道，包括禁用通道，可以在快照中出现；v3 快照排除 UDP 通道和映射。Agent 只接受已启用通道的 Open 请求。配置更新按下发顺序维护最多 32 项待确认版本，逐项处理 ConfigAck，不因下一次更新覆盖前一次待确认值；乱序、重复或未下发版本的确认仍拒绝。队列满或发送失败关闭控制会话，Agent 重连取得最新完整快照，避免无界积压。
 
 ### 5.5 加载与生效
 
@@ -224,9 +226,9 @@ Agent 主程序现在仅接受包含 `servers[]` 的新格式；配置示例见[
 | 偏移 | 长度 | 字段 |
 |---|---|---|
 | 0 | 4 字节 | ASCII magic：`NTP1` |
-| 4 | 1 字节 | version，固定 3；版本 3 增加互访加密模式协商，旧版本被拒绝 |
+| 4 | 1 字节 | version，支持 3 / 4；首帧锁定版本，v3 保留 TCP，v4 增加 UDP；未知版本或连接内切换被拒绝 |
 | 5 | 1 字节 | type |
-| 6 | 2 字节 | flags，v2 必须为 0，大端 |
+| 6 | 2 字节 | flags，当前版本必须为 0，大端 |
 | 8 | 4 字节 | payloadLength，无符号大端，不含头 |
 | 12 | N 字节 | payload |
 
@@ -487,7 +489,7 @@ Agent：Disconnected → Connecting → Authenticating → Configuring → Onlin
 
 ### 12.1 固定端点
 
-SQL Server 配置固定 TCP 端口，云端驱动连接代理内网端点。SQL Browser 的 UDP 1434 发现流程不穿过本服务。[SQL Server 连接排障](https://learn.microsoft.com/en-us/troubleshoot/sql/database-engine/connect/network-related-or-instance-specific-error-occurred-while-establishing-connection)
+SQL Server 配置固定 TCP 端口，云端驱动连接代理内网端点。可显式配置 UDP 1434 转发，但不会改写 SQL Browser 的发现响应或映射它返回的动态端口；不承诺命名实例自动发现。[SQL Server 连接排障](https://learn.microsoft.com/en-us/troubleshoot/sql/database-engine/connect/network-related-or-instance-specific-error-occurred-while-establishing-connection)
 
 ### 12.2 TLS、认证和连接字符串
 

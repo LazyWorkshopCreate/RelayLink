@@ -16,6 +16,46 @@ namespace RelayLink.UnitTests;
 public sealed class ConfigurationTests
 {
     [Fact]
+    public void V3_snapshot_excludes_udp_and_matches_legacy_canonical_json()
+    {
+        var tcp = new ChannelConfiguration("tcp", "TCP", true, "127.0.0.1", 19000, "127.0.0.1", 19001, 5, 5);
+        var udp = tcp with { ChannelId = "udp", TransportProtocol = "udp" };
+        var client = new ClientConfiguration(1, "agent", "Agent", true,
+            Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)), 10, 5, [udp, tcp])
+        {
+            OutboundMappings = [new("udp-map", true, "127.0.0.1", "agent", "udp", "access", new string('A', 64))]
+        };
+        var (snapshot, version) = ConfigurationSnapshotFactory.Create(client, TestConfiguration(client), 3);
+        Assert.Single(snapshot.Channels);
+        Assert.Empty(snapshot.OutboundMappings);
+        const string legacy = "{\"clientId\":\"agent\",\"displayName\":\"Agent\",\"maxConnections\":10,\"maxPendingConnections\":5,\"channels\":[{\"channelId\":\"tcp\",\"displayName\":\"TCP\",\"enabled\":true,\"targetHost\":\"127.0.0.1\",\"targetPort\":19001,\"maxConnections\":5,\"targetConnectTimeoutSeconds\":5,\"authorizedClientsOnly\":false,\"endToEndEncryptionEnabled\":true,\"accessSecret\":null}],\"outboundMappings\":[]}";
+        Assert.Equal(legacy, Encoding.UTF8.GetString(JsonProtocolSerializer.Serialize(snapshot, 3)));
+        Assert.Equal(Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(legacy))), version);
+    }
+
+    [Fact]
+    public void Transport_defaults_validation_snapshot_and_tcp_udp_port_reuse()
+    {
+        var tcp = new ChannelConfiguration("tcp", "TCP", true, "127.0.0.1", 19000, "127.0.0.1", 19001, 5, 5);
+        Assert.Equal("tcp", tcp.TransportProtocol);
+        Assert.Equal(60, tcp.UdpIdleTimeoutSeconds);
+        var udp = tcp with { ChannelId = "udp", TransportProtocol = "udp" };
+        var client = new ClientConfiguration(1, "agent", "Agent", true,
+            Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)), 10, 5, [tcp, udp]);
+        var loader = new ConfigurationLoader();
+        loader.ValidateClientUpdate(TestConfiguration(client));
+        Assert.Throws<ConfigurationException>(() => loader.ValidateClientUpdate(TestConfiguration(client with
+            { Channels = [udp, udp with { ChannelId = "overlap", ListenAddress = "0.0.0.0" }] })));
+        var snapshot = ConfigurationSnapshotFactory.Create(client);
+        Assert.Equal("udp", snapshot.Snapshot.Channels.Single(c => c.ChannelId == "udp").TransportProtocol);
+        Assert.False(tcp.HasSameRuntimeSettings(tcp with { TransportProtocol = "udp" }));
+        Assert.False(tcp.HasSameRuntimeSettings(tcp with { UdpIdleTimeoutSeconds = 2 }));
+        foreach (var invalid in new[] { udp with { TransportProtocol = "quic" }, udp with { UdpIdleTimeoutSeconds = 0 }, udp with { UdpIdleTimeoutSeconds = 3601 } })
+            Assert.Throws<ConfigurationException>(() => loader.ValidateClientUpdate(TestConfiguration(client with { Channels = [invalid] })));
+        Assert.Throws<ConfigurationException>(() => loader.ValidateClientUpdate(TestConfiguration(client with { Channels = [tcp, udp with { TransportProtocol = "tcp" }] })));
+    }
+
+    [Fact]
     public void Client_and_channel_tags_are_validated_as_distinct_bounded_metadata()
     {
         var channel = new ChannelConfiguration("echo", "Echo", true, "127.0.0.1", 19000, "127.0.0.1", 19001, 5, 5)
@@ -70,12 +110,12 @@ public sealed class ConfigurationTests
     [Fact]
     public void Dashboard_client_creation_reports_invalid_uppercase_id_clearly()
     {
-        var client = new ClientConfiguration(1, "795S7", "Test", true, Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)), 10, 5, []);
+        var client = new ClientConfiguration(1, "TestClient-01", "Test", true, Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)), 10, 5, []);
 
         var exception = Assert.Throws<ConfigurationException>(() => new ConfigurationLoader().ValidateClientUpdate(TestConfiguration(client)));
 
         Assert.Contains("Client ID must be", exception.Message);
-        new ConfigurationLoader().ValidateClientUpdate(TestConfiguration(client with { ClientId = "795s7" }));
+        new ConfigurationLoader().ValidateClientUpdate(TestConfiguration(client with { ClientId = "testclient-01" }));
     }
 
     [Fact]
@@ -234,6 +274,22 @@ public sealed class ConfigurationTests
         Assert.False(pending.TryConsumeToken(Convert.ToBase64String(new byte[32])));
         Assert.True(pending.TryConsumeToken(pending.Token));
         Assert.False(pending.TryConsumeToken(pending.Token));
+    }
+
+    [Fact]
+    public void Data_bind_version_must_match_control_without_consuming_token()
+    {
+        var channel = new ChannelConfiguration("tcp", "TCP", true, "127.0.0.1", 19000, "127.0.0.1", 19001, 5, 5);
+        var session = new Session(Guid.NewGuid(), "agent", DateTimeOffset.UtcNow) { ProtocolVersion = 3 };
+        var registry = new PendingConnectionRegistry();
+        var pending = registry.Create(session, channel, null, TimeSpan.FromSeconds(10), Guid.NewGuid());
+        try
+        {
+            Assert.False(registry.TryBind(session.SessionId, pending.ConnectionId, channel.ChannelId, pending.Token, out _, 4));
+            Assert.True(registry.TryBind(session.SessionId, pending.ConnectionId, channel.ChannelId, pending.Token, out _, 3));
+            Assert.False(registry.TryBind(session.SessionId, pending.ConnectionId, channel.ChannelId, pending.Token, out _, 3));
+        }
+        finally { registry.Remove(pending); }
     }
 
     [Fact]

@@ -1,4 +1,48 @@
 {
+  "v0.1.0-rc.9": {
+    "title": "RelayLink v0.1.0-rc.9",
+    "intro": "A release candidate adding UDP forwarding and a multipage product website. This rebuilt release includes v3 client compatibility; earlier assets under the same version do not. Download again and verify the latest SHA256SUMS.",
+    "sections": [
+      {
+        "title": "Highlights",
+        "items": [
+          "Ordinary and authorized peer channels support unicast UDP, isolate sessions by source address and port, and preserve empty datagrams and payloads up to 65507 bytes.",
+          "UDP travels through the existing TCP data tunnel with a separate target socket per source. Bounded queues, connection quotas, and idle cleanup retain authentication, security groups, and auditing.",
+          "The management UI supports TCP/UDP selection and UDP idle timeout configuration. Configuration snapshots, both dashboards, and read APIs show the protocol; online protocol changes recreate the related listeners.",
+          "UDP socket send buffers are at least 128 KiB, fixing large datagram failures caused by macOS defaults.",
+          "The product website now has separate home, guide, documentation, and release list/detail pages, with Chinese and English UDP usage, design, and upgrade guidance."
+        ]
+      },
+      {
+        "title": "Upgrade and compatibility",
+        "items": [
+          "NTP1 is now v4. Server accepts v3/v4, so it can be upgraded first while v3 Agents retain ordinary and authorized peer TCP forwarding. Responses and configuration hashes follow each session version, including mixed old/new peers. Consecutive configuration updates are acknowledged individually, fixing a race that overwrote pending versions and disconnected clients. UDP is sent only to v4 clients and requires all participating Agents to support v4. Versions 1/2, unknown versions, and version changes within a connection are rejected. New Agents do not automatically fall back when connecting to an old Server.",
+          "JSON schemaVersion is unchanged. Existing channels without transportProtocol default to TCP. UDP idle timeout defaults to 60 seconds and accepts 1–3600 seconds.",
+          "Update installed Windows Agents while preserving configuration and identity. Back up configuration, identity, Server SQLite data, and certificates before upgrading; see the UDP operations guide for details.",
+          "Ordinary UDP tunnels retain the plaintext data endpoint; authorized peer traffic uses inner TLS by default. Configure security groups, firewalls, and link protection for your deployment."
+        ]
+      },
+      {
+        "title": "Verification and limitations",
+        "items": [
+          "CI for UDP and the macOS fix passed website, Linux, Windows, macOS Intel, and Apple Silicon checks. This compatibility fix passed 101 local unit tests and 59 full integration tests, including 9 tests using unmodified rc.8 Agents for ordinary TCP, old-client UDP rejection, mixed old/new peers with TLS or plaintext, and half-close. Peer TLS and the legacy binary matrix were enabled with no skips; the rebuilt tag runs full regular CI again.",
+          "UDP tests cover 0/1/32769/65507-byte datagrams, source isolation, idle cleanup, security groups, and online UDP/TCP changes, alongside existing TCP regression tests.",
+          "Real UDP applications across public networks, 24-hour capacity checks, and target-environment installation validation remain outstanding. Broadcast, multicast, and IP networking are unsupported. UDP over TCP can cause head-of-line blocking and has no real-time latency guarantee.",
+          "Windows installers are unsigned; macOS packages are unsigned and not notarized. Requirements, design, and ADR review status remain as marked in their respective documents."
+        ]
+      },
+      {
+        "title": "Release assets",
+        "items": [
+          "Self-contained Linux x64 and Windows x64 Server archives",
+          "Self-contained Linux x64 Agent archive",
+          "Self-contained and framework-dependent Windows x64 Agent archives and installers",
+          "Self-contained macOS Intel and Apple Silicon Agent archives",
+          "SHA256SUMS checksum manifest"
+        ]
+      }
+    ]
+  },
   "v0.1.0-rc.8": {
     "title": "RelayLink v0.1.0-rc.8",
     "intro": "A release candidate focused on file logging, connection rejection diagnostics, and Windows Agent configuration saving.",
@@ -73,6 +117,16 @@
           "The Agent frontend build, formatting check, and isolated local preview passed. Automated coverage checks active-flow disconnection on disable, reconnection on enable, and persistence across restart.",
           "Windows installers are unsigned, and macOS packages are not Developer ID signed or notarized. Installation, connectivity, and capacity still need validation in target environments."
         ]
+      },
+      {
+        "title": "Release assets",
+        "items": [
+          "Self-contained Linux x64 and Windows x64 Server archives",
+          "Self-contained Linux x64 Agent archive",
+          "Self-contained and framework-dependent Windows x64 Agent archives and installers",
+          "Self-contained macOS Intel and Apple Silicon Agent archives",
+          "SHA256SUMS checksum manifest"
+        ]
       }
     ]
   },
@@ -105,8 +159,21 @@
           "Docker Compose configuration parsing and a Server Release build passed. Container startup, persistence, and dynamic forwarding still need validation on a Linux Docker host.",
           "The Windows Agent installer compiled, but its dependency screen and full installation and removal still need revalidation on a clean target machine."
         ]
+      },
+      {
+        "title": "Release assets",
+        "items": [
+          "Self-contained Linux x64 Server archive",
+          "Self-contained Windows x64 Server archive",
+          "Self-contained Linux x64 Agent archive",
+          "Windows x64 Agent installer",
+          "Self-contained macOS Intel Agent archive",
+          "Self-contained macOS Apple Silicon Agent archive",
+          "`SHA256SUMS` checksum manifest"
+        ]
       }
-    ]
+    ],
+    "outro": "A release candidate is not evidence of capacity or long-term stability validation. Validate the target network, permissions, and runtime environment before production deployment."
   },
   "v0.1.0-rc.5": {
     "title": "RelayLink v0.1.0-rc.5",
@@ -138,8 +205,29 @@
           "8 admin frontend tests, the production build, and formatting checks passed.",
           "Coverage includes encrypted-default compatibility, plaintext copying, handshake-mode validation, revocation after mode changes, and local API boundaries."
         ]
+      },
+      {
+        "title": "Upgrade notes",
+        "items": [
+          "Upgrade the Server and all Agents together to avoid peer protocol version mismatches.",
+          "New peer-only channels enable end-to-end encryption by default. Disable it only after explicitly accepting plaintext application traffic on the relay path.",
+          "Back up Server configuration, client configuration, Agent identity files, and SQLite databases before upgrading."
+        ]
+      },
+      {
+        "title": "Release assets",
+        "items": [
+          "Self-contained Linux x64 Server archive",
+          "Self-contained Windows x64 Server archive",
+          "Self-contained Linux x64 Agent archive",
+          "Windows x64 Agent installer",
+          "Self-contained macOS Intel Agent archive",
+          "Self-contained macOS Apple Silicon Agent archive",
+          "`SHA256SUMS` checksum manifest"
+        ]
       }
-    ]
+    ],
+    "outro": "A release candidate is not evidence of capacity or long-term stability validation. Validate the target network, permissions, and runtime environment before production deployment."
   },
   "v0.1.0-rc.4": {
     "title": "RelayLink v0.1.0-rc.4",
@@ -171,8 +259,21 @@
           "macOS packages are not yet Developer ID signed, notarized, or stapled.",
           "Back up Server configuration, client configuration, Agent identity files, and SQLite databases before upgrading."
         ]
+      },
+      {
+        "title": "Release assets",
+        "items": [
+          "Self-contained Linux x64 Server archive",
+          "Self-contained Windows x64 Server archive",
+          "Self-contained Linux x64 Agent archive",
+          "Windows x64 Agent installer",
+          "Self-contained macOS Intel Agent archive",
+          "Self-contained macOS Apple Silicon Agent archive",
+          "`SHA256SUMS` checksum manifest"
+        ]
       }
-    ]
+    ],
+    "outro": "A release candidate is not evidence of capacity or long-term stability validation. Validate the target network, permissions, and runtime environment before production deployment."
   },
   "v0.1.0-rc.3": {
     "title": "RelayLink v0.1.0-rc.3",
@@ -204,8 +305,18 @@
           "Upgrade the Server and all Agents together. Older Agents may fail to connect because their configuration digest differs.",
           "Back up Server configuration, client configuration, and SQLite databases before upgrading."
         ]
+      },
+      {
+        "title": "Release assets",
+        "items": [
+          "Self-contained Linux x64 Server archive",
+          "Self-contained Windows x64 Server archive",
+          "Windows x64 Agent installer",
+          "`SHA256SUMS` checksum manifest"
+        ]
       }
-    ]
+    ],
+    "outro": "A release candidate is not evidence of capacity or long-term stability validation. Validate the target network, permissions, and runtime environment before production deployment."
   },
   "v0.1.0-rc.2": {
     "title": "RelayLink v0.1.0-rc.2",

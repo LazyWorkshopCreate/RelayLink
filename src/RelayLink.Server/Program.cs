@@ -92,7 +92,9 @@ try
     app.MapGet("/api/v1/admin/next-channel-port", (HttpRequest request, AdminSessionService sessions, ServerRuntime runtime) =>
     {
         if (!sessions.TryAuthorize(request, requireCsrf: false, out _)) return Results.Unauthorized();
-        var port = ChannelPortSuggestion.Find(runtime.Configuration);
+        var transportProtocol = request.Query["transportProtocol"].FirstOrDefault() ?? "tcp";
+        if (transportProtocol is not ("tcp" or "udp")) return Results.BadRequest(new { error = "Invalid transport protocol." });
+        var port = ChannelPortSuggestion.Find(runtime.Configuration, transportProtocol: transportProtocol);
         return port is int available ? Results.Ok(new { listenPort = available }) : Results.Problem("No available cloud listener port.", statusCode: StatusCodes.Status503ServiceUnavailable);
     });
     app.MapGet("/api/v1/admin/security-groups", (HttpRequest request, AdminSessionService sessions, ServerRuntime runtime) =>
@@ -207,14 +209,14 @@ try
     app.MapGet("/api/v1/clients/{id}/channels", (string id, ServerRuntime runtime, MetricsRegistry metrics) =>
     {
         if (!runtime.Configuration.Clients.TryGetValue(id, out var client)) return Results.NotFound();
-        var online = runtime.Sessions.TryGet(id, out _);
+        var online = runtime.Sessions.TryGet(id, out var channelSession);
         return Results.Ok(new
         {
             snapshotTimeUtc = DateTimeOffset.UtcNow,
             channels = client.Channels.Select(channel =>
             {
                 var metric = metrics.For(client.ClientId, channel.ChannelId).Snapshot();
-                return new { channelId = channel.ChannelId, displayName = channel.DisplayName, tags = channel.Tags, listenAddress = channel.ListenAddress, listenPort = channel.ListenPort, securityGroupId = channel.SecurityGroupId, targetHost = channel.TargetHost, targetPort = channel.TargetPort, enabled = channel.Enabled, authorizedClientsOnly = channel.AuthorizedClientsOnly, endToEndEncryptionEnabled = channel.EndToEndEncryptionEnabled, maxConnections = channel.MaxConnections, targetConnectTimeoutSeconds = channel.TargetConnectTimeoutSeconds, listenerState = channel.AuthorizedClientsOnly ? "peer-only" : channel.Enabled ? "listening" : "stopped", available = channel.Enabled && !channel.AuthorizedClientsOnly && online, pendingConnections = channel.AuthorizedClientsOnly ? metric.PeerPendingConnections : metric.PendingConnections, activeConnections = channel.AuthorizedClientsOnly ? metric.PeerActiveConnections : metric.ActiveConnections, acceptedTotal = channel.AuthorizedClientsOnly ? metric.PeerAcceptedTotal : metric.AcceptedTotal, openedTotal = channel.AuthorizedClientsOnly ? metric.PeerOpenedTotal : metric.OpenedTotal, openFailedTotal = channel.AuthorizedClientsOnly ? metric.PeerOpenFailedTotal : metric.OpenFailedTotal, metric.NormalClosedTotal, metric.AbortedTotal, metric.BytesToTarget, metric.BytesToCaller, metric.PeerCiphertextToTarget, metric.PeerCiphertextToCaller, targetLastResult = metric.TargetLastResult?.Result, targetLastResultTimeUtc = metric.TargetLastResult?.TimeUtc };
+                return new { channelId = channel.ChannelId, displayName = channel.DisplayName, tags = channel.Tags, listenAddress = channel.ListenAddress, listenPort = channel.ListenPort, securityGroupId = channel.SecurityGroupId, targetHost = channel.TargetHost, targetPort = channel.TargetPort, enabled = channel.Enabled, authorizedClientsOnly = channel.AuthorizedClientsOnly, endToEndEncryptionEnabled = channel.EndToEndEncryptionEnabled, maxConnections = channel.MaxConnections, targetConnectTimeoutSeconds = channel.TargetConnectTimeoutSeconds, transportProtocol = channel.TransportProtocol, udpIdleTimeoutSeconds = channel.UdpIdleTimeoutSeconds, listenerState = channel.AuthorizedClientsOnly ? "peer-only" : channel.Enabled ? "listening" : "stopped", available = channel.Enabled && !channel.AuthorizedClientsOnly && online && (channel.TransportProtocol == "tcp" || channelSession?.ProtocolVersion >= 4), pendingConnections = channel.AuthorizedClientsOnly ? metric.PeerPendingConnections : metric.PendingConnections, activeConnections = channel.AuthorizedClientsOnly ? metric.PeerActiveConnections : metric.ActiveConnections, acceptedTotal = channel.AuthorizedClientsOnly ? metric.PeerAcceptedTotal : metric.AcceptedTotal, openedTotal = channel.AuthorizedClientsOnly ? metric.PeerOpenedTotal : metric.OpenedTotal, openFailedTotal = channel.AuthorizedClientsOnly ? metric.PeerOpenFailedTotal : metric.OpenFailedTotal, metric.NormalClosedTotal, metric.AbortedTotal, metric.BytesToTarget, metric.BytesToCaller, metric.PeerCiphertextToTarget, metric.PeerCiphertextToCaller, targetLastResult = metric.TargetLastResult?.Result, targetLastResultTimeUtc = metric.TargetLastResult?.TimeUtc };
             }).ToArray()
         });
     });
@@ -306,7 +308,7 @@ try
         {
             var saved = await editor.UpdateAsync(id, channelId, update, cancellationToken);
             var pushed = runtime.Sessions.TryGet(id, out _);
-            return Results.Ok(new { channel = new { saved.ChannelId, saved.DisplayName, tags = saved.Tags, saved.Enabled, saved.ListenAddress, saved.ListenPort, saved.TargetHost, saved.TargetPort, saved.MaxConnections, saved.TargetConnectTimeoutSeconds, saved.AuthorizedClientsOnly, saved.EndToEndEncryptionEnabled }, pushedToAgent = pushed, message = pushed ? "已保存；运行配置变化已下发，tag 变更仅用于列表筛选。" : "已保存；客户端离线时将在下次连接获取运行配置，tag 仅用于列表筛选。" });
+            return Results.Ok(new { channel = new { saved.ChannelId, saved.DisplayName, tags = saved.Tags, saved.Enabled, saved.ListenAddress, saved.ListenPort, saved.TargetHost, saved.TargetPort, saved.MaxConnections, saved.TargetConnectTimeoutSeconds, saved.TransportProtocol, saved.UdpIdleTimeoutSeconds, saved.AuthorizedClientsOnly, saved.EndToEndEncryptionEnabled }, pushedToAgent = pushed, message = pushed ? "已保存；运行配置变化已下发，tag 变更仅用于列表筛选。" : "已保存；客户端离线时将在下次连接获取运行配置，tag 仅用于列表筛选。" });
         }
         catch (ChannelUpdateException exception) { return Results.BadRequest(new { error = exception.Message }); }
     });
@@ -317,7 +319,7 @@ try
         {
             var saved = await editor.CreateAsync(id, create, cancellationToken);
             var pushed = runtime.Sessions.TryGet(id, out _);
-            return Results.Created($"/api/v1/clients/{id}/channels", new { channel = new { saved.ChannelId, saved.DisplayName, tags = saved.Tags, saved.Enabled, saved.ListenAddress, saved.ListenPort, saved.TargetHost, saved.TargetPort, saved.MaxConnections, saved.TargetConnectTimeoutSeconds, saved.AuthorizedClientsOnly, saved.EndToEndEncryptionEnabled }, pushedToAgent = pushed, message = pushed ? "已新增并下发给在线客户端；服务端监听已更新。" : "已新增并更新服务端监听；客户端离线，将在下次连接时下发。" });
+            return Results.Created($"/api/v1/clients/{id}/channels", new { channel = new { saved.ChannelId, saved.DisplayName, tags = saved.Tags, saved.Enabled, saved.ListenAddress, saved.ListenPort, saved.TargetHost, saved.TargetPort, saved.MaxConnections, saved.TargetConnectTimeoutSeconds, saved.TransportProtocol, saved.UdpIdleTimeoutSeconds, saved.AuthorizedClientsOnly, saved.EndToEndEncryptionEnabled }, pushedToAgent = pushed, message = pushed ? "已新增并下发给在线客户端；服务端监听已更新。" : "已新增并更新服务端监听；客户端离线，将在下次连接时下发。" });
         }
         catch (ChannelUpdateException exception) { return Results.BadRequest(new { error = exception.Message }); }
     });
@@ -349,7 +351,7 @@ static IResult GetMappingStatus(string id, ServerRuntime runtime)
     return Results.Ok(new { mappings = client.OutboundMappings.Select(mapping =>
     {
         var address = agentSession?.PeerAddresses.FirstOrDefault(item => item.MappingId == mapping.MappingId);
-        return new { mapping.MappingId, mapping.Enabled, localAddress = address?.LocalAddress, localPort = address?.LocalPort, available = mapping.Enabled && address is not null, mapping.TargetClientId, mapping.TargetChannelId };
+        return new { mapping.MappingId, mapping.Enabled, localAddress = address?.LocalAddress, localPort = address?.LocalPort, available = mapping.Enabled && address is not null, mapping.TargetClientId, mapping.TargetChannelId, transportProtocol = runtime.Configuration.Clients.GetValueOrDefault(mapping.TargetClientId)?.Channels.SingleOrDefault(c => c.ChannelId == mapping.TargetChannelId)?.TransportProtocol ?? "tcp" };
     }).ToArray() });
 }
 
@@ -379,6 +381,8 @@ static IResult GetDashboardSnapshot(HttpRequest request, ServerRuntime runtime, 
                     tags = channel.Tags,
                     listenAddress = channel.ListenAddress,
                     listenPort = channel.ListenPort,
+                    transportProtocol = channel.TransportProtocol,
+                    udpIdleTimeoutSeconds = channel.UdpIdleTimeoutSeconds,
                     securityGroupId = channel.SecurityGroupId,
                     targetHost = channel.TargetHost,
                     targetPort = channel.TargetPort,
@@ -388,7 +392,7 @@ static IResult GetDashboardSnapshot(HttpRequest request, ServerRuntime runtime, 
                     maxConnections = channel.MaxConnections,
                     targetConnectTimeoutSeconds = channel.TargetConnectTimeoutSeconds,
                     listenerState = channel.AuthorizedClientsOnly ? "peer-only" : channel.Enabled ? "listening" : "stopped",
-                    available = channel.Enabled && !channel.AuthorizedClientsOnly && online,
+                    available = channel.Enabled && !channel.AuthorizedClientsOnly && online && (channel.TransportProtocol == "tcp" || session?.ProtocolVersion >= 4),
                     pendingConnections = channel.AuthorizedClientsOnly ? metric.PeerPendingConnections : metric.PendingConnections,
                     activeConnections = channel.AuthorizedClientsOnly ? metric.PeerActiveConnections : metric.ActiveConnections,
                     acceptedTotal = channel.AuthorizedClientsOnly ? metric.PeerAcceptedTotal : metric.AcceptedTotal,
@@ -415,7 +419,8 @@ static IResult GetDashboardSnapshot(HttpRequest request, ServerRuntime runtime, 
                     localPort = address?.LocalPort,
                     available = mapping.Enabled && address is not null,
                     mapping.TargetClientId,
-                    mapping.TargetChannelId
+                    mapping.TargetChannelId,
+                    transportProtocol = runtime.Configuration.Clients.GetValueOrDefault(mapping.TargetClientId)?.Channels.SingleOrDefault(c => c.ChannelId == mapping.TargetChannelId)?.TransportProtocol ?? "tcp"
                 };
             }).ToArray();
             return new

@@ -5,6 +5,7 @@ namespace RelayLink.Transport;
 
 public sealed class FrameReader(Stream stream, TimeSpan? partialFrameTimeout = null)
 {
+    public byte? ProtocolVersion { get; private set; }
     private readonly TimeSpan partialFrameTimeout = partialFrameTimeout ?? TimeSpan.FromSeconds(120);
     public async ValueTask<Frame?> ReadAsync(int maximumPayloadLength, CancellationToken cancellationToken)
     {
@@ -26,11 +27,13 @@ public sealed class FrameReader(Stream stream, TimeSpan? partialFrameTimeout = n
             throw new ProtocolException("Invalid frame magic.");
         }
 
-        if (header[4] != ProtocolConstants.Version)
+        if (header[4] is not (3 or ProtocolConstants.Version) ||
+            (ProtocolVersion is { } version && header[4] != version))
         {
             throw new ProtocolException("Unsupported protocol version.");
         }
 
+        ProtocolVersion = header[4];
         var type = (FrameType)header[5];
         if (!Enum.IsDefined(type))
         {
@@ -40,7 +43,7 @@ public sealed class FrameReader(Stream stream, TimeSpan? partialFrameTimeout = n
         var flags = BinaryPrimitives.ReadUInt16BigEndian(header.AsSpan(6, 2));
         if (flags != 0)
         {
-            throw new ProtocolException("Frame flags must be zero for protocol v3.");
+            throw new ProtocolException("Frame flags must be zero.");
         }
 
         var payloadLength = BinaryPrimitives.ReadUInt32BigEndian(header.AsSpan(8, 4));
