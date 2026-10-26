@@ -249,6 +249,14 @@ public sealed class ConfigurationLoader
 
             if (channel.TransportProtocol is not ("tcp" or "udp") || channel.UdpIdleTimeoutSeconds is < 1 or > 3600)
                 throw new ConfigurationException($"Invalid transport or UDP idle timeout for {client.ClientId}/{channel.ChannelId}.");
+            try
+            {
+                RelayLink.Protocol.HttpProxyPolicy.Validate(channel.ApplicationProtocol, channel.TransportProtocol, channel.AuthorizedClientsOnly, channel.EndToEndEncryptionEnabled, channel.Http);
+                if (channel.Http is not null)
+                    RelayLink.Protocol.HttpProxyPolicy.ResolveWebSocketConnectionCap(channel.MaxConnections, channel.Http.MaxWebSocketConnections);
+            }
+            catch (ArgumentException exception) { throw new ConfigurationException(exception.Message); }
+            if (channel.ApplicationProtocol == "http" && !server.Tunnel.TlsEnabled) throw new ConfigurationException("HTTP requires control TLS.");
             ValidateAddressAndPort(channel.ListenAddress, channel.ListenPort, $"channel {channel.ChannelId} listener");
             ValidatePort(channel.TargetPort, $"channel {channel.ChannelId} target");
             if (string.IsNullOrWhiteSpace(channel.TargetHost) || channel.MaxConnections < 1 || channel.MaxConnections > client.MaxConnections || channel.TargetConnectTimeoutSeconds is < 1 or > 300)

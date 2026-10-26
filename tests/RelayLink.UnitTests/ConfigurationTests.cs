@@ -16,6 +16,31 @@ namespace RelayLink.UnitTests;
 public sealed class ConfigurationTests
 {
     [Fact]
+    public void Http_examples_match_strict_schema_and_validate_after_placeholder_replacement()
+    {
+        var root = new DirectoryInfo(AppContext.BaseDirectory);
+        while (root is not null && !Directory.Exists(Path.Combine(root.FullName, "config", "examples"))) root = root.Parent;
+        Assert.NotNull(root);
+        var examples = Path.Combine(root.FullName, "config", "examples");
+        var options = new JsonSerializerOptions
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+            UnmappedMemberHandling = System.Text.Json.Serialization.JsonUnmappedMemberHandling.Disallow
+        };
+        var server = JsonSerializer.Deserialize<ServerConfiguration>(File.ReadAllText(Path.Combine(examples, "server.example.json")), options)!;
+        var clients = new[] { "http-client.example.json", "http-caller-client.example.json" }.Select(name =>
+        {
+            var json = File.ReadAllText(Path.Combine(examples, name))
+                .Replace("REPLACE_WITH_UNIQUE_32_RANDOM_BYTES_BASE64", Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)), StringComparison.Ordinal)
+                .Replace("REPLACE_WITH_CHANNEL_32_RANDOM_BYTES_BASE64", Convert.ToBase64String(new byte[32]), StringComparison.Ordinal)
+                .Replace("REPLACE_WITH_TARGET_AGENT_64_HEX_SHA256", new string('a', 64), StringComparison.Ordinal);
+            return JsonSerializer.Deserialize<ClientConfiguration>(json, options)!;
+        }).ToDictionary(client => client.ClientId);
+        new ConfigurationLoader().ValidateClientUpdate(new LoadedConfiguration(server, clients));
+        Assert.Equal("127.0.0.1", Assert.Single(clients["http-caller"].OutboundMappings).LocalAddress);
+    }
+
+    [Fact]
     public void V3_snapshot_excludes_udp_and_matches_legacy_canonical_json()
     {
         var tcp = new ChannelConfiguration("tcp", "TCP", true, "127.0.0.1", 19000, "127.0.0.1", 19001, 5, 5);

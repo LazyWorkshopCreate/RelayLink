@@ -2,8 +2,8 @@
 
 文档 ID：DES-001\
 状态：Draft（待评审）\
-版本：v2.20.1 设计评审稿\
-更新日期：2026-10-05\
+版本：v2.21.0 设计评审稿\
+更新日期：2026-10-12\
 调研日期：2026-09-15\
 配套文档：[需求文档索引](../requirements/README.md)
 
@@ -21,6 +21,8 @@
 这是本项目设计决策，不是声称存在一个原样满足所有要求的现成 .NET 产品。
 
 UDP 使用来源会话与长度封装，复用独立 TCP 隧道；普通 TCP 原始复制保持不变。协议版本 4 的增量、超时、统计口径与兼容性见 [UDP 设计](udp-forwarding.md)。
+
+HTTP/HTTPS 模式采用目标 Agent 的 YARP/Kestrel 虚拟入口，保留 raw TCP/UDP；公网浏览器 TLS 在目标 Agent 终止，HTTP 互访保留内层 TLS/访问证明及应用解帧。集中配置、版本 v5 与 readiness 已接入，详见 [HTTP 设计](http-reverse-proxy.md)、[ADR-0026](../adr/0026-http-proxy-over-tcp-tunnels.md)、[运维](../operations/http-reverse-proxy.md) 和 [验证](../testing/http-reverse-proxy-verification.md)。
 
 ## 2. 调研与方案比较
 
@@ -185,7 +187,7 @@ Agent 主程序现在仅接受包含 `servers[]` 的新格式；配置示例见[
 
 只下发该客户端的 ID、展示名、限制、通道信息，以及 `configVersion`。显式 DTO 白名单序列化；绝不将原始配置对象直接作为响应。密钥、证书路径、其他客户端配置均不下发。
 
-`configVersion` 是固定字段顺序、按 channelId 排序后 UTF-8 JSON 的 SHA-256 十六进制摘要；不包含密钥和机器路径。双方使用共享序列化规则校验摘要。支持的通道，包括禁用通道，可以在快照中出现；v3 快照排除 UDP 通道和映射。Agent 只接受已启用通道的 Open 请求。配置更新按下发顺序维护最多 32 项待确认版本，逐项处理 ConfigAck，不因下一次更新覆盖前一次待确认值；乱序、重复或未下发版本的确认仍拒绝。队列满或发送失败关闭控制会话，Agent 重连取得最新完整快照，避免无界积压。
+`configVersion` 是固定字段顺序、按 channelId 排序后 UTF-8 JSON 的 SHA-256 十六进制摘要；不包含注册密钥、证书私钥或机器路径；授权通道/映射访问密钥是受 TLS 保护的快照字段并参与摘要，不在日志中输出。双方使用共享序列化规则校验摘要。支持的通道，包括禁用通道，可以在快照中出现；v3 快照排除 UDP 通道和映射；v3/v4 排除 HTTP 通道、映射及新增字段。Agent 只接受已启用通道的 Open 请求。配置更新按下发顺序维护最多 32 项待确认版本，逐项处理 ConfigAck，不因下一次更新覆盖前一次待确认值；乱序、重复或未下发版本的确认仍拒绝。队列满或发送失败关闭控制会话，Agent 重连取得最新完整快照，避免无界积压。
 
 ### 5.5 加载与生效
 
@@ -226,7 +228,7 @@ Agent 主程序现在仅接受包含 `servers[]` 的新格式；配置示例见[
 | 偏移 | 长度 | 字段 |
 |---|---|---|
 | 0 | 4 字节 | ASCII magic：`NTP1` |
-| 4 | 1 字节 | version，支持 3 / 4；首帧锁定版本，v3 保留 TCP，v4 增加 UDP；未知版本或连接内切换被拒绝 |
+| 4 | 1 字节 | version，支持 3 / 4 / 5；首帧锁定版本，v3 保留 TCP，v4 增加 UDP，v5 增加 HTTP；未知版本或连接内切换被拒绝 |
 | 5 | 1 字节 | type |
 | 6 | 2 字节 | flags，当前版本必须为 0，大端 |
 | 8 | 4 字节 | payloadLength，无符号大端，不含头 |
@@ -245,7 +247,7 @@ Agent 主程序现在仅接受包含 `servers[]` 的新格式；配置示例见[
 | 4 | Ready | Server→Agent；sessionId |
 | 5 | Ping | Server→Agent；sequence |
 | 6 | Pong | Agent→Server；相同 sequence |
-| 7 | Open | Server→Agent；sessionId、connectionId、channelId、configVersion、token、remainingOpenTimeoutMs |
+| 7 | Open | Server→Agent；sessionId、connectionId、channelId、configVersion、token、remainingOpenTimeoutMs；v5 HTTP 增加 httpIngress（accessKind、scheme、sourceIp、policyHash） |
 | 8 | OpenFailed | Agent→Server；sessionId、connectionId、errorCode |
 | 9 | CancelOpen | Server→Agent；sessionId、connectionId、reason |
 | 10 | BindData | Agent→Server，数据连接首帧；sessionId、connectionId、channelId、token |
@@ -253,6 +255,8 @@ Agent 主程序现在仅接受包含 `servers[]` 的新格式；配置示例见[
 | 12 | TargetReady | Agent→Server，控制连接；connectionId、targetConnectDurationMs |
 | 13 | Start | Server→Agent，控制连接；connectionId |
 | 14 | Error | 任一端→对端；code、可选的控制拒绝原因 reason，不含异常堆栈或秘密 |
+| 23 | HttpStatus | v5 Agent→Server，控制连接；sessionId、configVersion、channels（channelId、policyHash、state）；状态不能代替 ConfigAck |
+| 24 | HttpIngressReady | v5 Agent→Server，控制连接；connectionId；HTTP 宿主就绪，不代表 Web 上游连通，之后仍需 Start |
 | 32 | Data | 仅互访数据中继；按通道模式承载内层 TLS 记录或明文业务块 |
 | 33 | Fin | 仅互访数据中继；该发送方向结束 |
 | 34 | Reset | 仅互访数据中继；异常终止 |

@@ -2,8 +2,8 @@
 
 文档 ID：DEV-001\
 状态：Active\
-版本：v1.10.0\
-更新日期：2026-10-05
+版本：v1.11.0\
+更新日期：2026-10-12
 
 ```text
 RelayLink/
@@ -46,6 +46,8 @@ RelayLink/
 ```
 
 ## 目录职责
+
+- HTTP/HTTPS 宿主与 YARP 位于 RelayLink.Agent/HttpProxyRuntime.cs；PeerApplicationStream 在 Transport 解开既有互访 TLS 应用记录，Protocol 定义 v5 HTTP 配置/上下文/状态；Server 负责集中配置、版本/readiness 及中继。业务 HTTP 虚拟入口不创建 OS socket，现有状态页独立。部署与证据见 [运维](../operations/http-reverse-proxy.md) 和 [验证](../testing/http-reverse-proxy-verification.md)。
 
 - 当前已进入开发阶段，根目录使用 `RelayLink.slnx` 与各项目 csproj。共享库不得依赖 Server 或 Agent；Protocol 不依赖宿主和配置文件 I/O。
 - Server 与 Agent 通过 `RelayLink.Logging` 复用文件日志策略；组件分别决定日志目录与名称，日志库不依赖协议、运行配置或业务载荷。

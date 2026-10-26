@@ -3,7 +3,13 @@
 | 文档 | ID | 状态 | 用途 |
 |---|---|---|---|
 | [公开仓库同步](development/public-repository-sync.md) | DEV-006 | Active | 版本来源、脱敏和公开适配 |
-| [需求文档索引](requirements/README.md) | REQ-001A–REQ-001M | Draft / Accepted / Done | 按日期与主题拆分的需求范围、功能与验收；实现进度见验证状态 |
+| [需求文档索引](requirements/README.md) | REQ-001A–REQ-001N | Draft / Accepted / Done | 按日期与主题拆分的需求范围、功能与验收；实现进度见验证状态 |
+| [HTTP/HTTPS 反向代理需求](requirements/2026-10-12-http-reverse-proxy.md) | REQ-001N | Accepted | 公网与加密互访 HTTP/HTTPS、目标 Agent Host/Origin 策略，A85–A91；证据与目标环境缺口见验证记录 |
+| [HTTP 反向代理设计与 YARP 评估](design/http-reverse-proxy.md) | DES-008 | Draft | 目标 Agent YARP、虚拟 HTTP 入口、TLS 嵌套、版本/证书/就绪及 PoC 门槛 |
+| [目标 Agent HTTP 与隧道复用](adr/0026-http-proxy-over-tcp-tunnels.md) | ADR-0026 | Accepted | 目标端统一处理 HTTP，公网 TLS 透传、互访保持加密；用户明确采用，实际证据见 HTTP 验证 |
+| [HTTP 代理部署](operations/http-reverse-proxy.md) | OPS-003 | Active | v5 升级、集中配置、目标资源、重启激活与 URL |
+| [HTTP 代理验证](testing/http-reverse-proxy-verification.md) | TST-005 | Active | 四入口实际进程、TLS/WS/流式、来源、旧端与验证边界 |
+| [HTTP 代理实施计划](development/http-proxy-implementation-plan.md) | DEV-005 | Active | 分批独立提交、本机进程验收、推送与 CI；暂不发布 |
 | [UDP 转发需求](requirements/2026-10-05-udp-forwarding.md) | REQ-001L | Draft | 普通和授权互访 UDP、会话隔离、空闲回收、A75–A79 |
 | [UDP 转发技术设计](design/udp-forwarding.md) | DES-006 | Draft | UDP 报文封装、来源会话、协议 v4 与部署边界 |
 | [v3 客户端兼容](adr/0025-v3-client-compatibility.md) | ADR-0025 | Accepted | 非破坏性增量保留 v3 TCP，UDP 按会话版本隔离 |

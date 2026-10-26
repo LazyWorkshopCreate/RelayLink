@@ -24,6 +24,8 @@ public sealed class ChannelConfigurationEditor(
             var existing = client.Channels.SingleOrDefault(channel => channel.ChannelId == channelId) ?? throw new ChannelUpdateException("Channel was not found.");
             var updated = ToChannel(channelId, request) with
             {
+                ApplicationProtocol = existing.ApplicationProtocol,
+                Http = existing.Http,
                 TransportProtocol = request.TransportProtocol ?? existing.TransportProtocol,
                 UdpIdleTimeoutSeconds = request.UdpIdleTimeoutSeconds ?? existing.UdpIdleTimeoutSeconds,
                 AuthorizedClientsOnly = request.AuthorizedClientsOnly ?? existing.AuthorizedClientsOnly,

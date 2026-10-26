@@ -7,7 +7,7 @@ public sealed record ConfigUpdateMessage(Guid SessionId, string ConfigVersion, C
 public sealed record ReadyMessage(Guid SessionId);
 public sealed record PingMessage(long Sequence);
 public sealed record PongMessage(long Sequence);
-public sealed record OpenMessage(Guid SessionId, Guid ConnectionId, string ChannelId, string ConfigVersion, string Token, int RemainingOpenTimeoutMs);
+public sealed record OpenMessage(Guid SessionId, Guid ConnectionId, string ChannelId, string ConfigVersion, string Token, int RemainingOpenTimeoutMs, HttpIngressContext? HttpIngress = null);
 public sealed record OpenFailedMessage(Guid SessionId, Guid ConnectionId, ErrorCode ErrorCode);
 public sealed record CancelOpenMessage(Guid SessionId, Guid ConnectionId, ErrorCode Reason);
 public sealed record BindDataMessage(Guid SessionId, Guid ConnectionId, string ChannelId, string Token);
@@ -19,8 +19,8 @@ public sealed record ErrorMessage(ErrorCode Code,
     ControlRejectionReason? Reason = null);
 public sealed record ResetMessage(ErrorCode Code);
 public sealed record PeerOpenRequestMessage(Guid RequestId, string MappingId);
-public sealed record PeerOpenGrantedMessage(Guid RequestId, Guid ConnectionId, Guid SessionId, string Token, bool EndToEndEncryptionEnabled = true, string TransportProtocol = "tcp");
-public sealed record PeerOpenMessage(Guid ConnectionId, Guid SessionId, string CallerClientId, string ChannelId, string Token, bool EndToEndEncryptionEnabled = true, string TransportProtocol = "tcp");
+public sealed record PeerOpenGrantedMessage(Guid RequestId, Guid ConnectionId, Guid SessionId, string Token, bool EndToEndEncryptionEnabled = true, string TransportProtocol = "tcp", HttpIngressContext? HttpIngress = null);
+public sealed record PeerOpenMessage(Guid ConnectionId, Guid SessionId, string CallerClientId, string ChannelId, string Token, bool EndToEndEncryptionEnabled = true, string TransportProtocol = "tcp", HttpIngressContext? HttpIngress = null);
 public sealed record PeerBindDataMessage(Guid ConnectionId, Guid SessionId, string Token, string Role);
 public sealed record PeerBindAcceptedMessage(Guid ConnectionId);
 public sealed record PeerOpenRejectedMessage(Guid RequestId, ErrorCode ErrorCode);
@@ -37,6 +37,8 @@ public sealed record ClientConfigSnapshot(
 
 public sealed record OutboundMappingSnapshot(string MappingId, bool Enabled, string LocalAddress, string TargetClientId, string TargetChannelId, string AccessSecret, string TargetCertificateSha256)
 {
+    public string ApplicationProtocol { get; init; } = "raw";
+    public HttpPeerOptions? Http { get; init; }
     public string TransportProtocol { get; init; } = "tcp";
     public int UdpIdleTimeoutSeconds { get; init; } = 60;
 }
@@ -52,6 +54,8 @@ public sealed record ChannelSnapshot(
     int MaxConnections,
     int TargetConnectTimeoutSeconds)
 {
+    public string ApplicationProtocol { get; init; } = "raw";
+    public HttpProxyOptions? Http { get; init; }
     public string TransportProtocol { get; init; } = "tcp";
     public int UdpIdleTimeoutSeconds { get; init; } = 60;
     public bool AuthorizedClientsOnly { get; init; }

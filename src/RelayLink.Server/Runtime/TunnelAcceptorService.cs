@@ -285,11 +285,33 @@ public sealed class TunnelAcceptorService(
                 continue;
             }
 
+            if (frame.Type == FrameType.HttpStatus)
+            {
+                var http = JsonProtocolSerializer.Deserialize<HttpStatusMessage>(frame.Payload.Span);
+                if (session.ProtocolVersion < 5 || http.SessionId != session.SessionId || http.ConfigVersion != session.ConfigVersion ||
+                    http.Channels is null || http.Channels.Count > runtime.Configuration.Server.Limits.MaxChannelsPerClient ||
+                    http.Channels.Select(item => item.ChannelId).Distinct().Count() != http.Channels.Count ||
+                    http.Channels.Any(item => item.State is not ("ready" or "restart_required" or "resource_unavailable") ||
+                        !runtime.Configuration.Clients[session.ClientId].Channels.Any(channel => channel.ChannelId == item.ChannelId && channel.ApplicationProtocol == "http" &&
+                            item.PolicyHash == HttpProxyPolicy.Hash(ConfigurationSnapshotFactory.ToHttpSnapshot(channel)))))
+                    throw new ProtocolException("Invalid HTTP status.");
+                session.SetHttpStates(http.Channels);
+                continue;
+            }
+            if (frame.Type == FrameType.HttpIngressReady)
+            {
+                var ready = JsonProtocolSerializer.Deserialize<HttpIngressReadyMessage>(frame.Payload.Span);
+                if (session.ProtocolVersion < 5 || !pendingConnections.TryGet(ready.ConnectionId, out var pending) || pending is null ||
+                    pending.SessionId != session.SessionId || pending.Channel.ApplicationProtocol != "http" || !session.IsHttpReady(pending.Channel) || !pending.TrySetTargetReady(0))
+                    throw new ProtocolException("HTTP readiness did not match a bound connection.");
+                metrics.For(session.ClientId, pending.Channel.ChannelId).MarkHttpIngressReady();
+                continue;
+            }
             if (frame.Type == FrameType.TargetReady)
             {
                 var ready = JsonProtocolSerializer.Deserialize<TargetReadyMessage>(frame.Payload.Span);
                 if (!pendingConnections.TryGet(ready.ConnectionId, out var pending) || pending is null ||
-                    pending.SessionId != session.SessionId || !pending.TrySetTargetReady(ready.TargetConnectDurationMs))
+                    pending.SessionId != session.SessionId || pending.Channel.ApplicationProtocol == "http" || !pending.TrySetTargetReady(ready.TargetConnectDurationMs))
                     throw new ProtocolException("TargetReady did not match a bound connection in this control session.");
                 metrics.For(session.ClientId, pending.Channel.ChannelId).MarkTargetSuccess();
                 continue;

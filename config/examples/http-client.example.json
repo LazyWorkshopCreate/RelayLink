@@ -1,0 +1,149 @@
+{
+  "schemaVersion": 1,
+  "clientId": "shanghai-01",
+  "displayName": "上海节点 01",
+  "tags": [
+    "生产",
+    "上海"
+  ],
+  "enabled": true,
+  "secret": "REPLACE_WITH_UNIQUE_32_RANDOM_BYTES_BASE64",
+  "maxConnections": 100,
+  "maxPendingConnections": 20,
+  "agentServerHost": "tunnel.example.com",
+  "channels": [
+    {
+      "channelId": "erp-sql",
+      "displayName": "ERP SQL Server",
+      "tags": [
+        "数据库",
+        "ERP"
+      ],
+      "enabled": true,
+      "authorizedClientsOnly": false,
+      "endToEndEncryptionEnabled": true,
+      "securityGroupId": "office",
+      "listenAddress": "0.0.0.0",
+      "listenPort": 21433,
+      "targetHost": "192.168.10.20",
+      "targetPort": 1433,
+      "maxConnections": 50,
+      "targetConnectTimeoutSeconds": 5,
+      "transportProtocol": "tcp",
+      "udpIdleTimeoutSeconds": 60
+    },
+    {
+      "channelId": "udp-echo",
+      "displayName": "UDP Echo",
+      "tags": [
+        "UDP",
+        "测试"
+      ],
+      "enabled": true,
+      "authorizedClientsOnly": false,
+      "endToEndEncryptionEnabled": true,
+      "securityGroupId": "office",
+      "listenAddress": "0.0.0.0",
+      "listenPort": 19053,
+      "targetHost": "192.0.2.53",
+      "targetPort": 5353,
+      "maxConnections": 50,
+      "targetConnectTimeoutSeconds": 5,
+      "transportProtocol": "udp",
+      "udpIdleTimeoutSeconds": 60
+    },
+    {
+      "channelId": "web-public",
+      "displayName": "公网 Web HTTPS（部署后启用）",
+      "tags": [
+        "HTTP"
+      ],
+      "enabled": false,
+      "authorizedClientsOnly": false,
+      "endToEndEncryptionEnabled": true,
+      "securityGroupId": "office",
+      "listenAddress": "0.0.0.0",
+      "listenPort": 19443,
+      "targetHost": "127.0.0.1",
+      "targetPort": 18789,
+      "maxConnections": 50,
+      "targetConnectTimeoutSeconds": 5,
+      "transportProtocol": "tcp",
+      "udpIdleTimeoutSeconds": 60,
+      "applicationProtocol": "http",
+      "http": {
+        "publicEntryScheme": "https",
+        "publicAllowedAuthorities": [
+          "panel.example.test:19443"
+        ],
+        "publicAllowedOrigins": [
+          "https://panel.example.test:19443"
+        ],
+        "certificateRef": "panel",
+        "upstreamScheme": "http",
+        "upstreamAuthority": "127.0.0.1:18789",
+        "hostMode": "fixed",
+        "hostValue": "127.0.0.1:18789",
+        "originMode": "fixed",
+        "originValue": "http://127.0.0.1:18789",
+        "webSocketActivityTimeoutSeconds": 300,
+        "stripRequestHeaders": [
+          "X-Real-IP",
+          "True-Client-IP",
+          "X-Client-IP",
+          "CF-Connecting-IP"
+        ]
+      }
+    },
+    {
+      "channelId": "web-private",
+      "displayName": "授权 Web HTTPS（部署后启用）",
+      "tags": [
+        "HTTP"
+      ],
+      "enabled": false,
+      "authorizedClientsOnly": true,
+      "endToEndEncryptionEnabled": true,
+      "securityGroupId": null,
+      "listenAddress": "127.0.0.1",
+      "listenPort": 19444,
+      "targetHost": "127.0.0.1",
+      "targetPort": 18789,
+      "maxConnections": 50,
+      "targetConnectTimeoutSeconds": 5,
+      "transportProtocol": "tcp",
+      "udpIdleTimeoutSeconds": 60,
+      "applicationProtocol": "http",
+      "http": {
+        "publicEntryScheme": "https",
+        "publicAllowedAuthorities": [
+          "panel.example.test:19443"
+        ],
+        "publicAllowedOrigins": [
+          "https://panel.example.test:19443"
+        ],
+        "certificateRef": "peer-panel",
+        "upstreamScheme": "http",
+        "upstreamAuthority": "127.0.0.1:18789",
+        "hostMode": "fixed",
+        "hostValue": "127.0.0.1:18789",
+        "originMode": "fixed",
+        "originValue": "http://127.0.0.1:18789",
+        "peerEntryScheme": "https",
+        "peerAuthorityHost": "localhost",
+        "peerAllowedOrigins": [
+          "entry"
+        ],
+        "webSocketActivityTimeoutSeconds": 300,
+        "stripRequestHeaders": [
+          "X-Real-IP",
+          "True-Client-IP",
+          "X-Client-IP",
+          "CF-Connecting-IP"
+        ]
+      },
+      "accessSecret": "REPLACE_WITH_CHANNEL_32_RANDOM_BYTES_BASE64"
+    }
+  ],
+  "outboundMappings": []
+}

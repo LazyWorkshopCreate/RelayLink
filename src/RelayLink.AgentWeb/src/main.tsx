@@ -27,6 +27,10 @@ type Channel = {
     endToEndEncryptionEnabled: boolean;
     targetHost: string;
     targetPort: number;
+    applicationProtocol?: "raw" | "http";
+    httpState?: string | null;
+    entryScheme?: "http" | "https" | null;
+    accessUrl?: string | null;
     transportProtocol?: "tcp" | "udp";
 };
 type Mapping = {
@@ -34,6 +38,10 @@ type Mapping = {
     enabled: boolean;
     targetClientId: string;
     targetChannelId: string;
+    applicationProtocol?: "raw" | "http";
+    httpState?: string | null;
+    entryScheme?: "http" | "https" | null;
+    accessUrl?: string | null;
     transportProtocol?: "tcp" | "udp";
     localAddress: string | null;
 };
@@ -592,9 +600,12 @@ function App() {
                                                                 </td>
                                                                 <td>
                                                                     <code>
-                                                                        {(
-                                                                            channel.transportProtocol ??
-                                                                            "tcp"
+                                                                        {(channel.applicationProtocol ===
+                                                                        "http"
+                                                                            ? (channel.entryScheme ??
+                                                                              "http")
+                                                                            : (channel.transportProtocol ??
+                                                                              "tcp")
                                                                         ).toUpperCase() +
                                                                             " " +
                                                                             channel.targetHost}
@@ -608,6 +619,18 @@ function App() {
                                                                     {channel.enabled
                                                                         ? "启用"
                                                                         : "禁用"}
+                                                                    {channel.applicationProtocol ===
+                                                                        "http" && (
+                                                                        <small>
+                                                                            {channel.httpState ===
+                                                                            "ready"
+                                                                                ? "代理入口就绪"
+                                                                                : channel.httpState ===
+                                                                                    "restart_required"
+                                                                                  ? "需要重启"
+                                                                                  : "资源不可用"}
+                                                                        </small>
+                                                                    )}
                                                                 </td>
                                                             </tr>
                                                         ),
@@ -665,12 +688,8 @@ function App() {
                                                                 <td>
                                                                     {mapping.localAddress ? (
                                                                         <code>
-                                                                            {(
-                                                                                mapping.transportProtocol ??
-                                                                                "tcp"
-                                                                            ).toUpperCase() +
-                                                                                " " +
-                                                                                mapping.localAddress}
+                                                                            {mapping.accessUrl ??
+                                                                                `${(mapping.transportProtocol ?? "tcp").toUpperCase()} ${mapping.localAddress}`}
                                                                         </code>
                                                                     ) : (
                                                                         <span className="agent-unavailable">

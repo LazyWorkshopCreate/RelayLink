@@ -2,12 +2,16 @@
 
 文档 ID：TST-001\
 状态：Active\
-版本：v1.33.0\
-更新日期：2026-10-05
+版本：v1.34.1\
+更新日期：2026-10-12
 
 2026-10-05 网站多页重构的静态构建、全站链接和浏览器证据单独记录在[网站重构验证](website-multipage-verification.md)，对应 A80–A84；本次不执行代理后端测试或线上发布。
 
 本文记录当前仓库可重复执行的验证证据，不替代 [需求文档](../requirements/README.md) 的验收标准，也不把未在目标环境运行的项目标记为通过。
+
+## 2026-10-12 HTTP/HTTPS 反向代理
+
+核心运行接入已实现：协议 v5、目标 Agent YARP 2.3.0/Kestrel 虚拟传输、公网 HTTP/HTTPS、强制内层 TLS 的互访 HTTP/HTTPS、Host/Origin 校验及覆写、来源上下文、重启激活及只读状态。HTTP 完整证据、四入口实际 Server/Agent 进程和未覆盖的目标环境范围见 [HTTP 验证记录](http-reverse-proxy-verification.md)。Windows Release 单元 125/125、含真实 v3/v4 发行包的完整集成 87/87、HTTP 专项 23/23 无跳过通过，前端和网站检查通过。de76df7 的五项跨平台 CI 通过；后续入口中间链独立补充及最终 SHA 核对见 HTTP 验证记录。旧文档阶段的“未实现/仅文档”结论由本轮实现证据替代，REQ-001N 为 Accepted，未因本机基线通过自动标为 Done；暂不发布。
 
 ## 2026-10-05 v3 客户端兼容修复
 

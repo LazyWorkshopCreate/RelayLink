@@ -5,7 +5,7 @@ namespace RelayLink.Transport;
 
 public sealed class FrameWriter(Stream stream, TimeSpan? blockedWriteTimeout = null, byte protocolVersion = ProtocolConstants.Version)
 {
-    public byte ProtocolVersion { get; } = protocolVersion is 3 or ProtocolConstants.Version
+    public byte ProtocolVersion { get; } = protocolVersion is 3 or 4 or ProtocolConstants.Version
         ? protocolVersion : throw new ArgumentOutOfRangeException(nameof(protocolVersion));
     private readonly SemaphoreSlim writeLock = new(1, 1);
     private readonly TimeSpan blockedWriteTimeout = blockedWriteTimeout ?? TimeSpan.FromSeconds(120);

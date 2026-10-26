@@ -222,6 +222,7 @@ public sealed class ProxyListenerService(ServerRuntime runtime, PendingConnectio
             { outcome = "security_group_denied"; caller?.Dispose(); return; }
             if (!runtime.Sessions.TryGet(client.ClientId, out var session) || session is not { IsReady: true }) { outcome = "agent_offline"; caller?.Dispose(); return; }
             if (channel.TransportProtocol == "udp" && session.ProtocolVersion < 4) { outcome = "udp_not_supported"; caller?.Dispose(); return; }
+            if (channel.ApplicationProtocol == "http" && !session.IsHttpReady(channel)) { outcome = "http_unavailable"; caller?.Dispose(); return; }
             globalHeld = await globalLimit.WaitAsync(0, cancellationToken); if (!globalHeld) { caller?.Dispose(); return; }
             clientHeld = await clientLimits[client.ClientId].WaitAsync(0, cancellationToken); if (!clientHeld) { caller?.Dispose(); return; }
             channelHeld = await binding.ChannelLimit.WaitAsync(0, cancellationToken); if (!channelHeld) { caller?.Dispose(); return; }
@@ -230,7 +231,7 @@ public sealed class ProxyListenerService(ServerRuntime runtime, PendingConnectio
             pending = pendingConnections.Create(session, channel, caller, TimeSpan.FromSeconds(runtime.Configuration.Server.Limits.OpenTimeoutSeconds), connection.ConnectionId);
             phase = "open_sent";
             logger.LogInformation("Proxy {ConnectionId} opened for {ClientId}/{ChannelId}.", pending.ConnectionId, client.ClientId, channel.ChannelId);
-            await session.SendAsync(new Frame(FrameType.Open, JsonProtocolSerializer.Serialize(new OpenMessage(session.SessionId, pending.ConnectionId, channel.ChannelId, session.ConfigVersion, pending.Token, runtime.Configuration.Server.Limits.OpenTimeoutSeconds * 1000))), cancellationToken);
+            await session.SendAsync(new Frame(FrameType.Open, JsonProtocolSerializer.Serialize(new OpenMessage(session.SessionId, pending.ConnectionId, channel.ChannelId, session.ConfigVersion, pending.Token, runtime.Configuration.Server.Limits.OpenTimeoutSeconds * 1000, channel.ApplicationProtocol == "http" ? new HttpIngressContext("public", channel.Http!.PublicEntryScheme, connection.SourceAddress?.ToString(), PolicyHash: HttpProxyPolicy.Hash(ConfigurationSnapshotFactory.ToHttpSnapshot(channel))) : null), session.ProtocolVersion)), cancellationToken);
             using var openTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, session.LifetimeToken);
             openTimeout.CancelAfter(TimeSpan.FromSeconds(runtime.Configuration.Server.Limits.OpenTimeoutSeconds));
             var tunnel = await pending.WaitForTunnelAsync(openTimeout.Token);

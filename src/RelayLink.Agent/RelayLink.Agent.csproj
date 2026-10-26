@@ -9,6 +9,7 @@
     <!-- Local test outputs must never become Web SDK publish content. -->
     <Content Remove="artifacts/**" />
     <None Remove="artifacts/**" />
+    <PackageReference Include="Yarp.ReverseProxy" Version="2.3.0" />
     <ProjectReference Include="../RelayLink.Protocol/RelayLink.Protocol.csproj" />
     <ProjectReference Include="../RelayLink.Transport/RelayLink.Transport.csproj" />
     <ProjectReference Include="../RelayLink.Logging/RelayLink.Logging.csproj" />

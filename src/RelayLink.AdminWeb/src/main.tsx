@@ -65,6 +65,10 @@ type Channel = {
     targetPort: number;
     maxConnections: number;
     targetConnectTimeoutSeconds: number;
+    applicationProtocol?: 'raw' | 'http';
+    httpState?: string | null;
+    entryScheme?: 'http' | 'https' | null;
+    accessUrl?: string | null;
     transportProtocol?: 'tcp' | 'udp';
     udpIdleTimeoutSeconds?: number;
     pendingConnections: number;
@@ -76,6 +80,10 @@ type Channel = {
     targetLastResult?: string;
 };
 type Mapping = {
+    applicationProtocol?: 'raw' | 'http';
+    httpState?: string | null;
+    entryScheme?: 'http' | 'https' | null;
+    accessUrl?: string | null;
     transportProtocol?: 'tcp' | 'udp';
     mappingId: string;
     enabled: boolean;
@@ -1149,8 +1157,17 @@ export function App() {
                                                         </td>
                                                         <td className="mono">
                                                             {ch.authorizedClientsOnly
-                                                                ? `${(ch.transportProtocol ?? 'tcp').toUpperCase()} · 仅客户端互访 · ${ch.endToEndEncryptionEnabled !== false ? '加密' : '明文'}`
-                                                                : `${(ch.transportProtocol ?? 'tcp').toUpperCase()} ${ch.listenAddress}:${ch.listenPort}`}
+                                                                ? `${(ch.applicationProtocol === 'http' ? (ch.entryScheme ?? 'http') : (ch.transportProtocol ?? 'tcp')).toUpperCase()} · 仅客户端互访 · ${ch.endToEndEncryptionEnabled !== false ? '加密' : '明文'}`
+                                                                : `${(ch.applicationProtocol === 'http' ? (ch.entryScheme ?? 'http') : (ch.transportProtocol ?? 'tcp')).toUpperCase()} ${ch.listenAddress}:${ch.listenPort}`}
+                                                            {ch.applicationProtocol === 'http' && (
+                                                                <small>
+                                                                    {ch.httpState === 'ready'
+                                                                        ? '代理入口就绪'
+                                                                        : ch.httpState === 'restart_required'
+                                                                          ? '需要重启'
+                                                                          : '代理入口不可用'}
+                                                                </small>
+                                                            )}
                                                             {ch.securityGroupId && (
                                                                 <small>安全组：{ch.securityGroupId}</small>
                                                             )}
@@ -1332,7 +1349,8 @@ export function App() {
                                                             </td>
                                                             <td className="mono">
                                                                 {mapping.available && mapping.localPort
-                                                                    ? `${(mapping.transportProtocol ?? 'tcp').toUpperCase()} ${mapping.localAddress || '127.0.0.1'}:${mapping.localPort}`
+                                                                    ? (mapping.accessUrl ??
+                                                                      `${(mapping.transportProtocol ?? 'tcp').toUpperCase()} ${mapping.localAddress || '127.0.0.1'}:${mapping.localPort}`)
                                                                     : '—'}
                                                             </td>
                                                             <td

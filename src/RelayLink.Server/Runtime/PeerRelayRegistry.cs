@@ -38,6 +38,16 @@ public sealed class PeerRelayRegistry(ServerRuntime runtime, MetricsRegistry met
             await RejectAsync(caller, request.RequestId, ErrorCode.ChannelUnavailable, cancellationToken);
             return;
         }
+        HttpIngressContext? httpIngress = null;
+        if (targetChannel.ApplicationProtocol == "http")
+        {
+            var address = caller.PeerAddresses.SingleOrDefault(address => address.MappingId == mapping.MappingId);
+            if (caller.ProtocolVersion < 5 || !targetSession.IsHttpReady(targetChannel) || !targetChannel.EndToEndEncryptionEnabled || address is null)
+            { await RejectAsync(caller, request.RequestId, ErrorCode.ChannelUnavailable, cancellationToken); return; }
+            var http = targetChannel.Http!;
+            httpIngress = new HttpIngressContext("peer", http.PeerEntryScheme, CallerClientId: caller.ClientId, MappingId: mapping.MappingId,
+                EntryAuthority: $"{http.PeerAuthorityHost}:{address.LocalPort}", PolicyHash: HttpProxyPolicy.Hash(ConfigurationSnapshotFactory.ToHttpSnapshot(targetChannel)));
+        }
         if (!await limit.WaitAsync(0, cancellationToken))
         {
             await RejectAsync(caller, request.RequestId, ErrorCode.CapacityExceeded, cancellationToken);
@@ -79,8 +89,8 @@ public sealed class PeerRelayRegistry(ServerRuntime runtime, MetricsRegistry met
         }
         try
         {
-            await targetSession.SendAsync(new Frame(FrameType.PeerOpen, JsonProtocolSerializer.Serialize(new PeerOpenMessage(relay.ConnectionId, targetSession.SessionId, caller.ClientId, targetChannel.ChannelId, relay.TargetToken, targetChannel.EndToEndEncryptionEnabled, targetChannel.TransportProtocol), targetSession.ProtocolVersion)), cancellationToken);
-            await caller.SendAsync(new Frame(FrameType.PeerOpenGranted, JsonProtocolSerializer.Serialize(new PeerOpenGrantedMessage(request.RequestId, relay.ConnectionId, caller.SessionId, relay.CallerToken, targetChannel.EndToEndEncryptionEnabled, targetChannel.TransportProtocol), caller.ProtocolVersion)), cancellationToken);
+            await targetSession.SendAsync(new Frame(FrameType.PeerOpen, JsonProtocolSerializer.Serialize(new PeerOpenMessage(relay.ConnectionId, targetSession.SessionId, caller.ClientId, targetChannel.ChannelId, relay.TargetToken, targetChannel.EndToEndEncryptionEnabled, targetChannel.TransportProtocol, httpIngress), targetSession.ProtocolVersion)), cancellationToken);
+            await caller.SendAsync(new Frame(FrameType.PeerOpenGranted, JsonProtocolSerializer.Serialize(new PeerOpenGrantedMessage(request.RequestId, relay.ConnectionId, caller.SessionId, relay.CallerToken, targetChannel.EndToEndEncryptionEnabled, targetChannel.TransportProtocol, httpIngress), caller.ProtocolVersion)), cancellationToken);
             _ = RunAsync(relay);
         }
         catch

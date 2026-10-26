@@ -18,7 +18,8 @@ internal sealed class PeerSessionCoordinator(
     FrameWriter controlWriter,
     ILogger logger,
     AgentConnectionQuota quota,
-    CancellationToken sessionToken) : IAsyncDisposable
+    CancellationToken sessionToken,
+    HttpProxyRuntime? httpProxy = null) : IAsyncDisposable
 {
     private readonly ConcurrentDictionary<Guid, TaskCompletionSource<PeerOpenGrantedMessage>> requests = new();
     private readonly Dictionary<string, LocalBinding> listeners = new(StringComparer.Ordinal);
@@ -188,13 +189,19 @@ internal sealed class PeerSessionCoordinator(
                     if (!tls.IsEncrypted) throw new AuthenticationException("Peer TLS is not encrypted.");
                     peerStream = tls;
                 }
+                if (mapping.ApplicationProtocol == "http" && (mapping.Http is null || grant.HttpIngress is null || !grant.EndToEndEncryptionEnabled ||
+                    grant.HttpIngress.AccessKind != "peer" || grant.HttpIngress.CallerClientId != agent.ClientId || grant.HttpIngress.MappingId != mapping.MappingId ||
+                    grant.HttpIngress.Scheme != mapping.Http.Scheme || grant.HttpIngress.PolicyHash != mapping.Http.PolicyHash ||
+                    grant.HttpIngress.EntryAuthority != $"{mapping.Http.AuthorityHost}:{((IPEndPoint)caller!.LocalEndPoint!).Port}"))
+                    throw new ProtocolException("HTTP mapping context mismatch.");
+                if (mapping.ApplicationProtocol != "http" && grant.HttpIngress is not null) throw new ProtocolException("Raw mapping received HTTP context.");
                 var challenge = new byte[32];
                 await peerStream.ReadExactlyAsync(challenge, deadline.Token);
-                var proof = ComputeProof(mapping.AccessSecret, agent.ClientId, mapping.TargetChannelId, grant.ConnectionId, grant.EndToEndEncryptionEnabled, challenge);
+                var proof = ComputeProof(mapping.AccessSecret, agent.ClientId, mapping.TargetChannelId, grant.ConnectionId, grant.EndToEndEncryptionEnabled, challenge, grant.HttpIngress);
                 await peerStream.WriteAsync(proof, deadline.Token);
                 var status = new byte[1];
                 await peerStream.ReadExactlyAsync(status, deadline.Token);
-                if (status[0] != 1) throw new IOException("Peer target was not ready.");
+                if (status[0] != (mapping.ApplicationProtocol == "http" ? 2 : 1)) throw new IOException("Peer target was not ready.");
                 lease.MarkActive();
                 deadline.CancelAfter(Timeout.InfiniteTimeSpan);
                 if (datagram is not null) await datagram.RelayAsync(peerStream, mapping.UdpIdleTimeoutSeconds, deadline.Token);
@@ -214,6 +221,10 @@ internal sealed class PeerSessionCoordinator(
         var current = Volatile.Read(ref snapshot);
         var channel = current.Channels.SingleOrDefault(candidate => candidate.ChannelId == open.ChannelId && candidate.Enabled && candidate.AuthorizedClientsOnly);
         if (channel is null || string.IsNullOrWhiteSpace(channel.AccessSecret) || channel.EndToEndEncryptionEnabled != open.EndToEndEncryptionEnabled || channel.TransportProtocol != open.TransportProtocol) return;
+        if (channel.ApplicationProtocol == "http" && (!agent.UseTls || !open.EndToEndEncryptionEnabled || httpProxy is null || !httpProxy.IsReady(channel) ||
+            open.HttpIngress is null || open.HttpIngress.AccessKind != "peer" || open.HttpIngress.CallerClientId != open.CallerClientId ||
+            open.HttpIngress.PolicyHash != HttpProxyPolicy.Hash(channel) || open.HttpIngress.Scheme != channel.Http!.PeerEntryScheme)) return;
+        if (channel.ApplicationProtocol != "http" && open.HttpIngress is not null) return;
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(sessionToken);
         deadline.CancelAfter(TimeSpan.FromSeconds(20));
         try
@@ -237,9 +248,17 @@ internal sealed class PeerSessionCoordinator(
             await peerStream.WriteAsync(challenge, deadline.Token);
             var provided = new byte[32];
             await peerStream.ReadExactlyAsync(provided, deadline.Token);
-            var expected = ComputeProof(channel.AccessSecret, open.CallerClientId, channel.ChannelId, open.ConnectionId, open.EndToEndEncryptionEnabled, challenge);
+            var expected = ComputeProof(channel.AccessSecret, open.CallerClientId, channel.ChannelId, open.ConnectionId, open.EndToEndEncryptionEnabled, challenge, open.HttpIngress);
             if (!CryptographicOperations.FixedTimeEquals(provided, expected)) throw new AuthenticationException("Peer access proof was invalid.");
 
+            if (channel.ApplicationProtocol == "http")
+            {
+                await peerStream.WriteAsync(new byte[] { 2 }, deadline.Token);
+                lease.MarkActive(); deadline.CancelAfter(Timeout.InfiniteTimeSpan);
+                await using var application = new PeerApplicationStream(peerStream);
+                await httpProxy!.ServeAsync(channel, application, open.HttpIngress!, sessionToken, open.ConnectionId);
+                return;
+            }
             if (channel.TransportProtocol == "udp")
             {
                 using var targetTimeout = CancellationTokenSource.CreateLinkedTokenSource(deadline.Token);
@@ -286,9 +305,10 @@ internal sealed class PeerSessionCoordinator(
         catch { client.Dispose(); throw; }
     }
 
-    private static byte[] ComputeProof(string base64Secret, string callerId, string channelId, Guid connectionId, bool encryptionEnabled, byte[] challenge)
+    internal static byte[] ComputeProof(string base64Secret, string callerId, string channelId, Guid connectionId, bool encryptionEnabled, byte[] challenge, HttpIngressContext? httpIngress = null)
     {
         var context = Encoding.UTF8.GetBytes($"RelayLink peer proof v2\0{callerId}\0{channelId}\0{connectionId:N}\0{(encryptionEnabled ? "tls" : "plain")}\0");
+        if (httpIngress is not null) context = Encoding.UTF8.GetBytes("RelayLink HTTP peer proof v1\0" + Encoding.UTF8.GetString(context) + Encoding.UTF8.GetString(JsonProtocolSerializer.Serialize(httpIngress)));
         var payload = new byte[context.Length + challenge.Length];
         context.CopyTo(payload, 0);
         challenge.CopyTo(payload, context.Length);

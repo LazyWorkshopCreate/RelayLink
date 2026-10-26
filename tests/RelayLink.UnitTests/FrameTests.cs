@@ -30,7 +30,7 @@ public sealed class FrameTests
     [Theory]
     [InlineData(1)]
     [InlineData(2)]
-    [InlineData(5)]
+    [InlineData(6)]
     public async Task Reader_rejects_unsupported_protocol_version(byte version)
     {
         await using var stream = new MemoryStream(new byte[] { (byte)'N', (byte)'T', (byte)'P', (byte)'1', version, (byte)FrameType.Register, 0, 0, 0, 0, 0, 0 });

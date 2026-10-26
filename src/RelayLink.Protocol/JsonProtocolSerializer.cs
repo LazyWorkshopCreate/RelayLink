@@ -19,22 +19,24 @@ public static class JsonProtocolSerializer
     public static byte[] Serialize<T>(T value, byte protocolVersion)
     {
         if (protocolVersion == ProtocolConstants.Version) return Serialize(value);
-        if (protocolVersion != 3) throw new ProtocolException("Unsupported protocol version.");
+        if (protocolVersion is not (3 or 4)) throw new ProtocolException("Unsupported protocol version.");
         var node = JsonSerializer.SerializeToNode(value, Options);
-        RemoveUdpFields(node);
+        RemoveNewFields(node, protocolVersion);
         return JsonSerializer.SerializeToUtf8Bytes(node, Options);
     }
 
-    private static void RemoveUdpFields(JsonNode? node)
+    private static void RemoveNewFields(JsonNode? node, byte version)
     {
         if (node is JsonObject obj)
         {
-            obj.Remove("transportProtocol");
-            obj.Remove("udpIdleTimeoutSeconds");
-            foreach (var property in obj) RemoveUdpFields(property.Value);
+            obj.Remove("applicationProtocol");
+            obj.Remove("http");
+            obj.Remove("httpIngress");
+            if (version == 3) { obj.Remove("transportProtocol"); obj.Remove("udpIdleTimeoutSeconds"); }
+            foreach (var property in obj) RemoveNewFields(property.Value, version);
         }
         else if (node is JsonArray array)
-            foreach (var item in array) RemoveUdpFields(item);
+            foreach (var item in array) RemoveNewFields(item, version);
     }
 
     public static T Deserialize<T>(ReadOnlySpan<byte> payload)

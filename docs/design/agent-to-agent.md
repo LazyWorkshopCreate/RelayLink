@@ -2,11 +2,13 @@
 
 文档 ID：DES-002\
 状态：Draft\
-版本：v1.7.0\
-更新日期：2026-10-05\
+版本：v1.8.0\
+更新日期：2026-10-12\
 调研日期：2026-09-17
 
 ## 1. 范围与调研结论
+
+HTTP/HTTPS 互访新增方向见 [REQ-001N](../requirements/2026-10-12-http-reverse-proxy.md)、[DES-008](http-reverse-proxy.md) 和 [ADR-0026](../adr/0026-http-proxy-over-tcp-tunnels.md)：目标 Agent 在内层 TLS/访问证明后处理 HTTP，支持 Host/Origin 覆写，HTTP 互访禁止关闭内层加密，浏览器 HTTPS 可嵌套其中。核心运行接入已实现，实际验证见 [HTTP 验证](../testing/http-reverse-proxy-verification.md)；本文下述 raw TCP/UDP 的既有可选加密及协议行为保持，新 HTTP 的能力、证明与就绪字段不得静默套用于旧端。
 
 `Register`/`ConfigUpdate` 通过独立控制入口下发配置；普通 `Open`/`BindData` 路径在数据入口完成绑定后直接复制明文 TCP 字节，服务端可见业务数据。互访路径必须额外验证访问方身份，并按目标通道选择是否提供业务流端到端加密。
 
@@ -43,7 +45,7 @@ Windows Schannel 在运行时需把文件私钥加载到当前用户密钥提供
 
 ## 3. 协议与状态
 
-沿用 `NTP1` magic，线协议当前为 `4`；版本 3 加入 `endToEndEncryptionEnabled`，版本 4 增加 `transportProtocol` 确认和 UDP 快照字段，两端必须按同一模式处理。新版 Server 兼容 v3 Agent 的 TCP 互访，各端响应与数据帧头使用其会话版本；v3 响应不包含 UDP 增量字段，配置摘要遵循旧结构。UDP 请求要求访问方与目标方均为 v4，否则返回 ChannelUnavailable；未知版本与连接内版本切换被拒绝。见 [ADR-0025](../adr/0025-v3-client-compatibility.md)。已实现帧：
+沿用 `NTP1` magic，线协议当前为 `5`；版本 3 加入 `endToEndEncryptionEnabled`，版本 4 增加 `transportProtocol` 确认和 UDP 快照字段，两端必须按同一模式处理。新版 Server 兼容 v3 Agent 的 TCP 互访，各端响应与数据帧头使用其会话版本；v3 响应不包含 UDP 增量字段，配置摘要遵循旧结构。UDP 请求要求访问方与目标方均支持 v4 或以后版本，否则返回 ChannelUnavailable；未知版本与连接内版本切换被拒绝。见 [ADR-0025](../adr/0025-v3-client-compatibility.md)。v5 增加 HTTP 上下文、独立证明域与入口就绪 byte=2；证明后由 PeerApplicationStream 解开既有内层 TLS 长度应用记录，再将浏览器字节交给目标 HTTP 入口；raw 就绪 byte=1 及应用帧保持。已实现帧：
 
 | 帧 | 发送方向 | 作用 |
 |---|---|---|

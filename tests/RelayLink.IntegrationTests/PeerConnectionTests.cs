@@ -767,7 +767,7 @@ public sealed class PeerConnectionTests
     }
 #endif
 
-    private sealed class Fixture : IDisposable
+    internal sealed class Fixture : IDisposable
     {
         private readonly string directory = Path.Combine(Path.GetTempPath(), $"relaylink-peer-{Guid.NewGuid():N}");
         private readonly TcpListener target = new(IPAddress.Loopback, 0);
@@ -808,7 +808,8 @@ public sealed class PeerConnectionTests
             DashboardPort = AllocatePort();
         }
 
-        public async Task StartAsync(bool startCallerAgent = true, bool mapDashboard = false, bool udp = false, bool encryption = true, string? callerAssembly = null, string? targetAssembly = null)
+        public async Task StartAsync(bool startCallerAgent = true, bool mapDashboard = false, bool udp = false, bool encryption = true, string? callerAssembly = null, string? targetAssembly = null,
+            HttpProxyOptions? httpOptions = null, int? httpTargetPort = null, Action<string>? prepareHttpResources = null)
         {
             var clients = Path.Combine(directory, "clients");
             var visitedDirectory = Path.Combine(directory, "visited");
@@ -843,6 +844,13 @@ public sealed class PeerConnectionTests
             { AuthorizedClientsOnly = true, AccessSecret = accessSecret, TransportProtocol = udp ? "udp" : "tcp", EndToEndEncryptionEnabled = encryption },
              new ChannelConfiguration("private-b", "Private B", true, "127.0.0.1", AllocatePort(), "127.0.0.1", targetPortB, 10, 5)
             { AuthorizedClientsOnly = true, AccessSecret = accessSecretB } };
+            if (httpOptions is not null)
+            {
+                visitedChannels[0] = visitedChannels[0] with { ApplicationProtocol = "http", Http = httpOptions, TargetPort = httpTargetPort!.Value };
+                visitedChannels.Add(new ChannelConfiguration("web-public", "Public Web", true, "127.0.0.1", ProxyPort,
+                    "127.0.0.1", httpTargetPort.Value, 10, 5) { ApplicationProtocol = "http", Http = httpOptions });
+                prepareHttpResources?.Invoke(Path.Combine(visitedState.FullName, "http-resources"));
+            }
             if (mapDashboard)
                 visitedChannels.Add(new ChannelConfiguration("server-dashboard", "Server Dashboard", true, "127.0.0.1", AllocatePort(), "127.0.0.1", DashboardPort, 10, 5)
                 { AuthorizedClientsOnly = true, AccessSecret = dashboardAccessSecret });
@@ -881,7 +889,7 @@ public sealed class PeerConnectionTests
             if (startCallerAgent) StartProcess(callerAssembly ?? typeof(ControlSessionWorker).Assembly.Location, Path.Combine(callerDirectory, "agent.json"));
         }
 
-        public async Task WaitOnlineAsync(CancellationToken token, int expected = 2)
+        public async Task WaitOnlineAsync(CancellationToken token, int expected = 2, bool requireMappings = true)
         {
             using var http = new HttpClient();
             while (!token.IsCancellationRequested)
@@ -890,7 +898,7 @@ public sealed class PeerConnectionTests
                 {
                     using var response = await http.GetAsync($"http://127.0.0.1:{DashboardPort}/api/v1/overview", token);
                     var json = await response.Content.ReadFromJsonAsync<JsonElement>(cancellationToken: token);
-                    if (json.GetProperty("clientsOnline").GetInt32() == expected && (expected == 1 || (TryReadPort("to-visited", out _) && TryReadPort("to-visited-b", out _))))
+                    if (json.GetProperty("clientsOnline").GetInt32() == expected && (expected == 1 || !requireMappings || (TryReadPort("to-visited", out _) && TryReadPort("to-visited-b", out _))))
                     {
                         if (expected == 1) return;
                         var targetStatus = await http.GetFromJsonAsync<JsonElement>($"http://127.0.0.1:{VisitedDashboardPort}/api/v2/status", token);

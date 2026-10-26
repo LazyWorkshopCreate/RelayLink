@@ -99,6 +99,8 @@ public sealed record ChannelConfiguration(
     int MaxConnections,
     int TargetConnectTimeoutSeconds)
 {
+    public string ApplicationProtocol { get; init; } = "raw";
+    public RelayLink.Protocol.HttpProxyOptions? Http { get; init; }
     public string TransportProtocol { get; init; } = "tcp";
     public int UdpIdleTimeoutSeconds { get; init; } = 60;
     public IReadOnlyList<string> Tags { get; init; } = [];
@@ -114,6 +116,8 @@ public sealed record ChannelConfiguration(
         ChannelId == other.ChannelId &&
         DisplayName == other.DisplayName &&
         Enabled == other.Enabled &&
+        ApplicationProtocol == other.ApplicationProtocol &&
+        RelayLink.Protocol.JsonProtocolSerializer.Serialize(Http).SequenceEqual(RelayLink.Protocol.JsonProtocolSerializer.Serialize(other.Http)) &&
         TransportProtocol == other.TransportProtocol &&
         UdpIdleTimeoutSeconds == other.UdpIdleTimeoutSeconds &&
         ListenAddress == other.ListenAddress &&

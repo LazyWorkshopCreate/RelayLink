@@ -27,7 +27,7 @@ public sealed class FrameReader(Stream stream, TimeSpan? partialFrameTimeout = n
             throw new ProtocolException("Invalid frame magic.");
         }
 
-        if (header[4] is not (3 or ProtocolConstants.Version) ||
+        if (header[4] is not (3 or 4 or ProtocolConstants.Version) ||
             (ProtocolVersion is { } version && header[4] != version))
         {
             throw new ProtocolException("Unsupported protocol version.");

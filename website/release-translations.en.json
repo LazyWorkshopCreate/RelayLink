@@ -1,4 +1,48 @@
 {
+  "v0.1.0-rc.10": {
+    "title": "RelayLink v0.1.0-rc.10",
+    "intro": "A release candidate that adds HTTP/HTTPS application proxying on the target Agent. Public listeners and encrypted peer access are both checked and forwarded to a fixed web upstream, with tighter WebSocket origin checks, idle timeouts, and client-address header handling.",
+    "sections": [
+      {
+        "title": "Highlights",
+        "items": [
+          "Adds an HTTP application protocol. The target Agent forwards authorized HTTP/1.1 requests through a Kestrel virtual ingress and YARP, including HTTP/HTTPS, WebSocket, SSE, and streaming bodies. The business ingress does not open an extra operating-system listener, and neither Server nor the caller Agent parses HTTP.",
+          "A public channel is accepted by Server and delivered to the target Agent over the data tunnel. Authorized peer access still uses the caller loopback and inner TLS between Agents. Both paths validate and rewrite Host and Origin using the channel policy.",
+          "PEM certificates for HTTPS ingress keep their intermediate chain and pass it to Kestrel ServerCertificateChain, without relying on system trust or AIA downloads.",
+          "WebSocket Upgrade tokens are recognized individually when separated by commas. Public and peer channels both require a non-empty Origin allowlist. An empty list rejects WebSocket handshakes, including those with a missing Origin or the same origin.",
+          "Public WebSocket idle timeout now defaults to 300 seconds and can no longer be set to 0. Peer channels may still set 0 explicitly to disable idle close. A maxWebSocketConnections value of 0 uses the channel connection limit.",
+          "Forwarded, X-Forwarded-*, X-Real-IP, True-Client-IP, X-Client-IP, and CF-Connecting-IP are always removed, then forwarding headers are rebuilt from the authenticated ingress. stripRequestHeaders only adds exact header names; an empty list or a null entry cannot re-enable the built-in set. Revoking, disabling, or changing a channel disposes and removes its HTTP host."
+        ]
+      },
+      {
+        "title": "Upgrade and compatibility",
+        "items": [
+          "NTP1 is now v5. Server accepts v3/v4/v5 and can be upgraded first. Existing v3 Agents keep ordinary and authorized peer TCP, and v4 Agents keep TCP/UDP. HTTP is sent only to v5, and the target Agent must be v5. HTTP peer access also requires a v5 caller with endToEndEncryptionEnabled=true. Versions 1/2, unknown versions, and version changes within a connection are rejected. New Agents do not automatically fall back when connecting to an old Server.",
+          "JSON schemaVersion is unchanged. Channels without applicationProtocol stay raw. HTTP channels must use TCP. HTTP policy and certificates take effect after the related Agent restarts; there is no hot reload.",
+          "Breaking configuration changes: publicAllowedOrigins and peerAllowedOrigins must both be non-empty Origin allowlists. An empty list can no longer skip origin checks. Public webSocketActivityTimeoutSeconds can no longer be 0; omitting it defaults to 300 seconds. Peer channels may still set 0 explicitly. Before upgrading, fill in the allowlists and check the public idle timeout using the HTTP operations guide.",
+          "Back up configuration, identity, Server SQLite data, and certificates before upgrading. Public HTTP has no browser TLS and is only for protected networks or tests that explicitly accept plaintext. Ordinary TCP/UDP behavior remains that of v0.1.0-rc.9."
+        ]
+      },
+      {
+        "title": "Verification and limitations",
+        "items": [
+          "HTTP proxying and these security fixes passed 137 local unit tests and 81 integration tests with peer TLS enabled. Coverage includes origin rejection, HTTP status lines assembled from partial reads, WebSocket idle and concurrency limits, client-address header stripping, host disposal, and HTTPS intermediate chains. This note does not treat an unreplayed v3/v4 binary matrix or unrun cross-platform CI as completed acceptance.",
+          "Real-browser login, cookies, CSRF, and long-running capacity checks remain outstanding. The HTTP requirement stays Accepted and the design stays Draft. HTTP/2, HTTP/3, gRPC, and CONNECT forward proxying are unsupported, and response bodies are not rewritten.",
+          "Windows installers are unsigned; macOS packages are unsigned and not notarized. Requirements, design, and ADR review status remain as marked in their respective documents."
+        ]
+      },
+      {
+        "title": "Release assets",
+        "items": [
+          "Self-contained Linux x64 and Windows x64 Server archives",
+          "Self-contained Linux x64 Agent archive",
+          "Self-contained and framework-dependent Windows x64 Agent archives and installers",
+          "Self-contained macOS Intel and Apple Silicon Agent archives",
+          "SHA256SUMS checksum manifest"
+        ]
+      }
+    ]
+  },
   "v0.1.0-rc.9": {
     "title": "RelayLink v0.1.0-rc.9",
     "intro": "A release candidate adding UDP forwarding and a multipage product website. This rebuilt release includes v3 client compatibility; earlier assets under the same version do not. Download again and verify the latest SHA256SUMS.",

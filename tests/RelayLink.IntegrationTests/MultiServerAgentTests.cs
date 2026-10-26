@@ -150,6 +150,7 @@ public sealed class MultiServerAgentTests
                 new RegisterAcceptedMessage(session, version, snapshot, 1, 8))), token);
             Assert.Equal(FrameType.ConfigAck, (await reader.ReadAsync(ProtocolConstants.MaxControlPayloadLength, token))?.Type);
             await writer.WriteAsync(new Frame(FrameType.Ready, JsonProtocolSerializer.Serialize(new ReadyMessage(session))), token);
+            Assert.Equal(FrameType.HttpStatus, (await reader.ReadAsync(ProtocolConstants.MaxControlPayloadLength, token))?.Type);
             await inject.Task.WaitAsync(token);
             await writer.WriteAsync(new Frame(FrameType.ConfigUpdate, JsonProtocolSerializer.Serialize(
                 new ConfigUpdateMessage(session, "incorrect-version", snapshot))), token);

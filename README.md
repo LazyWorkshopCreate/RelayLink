@@ -26,6 +26,8 @@ Server 兼容 v3 Agent 的 TCP 连接，可先升级服务端；UDP 需要相关
 
 RelayLink 不提供 UDP 广播/组播、VPN/IP 层组网或 P2P 打洞，也不替代目标服务自身的身份认证。TCP 连接中断后不会重放业务请求或恢复原连接。
 
+新增 HTTP/HTTPS 反向代理模式（协议 v5）：公网与加密互访均由目标 Agent 的 YARP/Kestrel 虚拟入口执行 Host/Origin 策略，保留原始 TCP/UDP。公网浏览器 TLS 在目标 Agent 终止，HTTP 互访强制保留内层 TLS；配置、证书与升级方式见 [HTTP 使用指南](docs/operations/http-reverse-proxy.md)，实际验证及边界见 [验收记录](docs/testing/http-reverse-proxy-verification.md)。
+
 ## 快速开始
 
 Linux Docker 主机可使用 `pwsh ./scripts/start-server-compose.ps1 -AgentServerHost <Agent 可达地址>` 一键构建并启动服务端；也可原生部署到 Linux 或 Windows。随后在管理页面创建客户端、下载专属 Agent 配置并安装 Agent，待客户端在线后添加通道。完整步骤见[安装与使用指南](docs/operations/installation-and-usage.md)，Compose 参数和数据目录见 [Docker Compose 部署说明](deploy/docker/README.md)。
@@ -73,6 +75,7 @@ RelayLink/
 - [文档索引](docs/README.md)
 - [需求与功能边界](docs/requirements/README.md)
 - [技术设计](docs/design/technical-design.md)
+- [HTTP/HTTPS 反向代理需求与设计（规划，未实现）](docs/design/http-reverse-proxy.md)
 - [客户端安全互访设计](docs/design/agent-to-agent.md)
 - [配置示例](config/examples/)
 - [安装与使用指南](docs/operations/installation-and-usage.md)

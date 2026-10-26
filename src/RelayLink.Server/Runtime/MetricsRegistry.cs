@@ -66,6 +66,7 @@ public sealed class ChannelMetrics
     public void PeerClosed() => Interlocked.Decrement(ref peerActive);
     public void AddPeerCiphertextToTarget(int bytes) => Interlocked.Add(ref peerCiphertextToTarget, bytes);
     public void AddPeerCiphertextToCaller(int bytes) => Interlocked.Add(ref peerCiphertextToCaller, bytes);
+    public void MarkHttpIngressReady() => Volatile.Write(ref targetResult, new TargetConnectionResult("http_ingress_ready", DateTimeOffset.UtcNow));
     public void MarkTargetSuccess() => Volatile.Write(ref targetResult, new TargetConnectionResult("success", DateTimeOffset.UtcNow));
     public void MarkTargetFailure(string errorCode) => Volatile.Write(ref targetResult, new TargetConnectionResult(errorCode, DateTimeOffset.UtcNow));
     public void ResetTarget() => Volatile.Write(ref targetResult, null);

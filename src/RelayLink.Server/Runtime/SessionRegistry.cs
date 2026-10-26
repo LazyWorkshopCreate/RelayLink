@@ -50,6 +50,10 @@ public sealed class Session(Guid sessionId, string clientId, DateTimeOffset conn
     private readonly SemaphoreSlim configUpdateLock = new(1, 1);
     private readonly object configAckLock = new();
     private readonly Queue<string> pendingConfigVersions = new();
+    private IReadOnlyList<HttpChannelStatus> httpStates = [];
+    public IReadOnlyList<HttpChannelStatus> HttpStates => Volatile.Read(ref httpStates);
+    public void SetHttpStates(IReadOnlyList<HttpChannelStatus> states) => Volatile.Write(ref httpStates, states.ToArray());
+    public bool IsHttpReady(ChannelConfiguration channel) => ProtocolVersion >= 5 && HttpStates.Any(state => state.ChannelId == channel.ChannelId && state.State == "ready" && state.PolicyHash == HttpProxyPolicy.Hash(ConfigurationSnapshotFactory.ToHttpSnapshot(channel)));
     private IReadOnlyList<PeerMappingAddress> peerAddresses = [];
 
     public void AttachControlWriter(FrameWriter writer) => ControlWriter = writer;
@@ -57,6 +61,7 @@ public sealed class Session(Guid sessionId, string clientId, DateTimeOffset conn
     public void SetConfigVersion(string version)
     {
         Volatile.Write(ref peerAddresses, []);
+        Volatile.Write(ref httpStates, []);
         Volatile.Write(ref configVersion, version);
     }
     public IReadOnlyList<PeerMappingAddress> PeerAddresses => Volatile.Read(ref peerAddresses);

@@ -17,6 +17,7 @@
 | [日志与诊断需求](2026-09-30-logging-and-diagnostics.md) | REQ-001K | Accepted | Server/Agent 文件日志、明确拒绝原因、诊断关联与敏感信息边界，A72–A74 |
 | [UDP 转发需求](2026-10-05-udp-forwarding.md) | REQ-001L | Draft | 普通/授权互访 UDP、配置和资源边界、A75–A79 |
 | [网站多页重构](2026-10-05-website-multipage.md) | REQ-001M | Accepted | 首页精简、使用/文档/发布列表与详情、A80–A84 |
+| [HTTP/HTTPS 反向代理](2026-10-12-http-reverse-proxy.md) | REQ-001N | Accepted | 保留 TCP 透传，公网与加密互访均支持目标 Agent HTTP/HTTPS 和 Host/Origin 策略，A85–A91；已实现基线，完整验收证据与目标环境缺口单列 |
 
 需求编号和验收编号沿用原文，不因拆分重排。当前存在两个历史 `A28`：一个属于 Windows 安装包升级，一个属于控制/数据入口验证；本次只做结构拆分，不改写既有编号语义。
 

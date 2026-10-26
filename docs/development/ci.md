@@ -2,8 +2,8 @@
 
 文档 ID：DEV-003\
 状态：Active\
-版本：v1.8.0\
-更新日期：2026-10-05
+版本：v1.9.0\
+更新日期：2026-10-12
 
 流水线分为[日常校验](../../.github/workflows/ci.yml)、[tag 发行](../../.github/workflows/release.yml)和 [GitHub Pages 站点部署](../../.github/workflows/pages.yml)三部分。推送到 `main` 或提交 Pull Request 时，在 Linux 与 Windows 上检查服务端前端的类型、组件测试和格式，以及 Agent 前端的构建和格式，再执行 .NET 单元和集成测试（包括 Agent 互访 TLS 测试）。同时在 GitHub 托管的 `macos-15-intel` 与 `macos-15` runner 上构建 Agent 前端，原生执行含互访 TLS 的集成测试，再发布并运行 `osx-x64`、`osx-arm64` Agent，检查 Mach-O 架构、配置、最小文件权限、launchd 启动与异常退出重启、只读状态页和端到端身份复用；测试脚本拒绝在非 GitHub-hosted runner 上操作系统目录。日常校验不创建 GitHub Release。.NET 测试自身仍会编译测试所需代码，但跳过前端的重复构建。
 
@@ -25,3 +25,7 @@ dotnet test tests/RelayLink.IntegrationTests/RelayLink.IntegrationTests.csproj -
 ```
 
 `EnableLegacyAgentTests=true` 编译并运行旧发行包矩阵，缺少环境变量会失败，不用当前源码冒充旧 Agent；常规 CI 不隐式下载私有资产。矩阵覆盖普通 TCP、旧端 UDP 拒绝，以及旧→旧、旧→新、新→旧的加密/明文 TCP 互访与半关闭。
+
+## HTTP v5 与旧 v4 二进制验证
+
+常规集成测试自动覆盖四种 HTTP/HTTPS 入口、目标虚拟传输、WebSocket/流式及证书/来源负例；HTTP 旧 v4 真二进制矩阵通过 EnableLegacyV4AgentTests=true 单独开启，资源路径为 RELAYLINK_LEGACY_V4_AGENT_ASSEMBLY，使用已校验 SHA256SUMS 的未修改 rc.9 Agent。与既有 EnableLegacyAgentTests 的 v3 矩阵可同时执行，缺资源不会静默跳过。命令与证据见 [HTTP 验证记录](../testing/http-reverse-proxy-verification.md)。

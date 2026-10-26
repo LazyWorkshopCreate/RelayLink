@@ -24,6 +24,8 @@ public enum FrameType : byte
     PeerBindAccepted = 20,
     PeerOpenRejected = 21,
     PeerMappingStatus = 22,
+    HttpStatus = 23,
+    HttpIngressReady = 24,
     Data = 32,
     Fin = 33,
     Reset = 34

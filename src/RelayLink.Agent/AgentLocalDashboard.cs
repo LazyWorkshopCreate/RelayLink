@@ -10,15 +10,27 @@ public sealed class AgentStatus(AgentConfiguration configuration)
     private AgentStatusSnapshot current = new(configuration.ClientId, false, null, [], []);
     public AgentStatusSnapshot Snapshot => Volatile.Read(ref current);
 
-    public void SetOnline(ClientConfigSnapshot configurationSnapshot, IReadOnlyList<PeerMappingAddress> addresses)
+    public void SetOnline(ClientConfigSnapshot configurationSnapshot, IReadOnlyList<PeerMappingAddress> addresses, IReadOnlyList<HttpChannelStatus>? httpStates = null,
+        IReadOnlyDictionary<string, string>? httpMappingStates = null)
     {
         var byId = addresses.ToDictionary(address => address.MappingId, StringComparer.Ordinal);
         var channels = configurationSnapshot.Channels.Select(channel => new AgentChannelView(
             channel.ChannelId, channel.DisplayName, channel.Enabled, channel.AuthorizedClientsOnly,
-            channel.EndToEndEncryptionEnabled, channel.TargetHost, channel.TargetPort) { TransportProtocol = channel.TransportProtocol }).ToArray();
+            channel.EndToEndEncryptionEnabled, channel.TargetHost, channel.TargetPort)
+            {
+                TransportProtocol = channel.TransportProtocol, ApplicationProtocol = channel.ApplicationProtocol,
+                HttpState = httpStates?.SingleOrDefault(state => state.ChannelId == channel.ChannelId)?.State,
+                EntryScheme = channel.Http is null ? null : channel.AuthorizedClientsOnly ? channel.Http.PeerEntryScheme : channel.Http.PublicEntryScheme
+            }).ToArray();
         var mappings = configurationSnapshot.OutboundMappings.Select(mapping => new AgentMappingView(
             mapping.MappingId, mapping.Enabled, mapping.TargetClientId, mapping.TargetChannelId,
-            byId.TryGetValue(mapping.MappingId, out var address) ? $"127.0.0.1:{address.LocalPort}" : null) { TransportProtocol = mapping.TransportProtocol }).ToArray();
+            byId.TryGetValue(mapping.MappingId, out var address) ? $"127.0.0.1:{address.LocalPort}" : null)
+            {
+                TransportProtocol = mapping.TransportProtocol, ApplicationProtocol = mapping.ApplicationProtocol,
+                HttpState = mapping.ApplicationProtocol == "http" ?
+                    httpMappingStates?.GetValueOrDefault(mapping.MappingId) is { } state && state != "ready" ? state : address is null ? "unavailable" : "ready" : null,
+                AccessUrl = mapping.Http is null || address is null ? null : $"{mapping.Http.Scheme}://{mapping.Http.AuthorityHost}:{address.LocalPort}"
+            }).ToArray();
         Volatile.Write(ref current, new AgentStatusSnapshot(configuration.ClientId, true, DateTimeOffset.UtcNow, channels, mappings));
     }
 
@@ -29,10 +41,16 @@ public sealed record AgentStatusSnapshot(string ClientId, bool Online, DateTimeO
 public sealed record AgentChannelView(string ChannelId, string DisplayName, bool Enabled, bool AuthorizedClientsOnly, bool EndToEndEncryptionEnabled, string TargetHost, int TargetPort)
 {
     public string TransportProtocol { get; init; } = "tcp";
+    public string ApplicationProtocol { get; init; } = "raw";
+    public string? HttpState { get; init; }
+    public string? EntryScheme { get; init; }
 }
 public sealed record AgentMappingView(string MappingId, bool Enabled, string TargetClientId, string TargetChannelId, string? LocalAddress)
 {
     public string TransportProtocol { get; init; } = "tcp";
+    public string ApplicationProtocol { get; init; } = "raw";
+    public string? HttpState { get; init; }
+    public string? AccessUrl { get; init; }
 }
 
 public sealed class AgentLocalDashboard : BackgroundService

@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "clientId": "http-caller",
+  "displayName": "授权 Web 访问节点",
+  "enabled": true,
+  "secret": "REPLACE_WITH_UNIQUE_32_RANDOM_BYTES_BASE64",
+  "maxConnections": 20,
+  "maxPendingConnections": 5,
+  "channels": [],
+  "outboundMappings": [
+    {
+      "mappingId": "to-web-private",
+      "enabled": false,
+      "localAddress": "127.0.0.1",
+      "targetClientId": "shanghai-01",
+      "targetChannelId": "web-private",
+      "accessSecret": "REPLACE_WITH_CHANNEL_32_RANDOM_BYTES_BASE64",
+      "targetCertificateSha256": "REPLACE_WITH_TARGET_AGENT_64_HEX_SHA256"
+    }
+  ]
+}

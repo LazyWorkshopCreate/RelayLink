@@ -11,6 +11,7 @@ namespace RelayLink.Agent;
 
 public sealed class ControlSessionWorker(AgentConfiguration configuration, AgentStatus status, AgentDiagnosticLog diagnostics, AgentConnectionQuota quota, ILogger<ControlSessionWorker> logger) : BackgroundService
 {
+    private readonly HttpProxyRuntime httpProxy = new(configuration, logger);
     private readonly Random random = new();
     private readonly X509Certificate2Collection? trustedRoots = configuration.UseTls ? AgentConfigurationLoader.LoadTrustedRoots(configuration) : null;
     private readonly AgentIdentity identity = AgentIdentity.LoadOrCreate(configuration.E2eIdentityPath, configuration.ClientId);
@@ -18,6 +19,7 @@ public sealed class ControlSessionWorker(AgentConfiguration configuration, Agent
     public override void Dispose()
     {
         base.Dispose();
+        httpProxy.DisposeAsync().AsTask().GetAwaiter().GetResult();
         identity.Dispose();
         if (trustedRoots is not null)
             foreach (var certificate in trustedRoots.Cast<X509Certificate2>()) certificate.Dispose();
@@ -88,11 +90,13 @@ public sealed class ControlSessionWorker(AgentConfiguration configuration, Agent
         logger.LogInformation("Agent control session is online with session {SessionId}.", registration.SessionId);
         using var sessionCancellation = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
         var activeConfiguration = new SessionConfiguration(registration.ConfigVersion, registration.Config);
-        await using var peerSession = new PeerSessionCoordinator(configuration, identity, registration.SessionId, writer, logger, quota, sessionCancellation.Token);
-        peerSession.ApplyConfiguration(registration.Config);
+        await using var peerSession = new PeerSessionCoordinator(configuration, identity, registration.SessionId, writer, logger, quota, sessionCancellation.Token, httpProxy);
+        await httpProxy.PrepareAsync(registration.Config, sessionCancellation.Token);
+        await writer.WriteAsync(new Frame(FrameType.HttpStatus, JsonProtocolSerializer.Serialize(new HttpStatusMessage(registration.SessionId, registration.ConfigVersion, httpProxy.States))), sessionCancellation.Token);
+        peerSession.ApplyConfiguration(httpProxy.EffectivePeerConfiguration(registration.Config));
         if (registration.Config.OutboundMappings.Count > 0)
             await writer.WriteAsync(new Frame(FrameType.PeerMappingStatus, JsonProtocolSerializer.Serialize(new PeerMappingStatusMessage(registration.SessionId, registration.ConfigVersion, peerSession.Addresses))), sessionCancellation.Token);
-        status.SetOnline(registration.Config, peerSession.Addresses);
+        status.SetOnline(registration.Config, peerSession.Addresses, httpProxy.States, httpProxy.MappingStates(registration.Config));
         using var openLimit = new SemaphoreSlim(Math.Min(registration.Config.MaxConnections, configuration.MaxConnections));
         var startSignals = new ConcurrentDictionary<Guid, TaskCompletionSource>();
         var openTasks = new ConcurrentDictionary<long, Task>();
@@ -139,11 +143,13 @@ public sealed class ControlSessionWorker(AgentConfiguration configuration, Agent
                     if (update.SessionId != registration.SessionId) throw new ProtocolException("Configuration update did not belong to the current session.");
                     ValidateSnapshot(update.ConfigVersion, update.Config);
                     activeConfiguration.Replace(update.ConfigVersion, update.Config);
-                    peerSession.ApplyConfiguration(update.Config);
+                    await httpProxy.PrepareAsync(update.Config, sessionCancellation.Token);
+                    peerSession.ApplyConfiguration(httpProxy.EffectivePeerConfiguration(update.Config));
                     await writer.WriteAsync(new Frame(FrameType.ConfigAck, JsonProtocolSerializer.Serialize(new ConfigAckMessage(update.SessionId, update.ConfigVersion))), sessionCancellation.Token);
+                    await writer.WriteAsync(new Frame(FrameType.HttpStatus, JsonProtocolSerializer.Serialize(new HttpStatusMessage(update.SessionId, update.ConfigVersion, httpProxy.States))), sessionCancellation.Token);
                     if (update.Config.OutboundMappings.Count > 0)
                         await writer.WriteAsync(new Frame(FrameType.PeerMappingStatus, JsonProtocolSerializer.Serialize(new PeerMappingStatusMessage(update.SessionId, update.ConfigVersion, peerSession.Addresses))), sessionCancellation.Token);
-                    status.SetOnline(update.Config, peerSession.Addresses);
+                    status.SetOnline(update.Config, peerSession.Addresses, httpProxy.States, httpProxy.MappingStates(update.Config));
                     continue;
                 }
 
@@ -247,6 +253,19 @@ public sealed class ControlSessionWorker(AgentConfiguration configuration, Agent
             phase = "data_bound";
             await diagnostics.WriteAsync(open.ConnectionId, open.ChannelId, phase, elapsedMs: (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds);
 
+            if (channel.ApplicationProtocol == "http")
+            {
+                if (!configuration.UseTls || !httpProxy.IsReady(channel) || open.HttpIngress is null)
+                    throw new ProtocolException("HTTP ingress is unavailable.");
+                await controlWriter.WriteAsync(new Frame(FrameType.HttpIngressReady, JsonProtocolSerializer.Serialize(new HttpIngressReadyMessage(open.ConnectionId))), deadline.Token);
+                await startSignal.Task.WaitAsync(deadline.Token);
+                lease.MarkActive();
+                phase = "http_ingress_started";
+                await httpProxy.ServeAsync(channel, dataStream, open.HttpIngress, sessionCancellation, open.ConnectionId);
+                outcome = "completed";
+                return;
+            }
+            if (open.HttpIngress is not null) throw new ProtocolException("Raw channel cannot accept HTTP context.");
             if (channel.TransportProtocol == "udp")
             {
                 using var targetDeadline = CancellationTokenSource.CreateLinkedTokenSource(deadline.Token);
@@ -393,6 +412,12 @@ public sealed class ControlSessionWorker(AgentConfiguration configuration, Agent
         if (config.ClientId is null || config.Channels.Count > 100 || heartbeatIntervalSeconds < 1 || heartbeatTimeoutSeconds < heartbeatIntervalSeconds)
         {
             throw new AgentPermanentException("Server returned an invalid configuration snapshot.");
+        }
+
+        foreach (var channel in config.Channels)
+        {
+            try { HttpProxyPolicy.Validate(channel.ApplicationProtocol, channel.TransportProtocol, channel.AuthorizedClientsOnly, channel.EndToEndEncryptionEnabled, channel.Http); }
+            catch (ArgumentException) { throw new AgentPermanentException("Server returned invalid HTTP configuration."); }
         }
 
         if (config.Channels.Any(c => c.TransportProtocol is not ("tcp" or "udp") || c.UdpIdleTimeoutSeconds is < 1 or > 3600) ||
