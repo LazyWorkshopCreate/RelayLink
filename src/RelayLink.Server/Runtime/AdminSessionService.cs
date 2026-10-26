@@ -9,17 +9,51 @@ public sealed class AdminSessionService(ServerRuntime runtime)
 {
     public const string CookieName = "relaylink_admin_session";
     private readonly ConcurrentDictionary<string, AdminSession> sessions = new(StringComparer.Ordinal);
+    private readonly object sessionReplacement = new();
+
+    public static CookieOptions CreateCookieOptions(bool isHttps, TimeSpan? maxAge = null) => new()
+    {
+        HttpOnly = true,
+        SameSite = SameSiteMode.Strict,
+        // The admin listener is plain HTTP. Remote browsers reach it as http://127.0.0.1
+        // through an encrypted peer channel, so a Secure cookie would not be stored.
+        // Secure follows the actual request scheme when a TLS terminator is in front.
+        Secure = isHttps,
+        Path = "/",
+        MaxAge = maxAge
+    };
 
     public bool TryLogin(string? username, string? password, out AdminSession? session)
     {
+        if (!TryPrepareLogin(username, password, out session)) return false;
+        CommitLogin(session!);
+        return true;
+    }
+
+    public bool TryPrepareLogin(string? username, string? password, out AdminSession? session)
+    {
         session = null;
         var admin = runtime.Configuration.Server.Dashboard.Admin;
-        if (!string.Equals(username, admin.Username, StringComparison.Ordinal) || !VerifyPassword(password, admin.PasswordHash)) return false;
+        var submitted = password ?? string.Empty;
+        if (!AdminLoginGuard.PasswordWithinLimit(submitted)) return false;
+        var passwordMatches = VerifyPassword(submitted, admin.PasswordHash);
+        var usernameMatches = string.Equals(username, admin.Username, StringComparison.Ordinal);
+        if (!passwordMatches || !usernameMatches) return false;
 
-        var id = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
-        session = new AdminSession(id, Convert.ToHexString(RandomNumberGenerator.GetBytes(32)), DateTimeOffset.UtcNow.AddMinutes(admin.SessionLifetimeMinutes));
-        sessions[id] = session;
+        session = new AdminSession(
+            Convert.ToHexString(RandomNumberGenerator.GetBytes(32)),
+            Convert.ToHexString(RandomNumberGenerator.GetBytes(32)),
+            DateTimeOffset.UtcNow.AddMinutes(admin.SessionLifetimeMinutes));
         return true;
+    }
+
+    public void CommitLogin(AdminSession session)
+    {
+        lock (sessionReplacement)
+        {
+            foreach (var existing in sessions.Keys.ToArray()) sessions.TryRemove(existing, out _);
+            sessions[session.Id] = session;
+        }
     }
 
     public bool TryAuthorize(HttpRequest request, bool requireCsrf, out AdminSession? session)
@@ -44,9 +78,8 @@ public sealed class AdminSessionService(ServerRuntime runtime)
 
     public void Revoke(AdminSession session) => sessions.TryRemove(session.Id, out _);
 
-    private static bool VerifyPassword(string? password, string encoded)
+    private static bool VerifyPassword(string password, string encoded)
     {
-        if (password is null) return false;
         var parts = encoded.Split('$');
         if (parts.Length != 4 || parts[0] != "PBKDF2-SHA256" || !int.TryParse(parts[1], out var iterations) || iterations < 100_000) return false;
         try

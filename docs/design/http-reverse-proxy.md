@@ -2,10 +2,12 @@
 
 文档 ID：DES-008\
 状态：Draft\
-版本：v1.4.0\
+版本：v1.5.0\
 更新日期：2026-10-15\
 调研日期：2026-10-12\
 关联：[需求 REQ-001N](../requirements/2026-10-12-http-reverse-proxy.md)、[ADR-0026](../adr/0026-http-proxy-over-tcp-tunnels.md)
+
+实现状态：协议 v5 的 HTTP/HTTPS 反向代理已经在主线运行，包括目标 Agent 的 Kestrel/YARP 虚拟入口、Host/Origin 策略、公网 TLS 透传和加密互访的内层 TLS。本文状态保持 Draft，因为第 2 节的方案比较、PoC 门槛和未在目标环境测量的容量结论仍是设计记录，不能把它们写成已验收事实。可执行步骤以 [HTTP 使用指南](../operations/http-reverse-proxy.md) 和 [验证记录](../testing/http-reverse-proxy-verification.md) 为准。
 
 ## 1. 结论与现状
 

@@ -2,8 +2,8 @@
 
 文档 ID：OPS-001\
 状态：Active\
-版本：v2.6.0\
-更新日期：2026-10-05
+版本：v2.7.0\
+更新日期：2026-10-15
 
 RelayLink 转发 TCP 字节流与单播 UDP 报文，不替代目标服务自身的账号、权限、TLS 和网络访问控制。
 
@@ -104,23 +104,33 @@ RelayLink.Server --config <server.json> --check-config
 | `tunnel.agentServerHost` | 下载的 Agent 配置所使用的服务端地址 | 填 Agent 可达的 DNS 或 IP，不能填 `0.0.0.0` |
 | `tunnel.port` | 控制连接端口 | 默认示例为 `7443` |
 | `tunnel.dataPort` | 数据连接端口 | 默认示例为 `7444`；不能与控制端口相同 |
-| `dashboard.listenAddress` | 管理页面绑定地址 | 优先绑定内网地址或 `127.0.0.1` |
+| `dashboard.listenAddress` | 管理页面绑定地址 | 默认且推荐 `127.0.0.1`；示例与 Docker 入门配置均只绑定 loopback |
 | `dashboard.admin.passwordHash` | 管理员密码哈希 | 使用 `scripts/new-admin-password-hash.ps1` 生成 |
 | `clientsDirectory` | 客户端配置目录 | 服务账号必须可读写 |
 
 ### 4.2 TLS 与网络边界
 
 - 控制和数据端口只向 Agent 来源开放。
-- 管理页面和普通业务代理端口只向受信任网络开放。
+- 管理端口不提供 HTTPS。它只应绑定 `127.0.0.1`（或 `::1`）。推荐在 Server 本机安装 Agent，用授权互访的端到端加密通道访问管理页，步骤见[第 8 节](#8-通过互访访问-server-管理页)。Docker Compose 使用 host 网络，容器内的 `127.0.0.1` 就是 Docker 主机的 loopback，因此 `http://127.0.0.1:18080/` 仍在主机本机打开，同机 Agent 也能把目标指到该地址。
+- 若 `dashboard.listenAddress` 不是 loopback，进程会在错误日志和标准错误写一条 `SECURITY` 告警后继续启动。这只提醒暴露范围，不给管理端口加 TLS。不要把管理端口发布到公网或桥接网络的宿主机端口。
+- 管理员会话 Cookie 为 `HttpOnly`、`SameSite=Strict`、`Path=/`。管理监听是明文 HTTP，浏览器经本机或互访入口访问的也是 `http://127.0.0.1`，因此在请求本身不是 HTTPS 时不设置 `Secure`；否则浏览器不会保存该 Cookie。登录审计写入成功后，这次登录会作废该进程内已有管理员会话；审计存储失败时登录失败，原会话保持有效。登录口令最长 1024 字节，同一来源地址和用户名连续失败会暂时拒绝后续尝试。
 - Agent 互访要求控制 TLS；`trustedCaPemPath` 只能包含 CA 公钥证书。
 - 普通代理数据当前是明文 TCP。敏感业务应使用业务自身 TLS、受信隔离链路或网络层加密。
 - 应用层安全组限制来源地址，但不提供链路加密。
 
-### 4.3 SQLite 数据
+### 4.3 连接空闲与半关闭
+
+`limits.tcpIdleTimeoutSeconds` 控制已经建立的普通 TCP 代理和授权互访。双向都没有新数据达到该秒数后，服务端取消连接并释放名额。缺省为 900 秒；设为 `0` 则关闭应用层空闲超时。升级后，旧配置文件里没有该字段时也按 900 秒生效。TCP 套接字另开 keepalive，用于对端崩溃后的补充探测。
+
+`limits.halfCloseDrainTimeoutSeconds` 仍是半关闭后等待另一方向结束的秒数，默认 300。服务端在注册接受消息里把排空秒数和 TCP 空闲秒数交给 Agent，两端使用同一排空窗口。修改这两项需要重启 Server，Agent 在下次注册时取得新值。管理页总览显示当前 TCP 空闲秒数。
+
+客户端的 `maxConnections` 和 `maxPendingConnections` 保存后立即约束新的普通代理，并下发给在线 Agent。已经占用的连接保留到结束，但不会按保存前的更大上限再接受新连接。
+
+### 4.4 SQLite 数据
 
 流量历史和审计日志默认可共用一个 SQLite 数据库，建议保留 90 天。
 
-- 数据库目录必须允许服务账号写入，否则服务可能无法启动，登录或建连也可能被拒绝。
+- 数据库目录必须允许服务账号写入，否则服务可能无法启动，登录或建连也可能被拒绝。进程新建的数据库目录从创建起就是仅所有者可访问（Unix `0700`，Windows 为当前身份且子文件继承的专用 DACL），因此随后的 WAL/SHM 不会继承宽松权限。已经存在的临时目录、`/tmp` 或其他用户可写目录会被拒绝，权限保持原样，并写 `SECURITY` 说明要求改到 RelayLink 专用目录。进程不修改这些共享目录。路径中的符号链接会先解析；若数据库文件本身是符号链接，或解析后落在文件系统根上，启动同样拒绝打开。无法收紧进程创建的数据库文件时，启动失败并释放已打开的连接。
 - WAL 模式会产生 `-wal` 和 `-shm` 文件。运行中备份时不能只复制主 `.db` 文件。
 - 旧 `.jsonl` 历史路径会在首次启动时迁移到同名 `.db`；确认迁移结果前不要删除旧文件。
 
@@ -204,7 +214,7 @@ Windows 已有安装时：
 
 ## 8. 通过互访访问 Server 管理页
 
-推荐把管理页绑定到 `127.0.0.1:18080`，再在 Server 同机部署一个 Linux Agent：
+管理端口不面向公网，也不在管理监听上终止 TLS。推荐把管理页绑定到 `127.0.0.1:18080`，再在 Server 同机部署一个 Agent，由授权互访把浏览器流量送到该本机端口：
 
 1. 为同机 Agent 创建目标为 `127.0.0.1:18080` 的授权互访通道。
 2. 只给指定访问方创建入口。
@@ -242,9 +252,10 @@ Agent 告警包含 `ErrorCode`、`RejectionReason`，异常消息包含注册/�
 
 | RejectionReason | 排查方向 |
 |---|---|
-| ClientNotFound | 配置连接到了错误服务端，或客户端 ID 已被删除；核对并重新下载正确配置 |
-| ClientDisabled | 在服务端明确重新启用该客户端 |
-| InvalidSecret | 重新下载当前客户端配置，通过 Agent 导入修改；不要在日志中粘贴密钥 |
+| AuthenticationFailed | 未认证注册被拒绝。控制连接上的“客户端不存在 / 已禁用 / 密钥错误”使用同一原因，避免枚举客户端 ID。到服务端审计查看 `client_not_found`、`client_disabled` 或 `authentication_failed` 后再按对应项处理 |
+| ClientNotFound | 仅出现在服务端审计和运行日志。配置连接到了错误服务端，或客户端 ID 已被删除；核对并重新下载正确配置 |
+| ClientDisabled | 仅出现在服务端审计和运行日志。在服务端明确重新启用该客户端 |
+| InvalidSecret | 仅出现在服务端审计和运行日志。重新下载当前客户端配置，通过 Agent 导入修改；不要在日志中粘贴密钥 |
 | IdentityInvalid / IdentityMismatch | 本机身份无效或不匹配服务端固定身份；核对身份迁移或轮换，另一台 PC 使用独立客户端 ID |
 | DuplicateSession | 另一实例使用了同一客户端 ID；核对运行实例与服务状态 |
 | ConfigurationMismatch / ClientConfigurationChanged | 核对服务端配置与两端版本，重新获取当前配置后重试 |

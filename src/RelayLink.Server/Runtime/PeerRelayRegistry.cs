@@ -67,7 +67,7 @@ public sealed class PeerRelayRegistry(ServerRuntime runtime, MetricsRegistry met
             return;
         }
 
-        var relay = new PeerRelay(caller, targetSession, targetChannel.ChannelId, TimeSpan.FromSeconds(runtime.Configuration.Server.Limits.OpenTimeoutSeconds), mapping.MappingId);
+        var relay = new PeerRelay(caller, targetSession, targetChannel.ChannelId, TimeSpan.FromSeconds(runtime.Configuration.Server.Limits.OpenTimeoutSeconds), mapping.MappingId, targetChannel.TransportProtocol);
         var channelMetrics = metrics.For(targetConfig.ClientId, targetChannel.ChannelId);
         channelMetrics.PeerAccepted();
         if (!relays.TryAdd(relay.ConnectionId, relay))
@@ -180,9 +180,10 @@ public sealed class PeerRelayRegistry(ServerRuntime runtime, MetricsRegistry met
                 metrics.For(relay.Target.ClientId, relay.ChannelId).PeerOpened();
             }
             using var relayCancellation = CancellationTokenSource.CreateLinkedTokenSource(relay.LifetimeToken);
+            using var idle = new RelayIdleWatch(IdleTimeoutFor(relay.TransportProtocol, runtime.Configuration.Server.Limits.TcpIdleTimeoutSeconds), relayCancellation.Token);
             var channelMetrics = metrics.For(relay.Target.ClientId, relay.ChannelId);
-            var callerToTarget = ForwardAsync(caller.Reader, target.Writer, count => { channelMetrics.AddPeerCiphertextToTarget(count); relay.AddToTarget(count); }, relayCancellation.Token);
-            var targetToCaller = ForwardAsync(target.Reader, caller.Writer, count => { channelMetrics.AddPeerCiphertextToCaller(count); relay.AddToCaller(count); }, relayCancellation.Token);
+            var callerToTarget = ForwardAsync(caller.Reader, target.Writer, count => { channelMetrics.AddPeerCiphertextToTarget(count); relay.AddToTarget(count); idle.Touch(); }, idle.Token);
+            var targetToCaller = ForwardAsync(target.Reader, caller.Writer, count => { channelMetrics.AddPeerCiphertextToCaller(count); relay.AddToCaller(count); idle.Touch(); }, idle.Token);
             var first = await Task.WhenAny(callerToTarget, targetToCaller);
             var remaining = first == callerToTarget ? targetToCaller : callerToTarget;
             if (first.IsFaulted || first.IsCanceled) relayCancellation.Cancel();
@@ -197,6 +198,9 @@ public sealed class PeerRelayRegistry(ServerRuntime runtime, MetricsRegistry met
         }
         finally { Cleanup(relay); }
     }
+
+    internal static TimeSpan IdleTimeoutFor(string transportProtocol, int tcpIdleTimeoutSeconds) =>
+        transportProtocol == "udp" ? TimeSpan.Zero : TimeSpan.FromSeconds(Math.Max(0, tcpIdleTimeoutSeconds));
 
     private static async Task ForwardAsync(FrameReader reader, FrameWriter writer, Action<int> bytesWritten, CancellationToken cancellationToken)
     {
@@ -280,7 +284,7 @@ public sealed class PeerRelayRegistry(ServerRuntime runtime, MetricsRegistry met
     }
 }
 
-public sealed class PeerRelay(Session caller, Session target, string channelId, TimeSpan openTimeout, string mappingId = "")
+public sealed class PeerRelay(Session caller, Session target, string channelId, TimeSpan openTimeout, string mappingId = "", string transportProtocol = "tcp")
 {
     private readonly byte[] callerToken = RandomNumberGenerator.GetBytes(32);
     private readonly byte[] targetToken = RandomNumberGenerator.GetBytes(32);
@@ -302,6 +306,7 @@ public sealed class PeerRelay(Session caller, Session target, string channelId, 
     public Session Caller { get; } = caller;
     public Session Target { get; } = target;
     public string ChannelId { get; } = channelId;
+    public string TransportProtocol { get; } = transportProtocol;
     public string MappingId { get; } = mappingId;
     public TimeSpan OpenTimeout { get; } = openTimeout;
     public string CallerToken => Convert.ToBase64String(callerToken);

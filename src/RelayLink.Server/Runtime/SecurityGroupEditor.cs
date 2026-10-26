@@ -1,4 +1,3 @@
-using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using RelayLink.Server.Configuration;
@@ -47,13 +46,7 @@ public sealed class SecurityGroupEditor(string serverConfigurationPath, Configur
             var document = JsonNode.Parse(await File.ReadAllTextAsync(configurationPath, cancellationToken)) as JsonObject
                 ?? throw new SecurityGroupUpdateException("Server configuration must be a JSON object.");
             document["securityGroups"] = JsonSerializer.SerializeToNode(groups, JsonOptions);
-            var temporaryPath = $"{configurationPath}.{Guid.NewGuid():N}.tmp";
-            try
-            {
-                await File.WriteAllTextAsync(temporaryPath, document.ToJsonString(JsonOptions), new UTF8Encoding(false), cancellationToken);
-                File.Move(temporaryPath, configurationPath, overwrite: true);
-            }
-            finally { if (File.Exists(temporaryPath)) File.Delete(temporaryPath); }
+            await SecretFilePermissions.WriteTextAsync(configurationPath, document.ToJsonString(JsonOptions), overwrite: true, cancellationToken);
 
             runtime.ReplaceConfiguration(updated);
             if (changedId is not null) proxyListeners.RevokeSecurityGroupConnections(changedId, updated.Server);

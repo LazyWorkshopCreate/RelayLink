@@ -39,7 +39,10 @@ public sealed class TunnelAcceptorService(
             {
                 var tcpClient = await listener.AcceptTcpClientAsync(stoppingToken);
                 tcpClient.NoDelay = true;
-                _ = HandleAcceptedAsync(tcpClient, stoppingToken);
+                _ = HandleAcceptedAsync(tcpClient, stoppingToken).ContinueWith(completed =>
+                {
+                    if (completed.IsFaulted) logger.LogError(completed.Exception, "Tunnel connection handler failed.");
+                }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
             }
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -53,15 +56,19 @@ public sealed class TunnelAcceptorService(
         }
     }
 
-    private async Task HandleAcceptedAsync(TcpClient client, CancellationToken serverStoppingToken)
+    internal async Task HandleAcceptedAsync(TcpClient client, CancellationToken serverStoppingToken)
     {
-        if (!await unauthenticatedLimit.WaitAsync(0, serverStoppingToken))
+        var acquired = false;
+        try
         {
-            logger.LogWarning("Rejected tunnel connection from {RemoteIp}: {ErrorCode}; {ReasonCode}.",
-                (client.Client.RemoteEndPoint as IPEndPoint)?.Address.ToString(), ErrorCode.CapacityExceeded, "unauthenticated_connection_limit");
-            client.Dispose();
-            return;
-        }
+            try { acquired = await unauthenticatedLimit.WaitAsync(0, serverStoppingToken); }
+            catch (OperationCanceledException) when (serverStoppingToken.IsCancellationRequested) { return; }
+            if (!acquired)
+            {
+                logger.LogWarning("Rejected tunnel connection from {RemoteIp}: {ErrorCode}; {ReasonCode}.",
+                    (client.Client.RemoteEndPoint as IPEndPoint)?.Address.ToString(), ErrorCode.CapacityExceeded, "unauthenticated_connection_limit");
+                return;
+            }
 
         var slotReleased = false;
         try
@@ -91,7 +98,7 @@ public sealed class TunnelAcceptorService(
                         _ => "authentication_failed"
                     };
                     await RecordRejectionAsync(register.ClientId, auditReason, ErrorCode.AuthFailed, authenticationReason);
-                    await TryWriteErrorAsync(writer, ErrorCode.AuthFailed, handshakeTimeout.Token, authenticationReason);
+                    await TryWriteErrorAsync(writer, ErrorCode.AuthFailed, handshakeTimeout.Token, authenticationReason.ToUnauthenticatedWireReason());
                     return;
                 }
 
@@ -143,7 +150,11 @@ public sealed class TunnelAcceptorService(
                     session.ProtocolVersion = writer.ProtocolVersion;
                     session.AttachControlWriter(writer);
                     var (snapshot, configVersion) = ConfigurationSnapshotFactory.Create(clientConfiguration!, runtime.Configuration, session.ProtocolVersion);
-                    await writer.WriteAsync(new Frame(FrameType.RegisterAccepted, JsonProtocolSerializer.Serialize(new RegisterAcceptedMessage(session.SessionId, configVersion, snapshot, runtime.Configuration.Server.Tunnel.HeartbeatIntervalSeconds, runtime.Configuration.Server.Tunnel.HeartbeatTimeoutSeconds), session.ProtocolVersion)), serverStoppingToken);
+                    await writer.WriteAsync(new Frame(FrameType.RegisterAccepted, JsonProtocolSerializer.Serialize(new RegisterAcceptedMessage(session.SessionId, configVersion, snapshot, runtime.Configuration.Server.Tunnel.HeartbeatIntervalSeconds, runtime.Configuration.Server.Tunnel.HeartbeatTimeoutSeconds)
+                    {
+                        HalfCloseDrainTimeoutSeconds = runtime.Configuration.Server.Limits.HalfCloseDrainTimeoutSeconds,
+                        TcpIdleTimeoutSeconds = runtime.Configuration.Server.Limits.TcpIdleTimeoutSeconds
+                    }, session.ProtocolVersion)), serverStoppingToken);
                     var acknowledgement = await reader.ReadAsync(ProtocolConstants.MaxControlPayloadLength, handshakeTimeout.Token);
                     if (acknowledgement?.Type != FrameType.ConfigAck)
                     {
@@ -210,6 +221,11 @@ public sealed class TunnelAcceptorService(
             {
                 unauthenticatedLimit.Release();
             }
+        }
+        }
+        finally
+        {
+            if (!acquired) client.Dispose();
         }
 
         async Task RecordRejectionAsync(string? untrustedClientId, string reason, ErrorCode code, ControlRejectionReason rejectionReason)

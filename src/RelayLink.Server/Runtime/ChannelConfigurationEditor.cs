@@ -1,4 +1,3 @@
-using System.Text;
 using System.Text.Json;
 using System.Security.Cryptography;
 using RelayLink.Server.Configuration;
@@ -93,20 +92,18 @@ public sealed class ChannelConfigurationEditor(
             var (updatedClient, result) = change(client);
             loader.ValidateChannelUpdate(current, updatedClient);
             var serialized = JsonSerializer.Serialize(updatedClient, JsonOptions);
-
             var updatedConfiguration = new LoadedConfiguration(current.Server, current.Clients.ToDictionary(pair => pair.Key, pair => pair.Key == clientId ? updatedClient : pair.Value, StringComparer.Ordinal));
-            await proxyListeners.ApplyConfigurationAsync(updatedConfiguration, cancellationToken);
-
             var clientPath = Path.Combine(current.Server.ClientsDirectory, $"{clientId}.json");
-            var temporaryPath = $"{clientPath}.{Guid.NewGuid():N}.tmp";
+            var previous = await File.ReadAllTextAsync(clientPath, cancellationToken);
+            await SecretFilePermissions.WriteTextAsync(clientPath, serialized, overwrite: true, cancellationToken);
             try
             {
-                await File.WriteAllTextAsync(temporaryPath, serialized, new UTF8Encoding(false), cancellationToken);
-                File.Move(temporaryPath, clientPath, overwrite: true);
+                await proxyListeners.ApplyConfigurationAsync(updatedConfiguration, cancellationToken);
             }
-            finally
+            catch
             {
-                if (File.Exists(temporaryPath)) File.Delete(temporaryPath);
+                await SecretFilePermissions.WriteTextAsync(clientPath, previous, overwrite: true, CancellationToken.None);
+                throw;
             }
 
             runtime.ReplaceConfiguration(updatedConfiguration);

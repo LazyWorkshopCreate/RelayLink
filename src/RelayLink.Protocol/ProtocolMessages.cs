@@ -1,7 +1,12 @@
 namespace RelayLink.Protocol;
 
 public sealed record RegisterMessage(string ClientId, string Secret, string AgentVersion, string? E2eCertificateSha256 = null);
-public sealed record RegisterAcceptedMessage(Guid SessionId, string ConfigVersion, ClientConfigSnapshot Config, int HeartbeatIntervalSeconds, int HeartbeatTimeoutSeconds);
+public sealed record RegisterAcceptedMessage(Guid SessionId, string ConfigVersion, ClientConfigSnapshot Config, int HeartbeatIntervalSeconds, int HeartbeatTimeoutSeconds)
+{
+    // Delivered at registration. Older peers ignore these fields. 0 disables TCP idle timeout.
+    public int HalfCloseDrainTimeoutSeconds { get; init; } = 300;
+    public int TcpIdleTimeoutSeconds { get; init; }
+}
 public sealed record ConfigAckMessage(Guid SessionId, string ConfigVersion);
 public sealed record ConfigUpdateMessage(Guid SessionId, string ConfigVersion, ClientConfigSnapshot Config);
 public sealed record ReadyMessage(Guid SessionId);

@@ -45,6 +45,7 @@ public sealed class AuditService(ServerRuntime runtime, ILogger<AuditService> lo
             await using var journal = connection.CreateCommand();
             journal.CommandText = "PRAGMA journal_mode=WAL";
             await journal.ExecuteNonQueryAsync(cancellationToken);
+            SecretFilePermissions.RestrictDatabase(FilePath);
             await using var schema = connection.CreateCommand();
             schema.CommandText = """
                 CREATE TABLE IF NOT EXISTS audit_event (
@@ -181,10 +182,32 @@ public sealed class AuditService(ServerRuntime runtime, ILogger<AuditService> lo
 
     private async Task<SqliteConnection> OpenAsync(CancellationToken cancellationToken)
     {
-        Directory.CreateDirectory(Path.GetDirectoryName(FilePath)!);
+        try
+        {
+            SecretFilePermissions.PrepareDatabase(FilePath);
+        }
+        catch (InvalidOperationException exception)
+        {
+            throw new AuditUnavailableException("Audit storage is unavailable.", exception);
+        }
+
         var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = FilePath, DefaultTimeout = 5 }.ToString());
-        await connection.OpenAsync(cancellationToken);
-        return connection;
+        try
+        {
+            await connection.OpenAsync(cancellationToken);
+            SecretFilePermissions.RestrictDatabase(FilePath);
+            return connection;
+        }
+        catch (InvalidOperationException exception)
+        {
+            await connection.DisposeAsync();
+            throw new AuditUnavailableException("Audit storage is unavailable.", exception);
+        }
+        catch
+        {
+            await connection.DisposeAsync();
+            throw;
+        }
     }
 
     private static void AddFilters(SqliteCommand command, DateTimeOffset since, DateTimeOffset until, string? eventType, string? clientId)

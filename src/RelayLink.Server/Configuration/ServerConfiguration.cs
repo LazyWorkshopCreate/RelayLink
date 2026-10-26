@@ -54,7 +54,11 @@ public sealed record LimitsConfiguration(
     int MaxChannelsPerClient,
     int OpenTimeoutSeconds,
     int BlockedWriteTimeoutSeconds,
-    int HalfCloseDrainTimeoutSeconds);
+    int HalfCloseDrainTimeoutSeconds)
+{
+    // 0 disables the application idle timeout. Missing JSON uses 900 seconds.
+    public int TcpIdleTimeoutSeconds { get; init; } = 900;
+}
 
 public sealed record ClientConfiguration(
     int SchemaVersion,

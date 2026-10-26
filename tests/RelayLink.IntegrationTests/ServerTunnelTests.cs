@@ -20,6 +20,16 @@ namespace RelayLink.IntegrationTests;
 
 public sealed class ServerTunnelTests
 {
+    [Fact]
+    public void Fixture_ports_stay_distinct_and_bound_until_the_server_starts()
+    {
+        using var fixture = new TunnelFixture();
+        var ports = new[] { fixture.TunnelPort, fixture.DataPort, fixture.ProxyPort, fixture.DashboardPort };
+        Assert.Equal(ports.Length, ports.Distinct().Count());
+        using var thief = new TcpListener(IPAddress.Loopback, fixture.DataPort);
+        Assert.Throws<SocketException>(() => thief.Start());
+    }
+
 #if LEGACY_AGENT_TESTS
     [Theory]
     [InlineData(false)]
@@ -189,13 +199,79 @@ public sealed class ServerTunnelTests
         Assert.Equal(FrameType.Error, frame?.Type);
         var error = JsonProtocolSerializer.Deserialize<ErrorMessage>(frame!.Payload.Span);
         Assert.Equal(ErrorCode.AuthFailed, error.Code);
-        Assert.Equal(reason, error.Reason);
+        Assert.Equal(reason.ToUnauthenticatedWireReason(), error.Reason);
         var agentFailure = AgentPermanentException.FromServerError(frame, "registration");
-        Assert.Contains(reason.Describe(), agentFailure.Message);
+        Assert.Contains(reason.ToUnauthenticatedWireReason().Describe(), agentFailure.Message);
+        if (reason.ToUnauthenticatedWireReason() == ControlRejectionReason.AuthenticationFailed)
+            Assert.DoesNotContain(reason.Describe(), agentFailure.Message);
         var logs = fixture.ReadLogs();
         Assert.Contains(reason.ToString(), logs);
         Assert.DoesNotContain(fixture.Secret, logs);
         Assert.DoesNotContain("test-invalid-secret-marker", logs);
+    }
+
+    [Fact]
+    public async Task Admin_plane_sets_cookie_headers_limits_login_and_warns_for_non_loopback()
+    {
+        using var fixture = new TunnelFixture();
+        await fixture.StartAsync();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var token = deadline.Token;
+        using var handler = new HttpClientHandler { UseCookies = false };
+        using var http = new HttpClient(handler);
+        using var live = await http.GetAsync($"http://127.0.0.1:{fixture.DashboardPort}/health/live", token);
+        live.EnsureSuccessStatusCode();
+        AssertSecurityHeaders(live);
+        using var asset = await http.GetAsync($"http://127.0.0.1:{fixture.DashboardPort}/admin-security.txt", token);
+        asset.EnsureSuccessStatusCode();
+        Assert.Equal("relaylink", (await asset.Content.ReadAsStringAsync(token)).Trim());
+        AssertSecurityHeaders(asset);
+        using var page = await http.GetAsync($"http://127.0.0.1:{fixture.DashboardPort}/", token);
+        AssertSecurityHeaders(page);
+        Assert.DoesNotContain("is not a loopback address", fixture.ReadLogs());
+
+        using var oversized = await http.PostAsJsonAsync($"http://127.0.0.1:{fixture.DashboardPort}/api/v1/admin/session",
+            new { username = "admin", password = new string('x', 1025) }, token);
+        Assert.Equal(HttpStatusCode.BadRequest, oversized.StatusCode);
+
+        using var wrongName = await http.PostAsJsonAsync($"http://127.0.0.1:{fixture.DashboardPort}/api/v1/admin/session",
+            new { username = "not-admin", password = "test-password" }, token);
+        Assert.Equal(HttpStatusCode.Unauthorized, wrongName.StatusCode);
+
+        using var first = await http.PostAsJsonAsync($"http://127.0.0.1:{fixture.DashboardPort}/api/v1/admin/session",
+            new { username = "admin", password = "test-password" }, token);
+        first.EnsureSuccessStatusCode();
+        var setCookie = first.Headers.GetValues("Set-Cookie").Single();
+        Assert.Contains("relaylink_admin_session=", setCookie, StringComparison.Ordinal);
+        Assert.Contains("httponly", setCookie, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("samesite=strict", setCookie, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("path=/", setCookie, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("secure", setCookie, StringComparison.OrdinalIgnoreCase);
+        var firstCookie = setCookie.Split(';', 2)[0];
+
+        using var second = await http.PostAsJsonAsync($"http://127.0.0.1:{fixture.DashboardPort}/api/v1/admin/session",
+            new { username = "admin", password = "test-password" }, token);
+        second.EnsureSuccessStatusCode();
+        using var stale = new HttpRequestMessage(HttpMethod.Get, $"http://127.0.0.1:{fixture.DashboardPort}/api/v1/admin/session");
+        stale.Headers.Add("Cookie", firstCookie);
+        using var staleResponse = await http.SendAsync(stale, token);
+        Assert.False((await staleResponse.Content.ReadFromJsonAsync<JsonElement>(cancellationToken: token)).GetProperty("authenticated").GetBoolean());
+
+        for (var attempt = 0; attempt < 5; attempt++)
+        {
+            using var failed = await http.PostAsJsonAsync($"http://127.0.0.1:{fixture.DashboardPort}/api/v1/admin/session",
+                new { username = "admin", password = "wrong-password" }, token);
+            Assert.Equal(HttpStatusCode.Unauthorized, failed.StatusCode);
+        }
+        using var locked = await http.PostAsJsonAsync($"http://127.0.0.1:{fixture.DashboardPort}/api/v1/admin/session",
+            new { username = "other", password = "wrong-password" }, token);
+        Assert.Equal(HttpStatusCode.TooManyRequests, locked.StatusCode);
+        Assert.False(string.IsNullOrWhiteSpace(locked.Headers.RetryAfter?.ToString()));
+
+        using var exposed = new TunnelFixture();
+        await exposed.StartAsync(dashboardListenAddress: "0.0.0.0");
+        Assert.Contains("SECURITY:", exposed.ReadLogs());
+        Assert.Contains("0.0.0.0", exposed.ReadLogs());
     }
 
     [Fact]
@@ -237,6 +313,100 @@ public sealed class ServerTunnelTests
     }
 
     [Fact]
+    public async Task Lowering_the_client_limit_rejects_a_second_open_proxy_connection()
+    {
+        using var fixture = new TunnelFixture();
+        await fixture.StartAsync();
+        await fixture.StartAgentAsync();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var token = deadline.Token;
+        using var http = new HttpClient(new HttpClientHandler { UseCookies = true });
+        using var login = await http.PostAsJsonAsync($"http://127.0.0.1:{fixture.DashboardPort}/api/v1/admin/session",
+            new { username = "admin", password = "test-password" }, token);
+        login.EnsureSuccessStatusCode();
+        var csrf = (await login.Content.ReadFromJsonAsync<JsonElement>(cancellationToken: token)).GetProperty("csrfToken").GetString();
+        using var channelUpdate = new HttpRequestMessage(HttpMethod.Put, $"http://127.0.0.1:{fixture.DashboardPort}/api/v1/admin/clients/test-agent/channels/echo")
+        {
+            Content = JsonContent.Create(new { displayName = "Echo", enabled = true, listenAddress = "127.0.0.1", listenPort = fixture.ProxyPort,
+                targetHost = "127.0.0.1", targetPort = fixture.TargetPort, maxConnections = 1, targetConnectTimeoutSeconds = 5 })
+        };
+        channelUpdate.Headers.Add("X-RelayLink-CSRF", csrf);
+        using var channelSaved = await http.SendAsync(channelUpdate, token);
+        Assert.True(channelSaved.IsSuccessStatusCode, await channelSaved.Content.ReadAsStringAsync(token));
+
+        using var secondTarget = new TcpListener(IPAddress.Loopback, 0);
+        secondTarget.Start();
+        var secondTargetPort = ((IPEndPoint)secondTarget.LocalEndpoint).Port;
+        using var secondListenHolder = new TcpListener(IPAddress.Loopback, 0);
+        secondListenHolder.Start();
+        var secondListenPort = ((IPEndPoint)secondListenHolder.LocalEndpoint).Port;
+        secondListenHolder.Stop();
+        using var create = new HttpRequestMessage(HttpMethod.Post, $"http://127.0.0.1:{fixture.DashboardPort}/api/v1/admin/clients/test-agent/channels")
+        {
+            Content = JsonContent.Create(new { channelId = "echo-b", displayName = "Echo B", enabled = true, listenAddress = "127.0.0.1", listenPort = secondListenPort,
+                targetHost = "127.0.0.1", targetPort = secondTargetPort, maxConnections = 1, targetConnectTimeoutSeconds = 5 })
+        };
+        create.Headers.Add("X-RelayLink-CSRF", csrf);
+        using var created = await http.SendAsync(create, token);
+        Assert.True(created.IsSuccessStatusCode, await created.Content.ReadAsStringAsync(token));
+        var secondAccepted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                using var accepted = await secondTarget.AcceptTcpClientAsync(token);
+                secondAccepted.TrySetResult();
+                var stream = accepted.GetStream();
+                var buffer = new byte[8];
+                var read = await stream.ReadAsync(buffer, token);
+                if (read > 0) await stream.WriteAsync(buffer.AsMemory(0, read), token);
+            }
+            catch (Exception exception) { secondAccepted.TrySetException(exception); }
+        }, token);
+
+        using var first = new TcpClient();
+        await first.ConnectAsync(IPAddress.Loopback, fixture.ProxyPort, token);
+        var relaying = false;
+        for (var attempt = 0; attempt < 100 && !relaying; attempt++)
+        {
+            using var listed = await http.GetFromJsonAsync<JsonDocument>(
+                $"http://127.0.0.1:{fixture.DashboardPort}/api/v1/clients/test-agent/channels/echo/connections", token);
+            relaying = listed!.RootElement.GetProperty("connections").EnumerateArray()
+                .Any(connection => connection.GetProperty("state").GetString() == "relaying");
+            if (!relaying) await Task.Delay(100, token);
+        }
+        Assert.True(relaying, fixture.DiagnosticOutput());
+        using var clientUpdate = new HttpRequestMessage(HttpMethod.Put, $"http://127.0.0.1:{fixture.DashboardPort}/api/v1/admin/clients/test-agent")
+        {
+            Content = JsonContent.Create(new { displayName = "Test Agent", enabled = true, maxConnections = 1, maxPendingConnections = 1 })
+        };
+        clientUpdate.Headers.Add("X-RelayLink-CSRF", csrf);
+        using var saved = await http.SendAsync(clientUpdate, token);
+        Assert.True(saved.IsSuccessStatusCode, await saved.Content.ReadAsStringAsync(token));
+
+        using var second = new TcpClient();
+        await second.ConnectAsync(IPAddress.Loopback, secondListenPort, token);
+        using var rejectWindow = CancellationTokenSource.CreateLinkedTokenSource(token);
+        rejectWindow.CancelAfter(TimeSpan.FromSeconds(3));
+        var rejected = false;
+        try
+        {
+            rejected = await second.GetStream().ReadAsync(new byte[1], rejectWindow.Token) == 0;
+        }
+        catch (Exception exception) when (exception is IOException or SocketException)
+        {
+            rejected = true;
+        }
+        Assert.True(rejected, "The second channel should be rejected by the client limit while the first channel stays open.");
+        Assert.False(secondAccepted.Task.IsCompletedSuccessfully, "The second target should not be contacted when the client limit is already held.");
+
+        await first.GetStream().WriteAsync(new byte[] { 9 }, token);
+        var reply = new byte[1];
+        await first.GetStream().ReadExactlyAsync(reply, token);
+        Assert.Equal(9, reply[0]);
+    }
+
+    [Fact]
     public async Task Agent_records_server_rejection_code_reason_and_profile_in_file()
     {
         using var fixture = new TunnelFixture();
@@ -262,7 +432,7 @@ public sealed class ServerTunnelTests
             string logs = string.Empty;
             try
             {
-                while (!logs.Contains("InvalidSecret", StringComparison.Ordinal))
+                while (!logs.Contains("AuthenticationFailed", StringComparison.Ordinal))
                 {
                     token.ThrowIfCancellationRequested();
                     logs = string.Concat(Directory.GetFiles(Path.Combine(directory.FullName, "logs"), "agent-*.jsonl").Select(ReadActiveLog));
@@ -271,6 +441,8 @@ public sealed class ServerTunnelTests
             }
             finally { await runtime.StopAsync(CancellationToken.None); }
             Assert.Contains("AuthFailed", logs);
+            Assert.Contains("AuthenticationFailed", logs);
+            Assert.DoesNotContain("InvalidSecret", logs);
             Assert.Contains("rejected", logs);
             Assert.Contains("test-agent", logs);
             Assert.DoesNotContain(profile.Secret, logs);
@@ -493,15 +665,26 @@ public sealed class ServerTunnelTests
 
         using var http = new HttpClient(new HttpClientHandler { UseCookies = true });
         var publicUrl = $"http://127.0.0.1:{fixture.DashboardPort}/api/v1/clients/test-agent/channels/echo/connections";
-        using (var listed = await http.GetAsync(publicUrl, token))
+        JsonElement connection = default;
+        var listedConnection = false;
+        for (var attempt = 0; attempt < 50 && !listedConnection; attempt++)
         {
+            using var listed = await http.GetAsync(publicUrl, token);
             listed.EnsureSuccessStatusCode();
             var body = await listed.Content.ReadFromJsonAsync<JsonElement>(cancellationToken: token);
-            var connection = Assert.Single(body.GetProperty("connections").EnumerateArray());
-            Assert.Equal(open.ConnectionId, connection.GetProperty("connectionId").GetGuid());
-            Assert.Equal("connecting", connection.GetProperty("state").GetString());
-            Assert.Contains("127.0.0.1", connection.GetProperty("source").GetString());
+            var connections = body.GetProperty("connections").EnumerateArray().ToArray();
+            if (connections.Length == 0)
+            {
+                await Task.Delay(50, token);
+                continue;
+            }
+            connection = Assert.Single(connections);
+            listedConnection = true;
         }
+        Assert.True(listedConnection, fixture.DiagnosticOutput());
+        Assert.Equal(open.ConnectionId, connection.GetProperty("connectionId").GetGuid());
+        Assert.Equal("connecting", connection.GetProperty("state").GetString());
+        Assert.Contains("127.0.0.1", connection.GetProperty("source").GetString());
         var deleteUrl = $"http://127.0.0.1:{fixture.DashboardPort}/api/v1/admin/clients/test-agent/channels/echo/connections/{open.ConnectionId}";
         using (var unauthorized = await http.DeleteAsync(deleteUrl, token)) Assert.Equal(HttpStatusCode.Unauthorized, unauthorized.StatusCode);
         using var login = await http.PostAsJsonAsync($"http://127.0.0.1:{fixture.DashboardPort}/api/v1/admin/session", new { username = "admin", password = "test-password" }, token);
@@ -902,6 +1085,15 @@ public sealed class ServerTunnelTests
         }
     }
 
+    private static void AssertSecurityHeaders(HttpResponseMessage response)
+    {
+        Assert.Equal("nosniff", response.Headers.GetValues("X-Content-Type-Options").Single());
+        Assert.Equal("DENY", response.Headers.GetValues("X-Frame-Options").Single());
+        var policy = response.Headers.GetValues("Content-Security-Policy").Single();
+        Assert.Contains("frame-ancestors 'none'", policy);
+        Assert.Contains("default-src 'none'", policy);
+    }
+
     private static async Task ReadExactlyAsync(Stream stream, Memory<byte> buffer, CancellationToken token)
     {
         var offset = 0;
@@ -922,11 +1114,21 @@ public sealed class ServerTunnelTests
         private UdpClient? udpTarget;
         private readonly StringBuilder serverOutput = new();
         private readonly StringBuilder serverError = new();
+        private readonly HashSet<int> reservedPorts = [];
+        private readonly List<TcpListener> heldPorts = [];
         private Task? echoTask;
-        public int TunnelPort { get; } = GetFreePort();
-        public int DataPort { get; } = GetFreePort();
-        public int ProxyPort { get; } = GetFreePort();
-        public int DashboardPort { get; } = GetFreePort();
+        public int TunnelPort { get; }
+        public int DataPort { get; }
+        public int ProxyPort { get; }
+        public int DashboardPort { get; }
+
+        public TunnelFixture()
+        {
+            TunnelPort = ReservePort();
+            DataPort = ReservePort();
+            ProxyPort = ReservePort();
+            DashboardPort = ReservePort();
+        }
         public int TargetPort => udpTarget is not null ? ((IPEndPoint)udpTarget.Client.LocalEndPoint!).Port : ((IPEndPoint)targetListener.LocalEndpoint).Port;
         public string Secret { get; } = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
         public string ClientPath => Path.Combine(directory, "clients", "test-agent.json");
@@ -935,7 +1137,7 @@ public sealed class ServerTunnelTests
 
         public string ReadLogs() => string.Concat(Directory.GetFiles(Path.Combine(directory, "logs"), "*.jsonl").Select(ReadActiveLog));
 
-        public async Task StartAsync(string? pinnedIdentity = null, bool enabled = true, string transportProtocol = "tcp", bool restrictSource = false)
+        public async Task StartAsync(string? pinnedIdentity = null, bool enabled = true, string transportProtocol = "tcp", bool restrictSource = false, string dashboardListenAddress = "127.0.0.1")
         {
             Directory.CreateDirectory(Path.Combine(directory, "clients"));
             targetListener.Start();
@@ -956,11 +1158,12 @@ public sealed class ServerTunnelTests
             {
                 schemaVersion = 1,
                 tunnel = new { listenAddress = "127.0.0.1", port = TunnelPort, dataPort = DataPort, tlsEnabled = false, certificatePemPath = "", privateKeyPemPath = "", handshakeTimeoutSeconds = 10, heartbeatIntervalSeconds = 15, heartbeatTimeoutSeconds = 45 },
-                dashboard = new { listenAddress = "127.0.0.1", port = DashboardPort, refreshSeconds = 5, admin = new { username = "admin", passwordHash = PasswordHash(), sessionLifetimeMinutes = 60 } },
+                dashboard = new { listenAddress = dashboardListenAddress, port = DashboardPort, refreshSeconds = 5, admin = new { username = "admin", passwordHash = PasswordHash(), sessionLifetimeMinutes = 60 } },
                 securityGroups = restrictSource ? new[] { new { id = "local", name = "Local", entries = new[] { "192.0.2.1" } } } : [],
                 clientsDirectory = Path.Combine(directory, "clients"),
                 limits = new { maxConnections = 20, maxPendingConnections = 10, maxUnauthenticatedConnections = 10, maxChannelsPerClient = 10, openTimeoutSeconds = 10, blockedWriteTimeoutSeconds = 120, halfCloseDrainTimeoutSeconds = 300 }
             }));
+            ReleaseHeldPorts();
             var assembly = typeof(RelayLink.Server.Configuration.ConfigurationLoader).Assembly.Location;
             server = Process.Start(new ProcessStartInfo("dotnet", $"\"{assembly}\" --config \"{configPath}\"") { UseShellExecute = false, RedirectStandardError = true, RedirectStandardOutput = true })!;
             server.OutputDataReceived += (_, eventArgs) => { if (eventArgs.Data is not null) lock (serverOutput) serverOutput.AppendLine(eventArgs.Data); };
@@ -1042,6 +1245,7 @@ public sealed class ServerTunnelTests
 
         public void Dispose()
         {
+            ReleaseHeldPorts();
             targetListener.Stop();
             udpTarget?.Dispose();
             if (udpAgent is { HasExited: false }) udpAgent.Kill(entireProcessTree: true);
@@ -1059,6 +1263,35 @@ public sealed class ServerTunnelTests
             {
                 return $"Server running: {!server.HasExited}; exit code: {(server.HasExited ? server.ExitCode : -1)}; stdout: {serverOutput}; stderr: {serverError}";
             }
+        }
+
+        private int ReservePort()
+        {
+            while (true)
+            {
+                var listener = new TcpListener(IPAddress.Loopback, 0);
+                listener.Start();
+                var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+                if (reservedPorts.Add(port))
+                {
+                    heldPorts.Add(listener);
+                    return port;
+                }
+
+                listener.Stop();
+                listener.Dispose();
+            }
+        }
+
+        private void ReleaseHeldPorts()
+        {
+            foreach (var listener in heldPorts)
+            {
+                listener.Stop();
+                listener.Dispose();
+            }
+
+            heldPorts.Clear();
         }
 
         private static int GetFreePort()

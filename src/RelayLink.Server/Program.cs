@@ -22,6 +22,13 @@ catch (ConfigurationException exception)
     return 2;
 }
 
+foreach (var path in SecretFilePermissions.FindLoose(SecretFilePermissions.SensitivePaths(parsed.ConfigurationPath, loaded)))
+{
+    var warning = SecretFilePermissions.LooseWarning(path);
+    logger?.Error(warning);
+    Console.Error.WriteLine(warning);
+}
+
 if (parsed.CheckOnly)
 {
     Console.WriteLine("Configuration validation succeeded.");
@@ -31,13 +38,23 @@ if (parsed.CheckOnly)
 try
 {
     logger!.Information("Server starting.");
+    if (!DashboardListenPolicy.IsLoopback(loaded.Server.Dashboard.ListenAddress))
+    {
+        var warning = DashboardListenPolicy.NonLoopbackWarning(loaded.Server.Dashboard.ListenAddress);
+        logger.Error(warning);
+        Console.Error.WriteLine(warning);
+    }
     var options = new WebApplicationOptions { Args = args, ContentRootPath = AppContext.BaseDirectory };
     var builder = WebApplication.CreateBuilder(options);
     builder.Host.UseWindowsService();
     builder.Logging.ClearProviders();
     builder.Services.AddSerilog(logger, dispose: false);
     builder.Services.Configure<HostOptions>(options => options.ShutdownTimeout = TimeSpan.FromSeconds(40));
-    builder.WebHost.ConfigureKestrel(kestrel => kestrel.Listen(IPAddress.Parse(loaded.Server.Dashboard.ListenAddress), loaded.Server.Dashboard.Port));
+    builder.WebHost.ConfigureKestrel(kestrel =>
+    {
+        kestrel.Limits.MaxRequestBodySize = 1024 * 1024;
+        kestrel.Listen(IPAddress.Parse(loaded.Server.Dashboard.ListenAddress), loaded.Server.Dashboard.Port);
+    });
     builder.Services.AddSingleton(loaded);
     builder.Services.AddSingleton(loader);
     builder.Services.AddSingleton<SessionRegistry>();
@@ -49,6 +66,7 @@ try
     builder.Services.AddSingleton<TrafficHistoryService>();
     builder.Services.AddSingleton<AuditService>();
     builder.Services.AddSingleton<AdminSessionService>();
+    builder.Services.AddSingleton<AdminLoginGuard>();
     builder.Services.AddSingleton<ProxyListenerService>();
     builder.Services.AddSingleton<ConfigurationWriteLock>();
     builder.Services.AddSingleton(sp => new ChannelConfigurationEditor(parsed.ConfigurationPath, loader, sp.GetRequiredService<ServerRuntime>(), sp.GetRequiredService<ProxyListenerService>(), sp.GetRequiredService<PeerRelayRegistry>(), sp.GetRequiredService<SessionRegistry>(), sp.GetRequiredService<ConfigurationWriteLock>()));
@@ -61,10 +79,11 @@ try
     builder.Services.AddHostedService(sp => sp.GetRequiredService<TrafficHistoryService>());
 
     var app = builder.Build();
-    app.UseDefaultFiles();
-    app.UseStaticFiles();
     app.Use(async (context, next) =>
     {
+        context.Response.Headers.ContentSecurityPolicy = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'";
+        context.Response.Headers.XContentTypeOptions = "nosniff";
+        context.Response.Headers.XFrameOptions = "DENY";
         if (context.Request.Path.StartsWithSegments("/api"))
         {
             context.Response.Headers.CacheControl = "no-store";
@@ -72,6 +91,8 @@ try
 
         await next(context);
     });
+    app.UseDefaultFiles();
+    app.UseStaticFiles();
 
     app.MapGet("/health/live", () => Results.Ok(new { status = "live" }));
     app.MapGet("/health/ready", (ServerRuntime runtime) => runtime.IsReady
@@ -120,26 +141,54 @@ try
         try { await editor.DeleteAsync(id, cancellationToken); return Results.NoContent(); }
         catch (SecurityGroupUpdateException exception) { return Results.BadRequest(new { error = exception.Message }); }
     });
-    app.MapPost("/api/v1/admin/session", async (HttpRequest request, HttpResponse response, AdminLoginRequest login, AdminSessionService sessions, AuditService audit, CancellationToken cancellationToken) =>
+    app.MapPost("/api/v1/admin/session", async (HttpRequest request, HttpResponse response, AdminLoginRequest login, AdminSessionService sessions, AdminLoginGuard guard, AuditService audit, CancellationToken cancellationToken) =>
     {
         var actor = new string((login.Username ?? string.Empty).Where(c => !char.IsControl(c)).Take(128).ToArray());
         var remoteIp = request.HttpContext.Connection.RemoteIpAddress?.ToString();
-        if (!sessions.TryLogin(login.Username, login.Password, out var session))
+        if (guard.IsLocked(remoteIp, actor, out var retryAfter))
         {
+            response.Headers.RetryAfter = Math.Max(1, (int)Math.Ceiling(retryAfter.TotalSeconds)).ToString();
+            try { await audit.RecordAsync(new AuditEvent("admin_login_failure", "denied") { Actor = actor, RemoteIp = remoteIp, ReasonCode = "rate_limited" }, cancellationToken); }
+            catch (AuditUnavailableException) { return Results.Problem("Audit storage is unavailable.", statusCode: 503); }
+            return Results.StatusCode(StatusCodes.Status429TooManyRequests);
+        }
+
+        if (!AdminLoginGuard.PasswordWithinLimit(login.Password))
+        {
+            if (!guard.TryReserve(remoteIp, actor, out retryAfter))
+            {
+                response.Headers.RetryAfter = Math.Max(1, (int)Math.Ceiling(retryAfter.TotalSeconds)).ToString();
+                try { await audit.RecordAsync(new AuditEvent("admin_login_failure", "denied") { Actor = actor, RemoteIp = remoteIp, ReasonCode = "rate_limited" }, cancellationToken); }
+                catch (AuditUnavailableException) { return Results.Problem("Audit storage is unavailable.", statusCode: 503); }
+                return Results.StatusCode(StatusCodes.Status429TooManyRequests);
+            }
+
+            guard.CompleteAttempt(remoteIp, actor, success: false);
+            try { await audit.RecordAsync(new AuditEvent("admin_login_failure", "denied") { Actor = actor, RemoteIp = remoteIp, ReasonCode = "password_too_long" }, cancellationToken); }
+            catch (AuditUnavailableException) { return Results.Problem("Audit storage is unavailable.", statusCode: 503); }
+            return Results.BadRequest(new { error = "Password exceeds the maximum length." });
+        }
+
+        if (!guard.TryReserve(remoteIp, actor, out retryAfter))
+        {
+            response.Headers.RetryAfter = Math.Max(1, (int)Math.Ceiling(retryAfter.TotalSeconds)).ToString();
+            try { await audit.RecordAsync(new AuditEvent("admin_login_failure", "denied") { Actor = actor, RemoteIp = remoteIp, ReasonCode = "rate_limited" }, cancellationToken); }
+            catch (AuditUnavailableException) { return Results.Problem("Audit storage is unavailable.", statusCode: 503); }
+            return Results.StatusCode(StatusCodes.Status429TooManyRequests);
+        }
+
+        if (!sessions.TryPrepareLogin(login.Username, login.Password, out var session))
+        {
+            guard.CompleteAttempt(remoteIp, actor, success: false);
             try { await audit.RecordAsync(new AuditEvent("admin_login_failure", "denied") { Actor = actor, RemoteIp = remoteIp, ReasonCode = "invalid_credentials" }, cancellationToken); }
             catch (AuditUnavailableException) { return Results.Problem("Audit storage is unavailable.", statusCode: 503); }
             return Results.Unauthorized();
         }
+        guard.CompleteAttempt(remoteIp, actor, success: true);
         try { await audit.RecordAsync(new AuditEvent("admin_login_success", "success") { Actor = actor, RemoteIp = remoteIp }, cancellationToken); }
-        catch (AuditUnavailableException) { sessions.Revoke(session!); return Results.Problem("Audit storage is unavailable.", statusCode: 503); }
-        response.Cookies.Append(AdminSessionService.CookieName, session!.Id, new CookieOptions
-        {
-            HttpOnly = true,
-            SameSite = SameSiteMode.Strict,
-            Secure = request.IsHttps,
-            MaxAge = session.ExpiresAtUtc - DateTimeOffset.UtcNow,
-            Path = "/"
-        });
+        catch (AuditUnavailableException) { return Results.Problem("Audit storage is unavailable.", statusCode: 503); }
+        sessions.CommitLogin(session!);
+        response.Cookies.Append(AdminSessionService.CookieName, session!.Id, AdminSessionService.CreateCookieOptions(request.IsHttps, session.ExpiresAtUtc - DateTimeOffset.UtcNow));
         return Results.Ok(new { authenticated = true, csrfToken = session.CsrfToken, expiresAtUtc = session.ExpiresAtUtc });
     });
     app.MapDelete("/api/v1/admin/session", async (HttpRequest request, HttpResponse response, AdminSessionService sessions, AuditService audit, CancellationToken cancellationToken) =>
@@ -150,7 +199,7 @@ try
             catch (AuditUnavailableException) { /* AuditService logged the fault; logout still revokes the session. */ }
         }
         sessions.Logout(request);
-        response.Cookies.Delete(AdminSessionService.CookieName, new CookieOptions { HttpOnly = true, SameSite = SameSiteMode.Strict, Secure = request.IsHttps, Path = "/" });
+        response.Cookies.Delete(AdminSessionService.CookieName, AdminSessionService.CreateCookieOptions(request.IsHttps));
         return Results.NoContent();
     });
     app.MapGet("/api/v1/admin/audit", async (HttpRequest request, AdminSessionService sessions, AuditService audit, CancellationToken cancellationToken) =>
@@ -183,7 +232,9 @@ try
         bytesToTarget = snapshots.Sum(snapshot => snapshot.BytesToTarget),
         bytesToCaller = snapshots.Sum(snapshot => snapshot.BytesToCaller),
         peerCiphertextToTarget = snapshots.Sum(snapshot => snapshot.PeerCiphertextToTarget),
-        peerCiphertextToCaller = snapshots.Sum(snapshot => snapshot.PeerCiphertextToCaller)
+        peerCiphertextToCaller = snapshots.Sum(snapshot => snapshot.PeerCiphertextToCaller),
+        tcpIdleTimeoutSeconds = runtime.Configuration.Server.Limits.TcpIdleTimeoutSeconds,
+        halfCloseDrainTimeoutSeconds = runtime.Configuration.Server.Limits.HalfCloseDrainTimeoutSeconds
         });
     });
     app.MapGet("/api/v1/dashboard/snapshot", (HttpRequest request, ServerRuntime runtime, MetricsRegistry metrics) =>
@@ -467,7 +518,9 @@ static IResult GetDashboardSnapshot(HttpRequest request, ServerRuntime runtime, 
         bytesToTarget = channelMetrics.Sum(snapshot => snapshot.BytesToTarget),
         bytesToCaller = channelMetrics.Sum(snapshot => snapshot.BytesToCaller),
         peerCiphertextToTarget = channelMetrics.Sum(snapshot => snapshot.PeerCiphertextToTarget),
-        peerCiphertextToCaller = channelMetrics.Sum(snapshot => snapshot.PeerCiphertextToCaller)
+        peerCiphertextToCaller = channelMetrics.Sum(snapshot => snapshot.PeerCiphertextToCaller),
+        tcpIdleTimeoutSeconds = runtime.Configuration.Server.Limits.TcpIdleTimeoutSeconds,
+        halfCloseDrainTimeoutSeconds = runtime.Configuration.Server.Limits.HalfCloseDrainTimeoutSeconds
     };
     return Results.Ok(new { snapshotTimeUtc, page, pageSize, total = allClients.Length, overview, clients = pageClients });
 }

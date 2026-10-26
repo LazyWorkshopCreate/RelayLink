@@ -75,7 +75,7 @@ RelayLink/
 - [文档索引](docs/README.md)
 - [需求与功能边界](docs/requirements/README.md)
 - [技术设计](docs/design/technical-design.md)
-- [HTTP/HTTPS 反向代理需求与设计（规划，未实现）](docs/design/http-reverse-proxy.md)
+- [HTTP/HTTPS 反向代理设计](docs/design/http-reverse-proxy.md)
 - [客户端安全互访设计](docs/design/agent-to-agent.md)
 - [配置示例](config/examples/)
 - [安装与使用指南](docs/operations/installation-and-usage.md)

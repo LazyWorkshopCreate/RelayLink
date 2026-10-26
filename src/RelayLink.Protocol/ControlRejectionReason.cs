@@ -11,7 +11,8 @@ public enum ControlRejectionReason
     DuplicateSession = 6,
     InvalidFirstFrame = 7,
     ConfigurationMismatch = 8,
-    ClientConfigurationChanged = 9
+    ClientConfigurationChanged = 9,
+    AuthenticationFailed = 10
 }
 
 public static class ControlRejectionReasonExtensions
@@ -27,6 +28,12 @@ public static class ControlRejectionReasonExtensions
         ControlRejectionReason.InvalidFirstFrame => "The first control frame must be Register.",
         ControlRejectionReason.ConfigurationMismatch => "Configuration acknowledgement does not match the current session and snapshot.",
         ControlRejectionReason.ClientConfigurationChanged => "Client configuration changed during registration; retry with current credentials and identity.",
+        ControlRejectionReason.AuthenticationFailed => "Client authentication failed.",
         _ => "Server did not provide a recognized rejection reason."
     };
+
+    public static ControlRejectionReason ToUnauthenticatedWireReason(this ControlRejectionReason reason) =>
+        reason is ControlRejectionReason.ClientNotFound or ControlRejectionReason.ClientDisabled or ControlRejectionReason.InvalidSecret
+            ? ControlRejectionReason.AuthenticationFailed
+            : reason;
 }

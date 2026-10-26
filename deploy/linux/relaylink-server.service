@@ -7,6 +7,7 @@ Wants=network-online.target
 Type=simple
 User=relaylink
 Group=relaylink
+UMask=0077
 WorkingDirectory=/opt/relaylink/server
 ExecStart=/opt/relaylink/server/RelayLink.Server --config /etc/relaylink/server.json --log-directory /var/lib/relaylink/logs
 Restart=on-failure

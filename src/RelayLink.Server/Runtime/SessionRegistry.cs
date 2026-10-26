@@ -50,6 +50,14 @@ public sealed class Session(Guid sessionId, string clientId, DateTimeOffset conn
     private readonly SemaphoreSlim configUpdateLock = new(1, 1);
     private readonly object configAckLock = new();
     private readonly Queue<string> pendingConfigVersions = new();
+    private string queuedConfigVersion = string.Empty;
+    public string ConfigVersionPendingOrCurrent
+    {
+        get
+        {
+            lock (configAckLock) return pendingConfigVersions.Count == 0 ? ConfigVersion : queuedConfigVersion;
+        }
+    }
     private IReadOnlyList<HttpChannelStatus> httpStates = [];
     public IReadOnlyList<HttpChannelStatus> HttpStates => Volatile.Read(ref httpStates);
     public void SetHttpStates(IReadOnlyList<HttpChannelStatus> states) => Volatile.Write(ref httpStates, states.ToArray());
@@ -76,6 +84,7 @@ public sealed class Session(Guid sessionId, string clientId, DateTimeOffset conn
                 if (pendingConfigVersions.Count >= MaximumPendingConfigurations)
                     throw new ProtocolException("Too many unacknowledged configuration updates.");
                 pendingConfigVersions.Enqueue(version);
+                queuedConfigVersion = version;
             }
             await SendAsync(new Frame(FrameType.ConfigUpdate, JsonProtocolSerializer.Serialize(new ConfigUpdateMessage(SessionId, version, snapshot), ProtocolVersion)), cancellationToken);
         }

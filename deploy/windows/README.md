@@ -10,7 +10,7 @@
 .\install-server-service.ps1 -ExecutablePath 'C:\Program Files\RelayLink\Server\RelayLink.Server.exe' -ConfigurationPath 'C:\ProgramData\RelayLink\server.json'
 ```
 
-脚本先执行静态配置检查，再创建自动启动及失败恢复的 Windows Service。若同名服务已存在，脚本会停止并要求管理员显式处理，避免意外替换正在运行的服务。服务账号必须能绑定配置中的控制、数据、业务和仪表盘端口，并读取控制 TLS 证书私钥。Agent 需能访问控制端口 `tunnel.port` 及独立数据端口 `tunnel.dataPort`；普通数据端口当前为明文，须依靠受信隔离链路或网络层加密保护。升级时 Server 与 Agent 必须一起更新。
+脚本先执行静态配置检查，再创建自动启动及失败恢复的 Windows Service。若同名服务已存在，脚本会停止并要求管理员显式处理，避免意外替换正在运行的服务。服务账号必须能绑定配置中的控制、数据、业务和仪表盘端口，并读取控制 TLS 证书私钥。服务端写出客户端 JSON、服务端配置和 SQLite 时，只保留当前进程身份的访问权限，并去掉继承的 ACL。Agent 需能访问控制端口 `tunnel.port` 及独立数据端口 `tunnel.dataPort`；普通数据端口当前为明文，须依靠受信隔离链路或网络层加密保护。当前 Server 接受 v3、v4 和 v5 Agent，普通 TCP 可以先升级 Server；UDP 需要 v4，HTTP/HTTPS 需要 v5。见 [UDP 转发](../../docs/operations/udp-forwarding.md) 与 [HTTP 反向代理](../../docs/operations/http-reverse-proxy.md)。
 
 服务端运行日志默认写入配置目录的 `logs/`，例如 `C:\ProgramData\RelayLink\logs`。`server-*.jsonl` 保留 14 天，`server-error-*.jsonl` 永久保留，均按天或 10 MiB 轮转。手动启动可用 `--log-directory <受保护目录>` 指定路径；服务账号必须具有写入权限。运行日志不依赖 Windows Event Log 事件源，SQLite 审计仍独立保存。
 
@@ -24,7 +24,7 @@
 
 脚本分别发布两种 win-x64 Agent 程序，并生成 `artifacts/installer/RelayLink-Agent-win-x64-self-contained-1.0.0.exe` 和 `RelayLink-Agent-win-x64-framework-dependent-1.0.0.exe`。程序发布目录分别为 `artifacts/installer-publish/<构建编号>/win-x64/self-contained/RelayLink.Agent` 和 `.../framework-dependent/RelayLink.Agent`；两种包均不包含任何真实配置、密钥或证书。目标机以管理员权限运行安装包后，依赖检查页显示操作系统、x64、VC++ 及 .NET 状态；自包含包的 .NET 项显示已内置，框架依赖包缺少 .NET 10 ASP.NET Core Runtime x64 时阻止安装。静默安装执行相同检查。首次安装必须在向导中选择已有的 Agent JSON 配置文件；未选择、文件不存在或扩展名不对时不能开始安装。安装程序校验配置，复制到 `C:\ProgramData\RelayLink\Agent\agent.json`，然后通过兼容 Windows PowerShell 4.0 的 WMI 注册逻辑将 `RelayLinkAgent` 注册为自动启动的 Windows Service 并立即启动。服务注册或启动失败会使安装失败并显示底层原因，不会静默完成。安装成功后在所有用户桌面创建“RelayLink Agent Monitor”快捷方式，双击会用系统默认浏览器打开配置对应的 `http://127.0.0.1:dashboardPort/`；未填写端口时使用 18081，设置为 0 时不创建。新下载配置的控制 TLS 信任 CA 已作为 Base64 内容内嵌，不需要单独的 PEM 文件。服务以 `LocalService` 运行，配置目录只授予 LocalService、SYSTEM 和 Administrators 权限；服务账号必须能访问服务端的控制/数据端口及本地业务目标。配置文件只包含服务端地址与端口、客户端 ID、密钥、CA 公钥证书和本机参数，不得包含通道或目标地址。
 
-同一构建还会在 `artifacts/release/` 生成两种程序 ZIP，名称分别带 `self-contained` 和 `framework-dependent`；GitHub Release 同时附上这四个 Windows Agent 产物。
+同一构建还会在 `artifacts/release/` 生成两种程序 ZIP，名称分别带 `self-contained` 和 `framework-dependent`；GitHub Release 同时附上这四个 Windows Agent 产物。发行出的 `.exe` 安装包没有 Authenticode 签名。仓库未配置代码签名证书，流水线只校验 Inno Setup 编译器的 SHA-256 和发布者签名，不会给安装包签名；在签名作业接入之前，下载方只能用随包的 `SHA256SUMS` 核对完整性，不能把它当成发布者签名。
 
 安装包默认启用详细日志，并在退出时把日志副本保存到 `C:\ProgramData\RelayLink\Agent\installer-logs`。日志包含依赖结论、安装阶段、脚本退出码和错误原因，但不写入 Agent JSON 正文、客户端密钥或 CA 内容。
 

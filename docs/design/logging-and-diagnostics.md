@@ -2,8 +2,8 @@
 
 文档 ID：DES-005\
 状态：Accepted\
-版本：v1.0.0\
-更新日期：2026-09-30\
+版本：v1.1.0\
+更新日期：2026-10-15\
 配套需求：[日志与诊断需求](../requirements/2026-09-30-logging-and-diagnostics.md)
 
 ## 1. 设计边界与组件
@@ -75,8 +75,11 @@
 | 7 | InvalidFirstFrame | 首帧不是 Register | ProtocolError |
 | 8 | ConfigurationMismatch | 确认的 session/摘要不一致 | ConfigurationMismatch |
 | 9 | ClientConfigurationChanged | 注册期间配置变化 | AuthFailed |
+| 10 | AuthenticationFailed | 未认证注册失败的统一原因 | AuthFailed |
 
-服务端先校验客户端与密钥，再检查身份和会话占用；原因细分不绕过认证、身份固定或容量限制。服务端运行日志包含固定原因、错误码、经过控制字符过滤及长度限制的客户端 ID、来源 IP；审计记录保留 `agent_session_rejected`。审计 reasonCode 沿用小写形式，如 `identity_mismatch`、`duplicate_session`；InvalidSecret 沿用 `authentication_failed`，新增不存在/停用分别使用 `client_not_found` / `client_disabled`。
+服务端先校验客户端与密钥，再检查身份和会话占用；原因细分不绕过认证、身份固定或容量限制。客户端不存在、已禁用和密钥无效在审计与服务端运行日志中仍然分开记录，但写给尚未通过密钥校验的对端时统一为 `AuthenticationFailed`（reason 10），避免在控制端口上枚举客户端 ID 或启停状态。身份、重复会话和配置确认失败发生在密钥已校验之后，仍返回各自原因。服务端运行日志包含细分原因、错误码、经过控制字符过滤及长度限制的客户端 ID、来源 IP；审计记录保留 `agent_session_rejected`。审计 reasonCode 沿用小写形式，如 `identity_mismatch`、`duplicate_session`；InvalidSecret 沿用 `authentication_failed`，不存在/停用分别使用 `client_not_found` / `client_disabled`。
+
+管理端口若绑定非 loopback 地址，启动时记一条 Error，消息以 `SECURITY:` 开头，并同时写到标准错误。该记录不包含口令或会话 Cookie。
 
 Agent 在注册响应、配置确认响应和在线控制读循环中解析错误帧。`AgentPermanentException` 保存 ErrorCode 和 RejectionReason；Warning 事件记录两者，异常消息包含阶段及本地固定说明，外层 scope 保留 `profileId`、`clientId`。明确拒绝使用原有慢速重试，另一配置项继续运行。
 

@@ -196,16 +196,26 @@ public sealed class TrafficHistoryService(ServerRuntime runtime, MetricsRegistry
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    private static async Task<SqliteConnection> OpenAsync(HistoryConfiguration settings, CancellationToken cancellationToken)
+    internal static async Task<SqliteConnection> OpenAsync(HistoryConfiguration settings, CancellationToken cancellationToken)
     {
         var path = DatabasePath(settings.FilePath);
-        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        SecretFilePermissions.PrepareDatabase(path);
         var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = path, DefaultTimeout = 10 }.ToString());
-        await connection.OpenAsync(cancellationToken);
-        await using var pragma = connection.CreateCommand();
-        pragma.CommandText = "PRAGMA journal_mode=WAL";
-        await pragma.ExecuteNonQueryAsync(cancellationToken);
-        return connection;
+        try
+        {
+            await connection.OpenAsync(cancellationToken);
+            SecretFilePermissions.RestrictDatabase(path);
+            await using var pragma = connection.CreateCommand();
+            pragma.CommandText = "PRAGMA journal_mode=WAL";
+            await pragma.ExecuteNonQueryAsync(cancellationToken);
+            SecretFilePermissions.RestrictDatabase(path);
+            return connection;
+        }
+        catch
+        {
+            await connection.DisposeAsync();
+            throw;
+        }
     }
 
     public static string DatabasePath(string filePath) => Path.GetFullPath(

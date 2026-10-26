@@ -2,7 +2,7 @@
 
 RelayLink 为 macOS 提供两个自包含 Agent 包。Intel Mac 使用 `RelayLink-Agent-osx-x64-<version>.tar.gz`，Apple Silicon Mac 使用 `RelayLink-Agent-osx-arm64-<version>.tar.gz`。可用 `uname -m` 判断架构：`x86_64` 对应 `osx-x64`，`arm64` 对应 `osx-arm64`。两个版本使用同一配置 schema、协议和通道模型，不包含 macOS 专用通道逻辑。
 
-当前发行包未做 Developer ID 签名和 Apple 公证，不能视为面向不受管设备的正式签名发行版。生产交付应在发布链路中加入签名、公证和 stapling，并按组织的 Gatekeeper/MDM 策略安装；不要通过全局关闭 Gatekeeper 绕过校验。
+当前发行包未做 Developer ID 签名和 Apple 公证，不能视为面向不受管设备的正式签名发行版。流水线没有公证密钥，因此不会在打包后调用 `codesign` 或 `notarytool`。生产交付应在发布链路中加入签名、公证和 stapling，并按组织的 Gatekeeper/MDM 策略安装；不要通过全局关闭 Gatekeeper 绕过校验。在该步骤真正接入之前，发布说明继续把 macOS 包标为未签名。
 
 ## 目录和账号
 

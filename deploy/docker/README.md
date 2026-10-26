@@ -20,6 +20,8 @@ pwsh ./scripts/start-server-compose.ps1 -AgentServerHost tunnel.example.com
 
 再次执行会保留原配置和数据。默认管理页为 `http://127.0.0.1:18080/`，控制端口为 `7443`，数据端口为 `7444`。
 
+入门配置把管理页绑定在 `127.0.0.1`。Compose 使用 host 网络，所以这就是 Docker 主机的 loopback，在主机浏览器打开上述地址即可，同机 Agent 也可以把互访目标指到 `127.0.0.1:18080`。管理端口是明文 HTTP，远程访问应走[端到端加密互访通道](../../docs/operations/installation-and-usage.md#8-通过互访访问-server-管理页)，不要把管理端口映射到其他网卡。若把 `dashboard.listenAddress` 改成非 loopback 地址，Server 启动时会在错误日志和标准错误写 `SECURITY` 告警。
+
 ### 启用 TLS
 
 生成的入门配置没有启用隧道 TLS，只适合受控环境验证普通代理。生产使用或启用 Agent 互访前，必须把证书放入 `.local/docker-server/config/tls`，再修改 `server.json`：
@@ -61,12 +63,12 @@ docker compose -f deploy/docker/compose.yaml up -d --build
 
 | 项目 | 默认值 | 说明 |
 |---|---:|---|
-| 管理页面 | `18080/tcp` | 示例监听全部主机网卡；应通过防火墙限制来源，或改绑 `127.0.0.1` |
+| 管理页面 | `127.0.0.1:18080/tcp` | 示例只绑定 loopback。Compose 使用 host 网络，因此该地址就是 Docker 主机本机；用主机浏览器或同机 Agent 的授权互访通道访问，不要把管理端口映射到其他网卡 |
 | UDP 业务通道 | 配置的 `端口/udp` | 业务来源与应用层安全组；host 网络无需端口映射，自定义 bridge 网络须显式发布 `/udp` |
 | Agent 控制 | `7443/tcp` | 仅允许 Agent 来源访问 |
 | Agent 数据 | `7444/tcp` | 仅允许 Agent 来源访问 |
 | 普通通道 | 动态端口 | 由管理页中的通道配置决定，按需配置主机防火墙 |
-| 配置和客户端 | `.local/docker-server/config` | 容器内路径 `/etc/relaylink`，可由管理页面更新客户端文件 |
+| 配置和客户端 | `.local/docker-server/config` | 容器内路径 `/etc/relaylink`。目录应为 `0700`，`server.json` 和客户端 JSON 为 `0600`；服务端写出这些文件时只保留所有者读写 |
 | SQLite 数据 | `.local/docker-server/data` | 容器内路径 `/var/lib/relaylink`，备份时须包含 WAL 相关文件 |
 | 服务端运行日志 | `.local/docker-server/data/logs` | 容器内 `/var/lib/relaylink/logs`，普通日志 14 天，错误日志永久保留 |
 

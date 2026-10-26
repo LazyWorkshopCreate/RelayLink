@@ -15,6 +15,7 @@ public sealed class ControlRejectionTests
     [InlineData(ControlRejectionReason.DuplicateSession, "already connected")]
     [InlineData(ControlRejectionReason.ConfigurationMismatch, "acknowledgement")]
     [InlineData(ControlRejectionReason.ClientConfigurationChanged, "changed")]
+    [InlineData(ControlRejectionReason.AuthenticationFailed, "authentication failed")]
     public void Agent_preserves_typed_reason_and_uses_local_description(ControlRejectionReason reason, string description)
     {
         var frame = new Frame(FrameType.Error, JsonProtocolSerializer.Serialize(new ErrorMessage(ErrorCode.AuthFailed, reason)));

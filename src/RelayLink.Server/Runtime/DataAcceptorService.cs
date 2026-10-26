@@ -26,19 +26,23 @@ public sealed class DataAcceptorService(
             {
                 var client = await listener.AcceptTcpClientAsync(stoppingToken);
                 client.NoDelay = true;
-                _ = HandleAcceptedAsync(client, stoppingToken);
+                _ = HandleAcceptedAsync(client, stoppingToken).ContinueWith(completed =>
+                {
+                    if (completed.IsFaulted) logger.LogError(completed.Exception, "Data connection handler failed.");
+                }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
             }
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
     }
 
-    private async Task HandleAcceptedAsync(TcpClient client, CancellationToken stoppingToken)
+    internal async Task HandleAcceptedAsync(TcpClient client, CancellationToken stoppingToken)
     {
-        if (!await unauthenticatedLimit.WaitAsync(0, stoppingToken))
+        var acquired = false;
+        try
         {
-            client.Dispose();
-            return;
-        }
+            try { acquired = await unauthenticatedLimit.WaitAsync(0, stoppingToken); }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { return; }
+            if (!acquired) return;
 
         var released = false;
         try
@@ -94,6 +98,11 @@ public sealed class DataAcceptorService(
         finally
         {
             if (!released) unauthenticatedLimit.Release();
+        }
+        }
+        finally
+        {
+            if (!acquired) client.Dispose();
         }
     }
 

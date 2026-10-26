@@ -1,5 +1,4 @@
 using System.Security.Cryptography;
-using System.Text;
 using System.Text.Json;
 using RelayLink.Server.Configuration;
 
@@ -29,13 +28,7 @@ public sealed class ClientConfigurationEditor(string serverConfigurationPath, Co
 
             var bound = client with { E2eCertificateSha256 = fingerprint };
             var path = Path.Combine(current.Server.ClientsDirectory, $"{client.ClientId}.json");
-            var temp = $"{path}.{Guid.NewGuid():N}.tmp";
-            try
-            {
-                await File.WriteAllTextAsync(temp, JsonSerializer.Serialize(bound, JsonOptions), new UTF8Encoding(false), cancellationToken);
-                File.Move(temp, path, overwrite: true);
-            }
-            finally { if (File.Exists(temp)) File.Delete(temp); }
+            await SecretFilePermissions.WriteTextAsync(path, JsonSerializer.Serialize(bound, JsonOptions), overwrite: true, cancellationToken);
             runtime.ReplaceConfiguration(new LoadedConfiguration(current.Server, current.Clients.ToDictionary(pair => pair.Key, pair => pair.Key == client.ClientId ? bound : pair.Value, StringComparer.Ordinal)));
             return bound;
         }
@@ -77,11 +70,16 @@ public sealed class ClientConfigurationEditor(string serverConfigurationPath, Co
             var updated = new LoadedConfiguration(current.Server,
                 current.Clients.Where(pair => pair.Key != clientId).ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal));
             loader.ValidateClientUpdate(updated);
-            await proxyListeners.ApplyConfigurationAsync(updated, cancellationToken);
             var path = Path.Combine(current.Server.ClientsDirectory, $"{client.ClientId}.json");
-            try { File.Delete(path); }
+            var previous = await File.ReadAllTextAsync(path, cancellationToken);
+            File.Delete(path);
+            try
+            {
+                await proxyListeners.ApplyConfigurationAsync(updated, cancellationToken);
+            }
             catch
             {
+                await SecretFilePermissions.WriteTextAsync(path, previous, overwrite: true, CancellationToken.None);
                 await proxyListeners.ApplyConfigurationAsync(current, CancellationToken.None);
                 throw;
             }
@@ -108,18 +106,32 @@ public sealed class ClientConfigurationEditor(string serverConfigurationPath, Co
             var current = loader.Load(configurationPath);
             var (updated, client, isNew) = change(current);
             loader.ValidateClientUpdate(updated);
-            await proxyListeners.ApplyConfigurationAsync(updated, cancellationToken);
             var path = Path.Combine(updated.Server.ClientsDirectory, $"{client.ClientId}.json");
-            var temp = $"{path}.{Guid.NewGuid():N}.tmp";
-            try { await File.WriteAllTextAsync(temp, JsonSerializer.Serialize(client, JsonOptions), new UTF8Encoding(false), cancellationToken); File.Move(temp, path, overwrite: false); }
-            catch (IOException) when (!isNew) { File.Move(temp, path, overwrite: true); }
-            finally { if (File.Exists(temp)) File.Delete(temp); }
+            var serialized = JsonSerializer.Serialize(client, JsonOptions);
+            var previous = isNew || !File.Exists(path) ? null : await File.ReadAllTextAsync(path, cancellationToken);
+            await SecretFilePermissions.WriteTextAsync(path, serialized, overwrite: !isNew, cancellationToken);
+            try
+            {
+                await proxyListeners.ApplyConfigurationAsync(updated, cancellationToken);
+            }
+            catch
+            {
+                if (previous is null) { if (File.Exists(path)) File.Delete(path); }
+                else await SecretFilePermissions.WriteTextAsync(path, previous, overwrite: true, CancellationToken.None);
+                throw;
+            }
             runtime.ReplaceConfiguration(updated);
             if (!client.Enabled)
             {
                 proxyListeners.RevokeClientConnections(client.ClientId);
                 peerRelays.RevokeClientConnections(client.ClientId);
-                if (sessions.TryGet(client.ClientId, out var session) && session is not null) sessions.Remove(client.ClientId, session.SessionId);
+                if (sessions.TryGet(client.ClientId, out var disabled) && disabled is not null) sessions.Remove(client.ClientId, disabled.SessionId);
+            }
+            else if (sessions.TryGet(client.ClientId, out var session) && session is { IsReady: true })
+            {
+                var (snapshot, version) = ConfigurationSnapshotFactory.Create(client, updated, session.ProtocolVersion);
+                if (!string.Equals(session.ConfigVersionPendingOrCurrent, version, StringComparison.Ordinal))
+                    await session.SendConfigurationUpdateAsync(snapshot, version, cancellationToken);
             }
             return client;
         }

@@ -198,7 +198,7 @@ public sealed class ConfigurationLoader
             }
         }
 
-        if (server.Limits.MaxConnections < 1 || server.Limits.MaxPendingConnections < 1 || server.Limits.MaxPendingConnections > server.Limits.MaxConnections || server.Limits.MaxUnauthenticatedConnections < 1 || server.Limits.MaxChannelsPerClient < 1 || server.Limits.OpenTimeoutSeconds < 1 || server.Limits.BlockedWriteTimeoutSeconds < 1 || server.Limits.HalfCloseDrainTimeoutSeconds < 1)
+        if (server.Limits.MaxConnections < 1 || server.Limits.MaxPendingConnections < 1 || server.Limits.MaxPendingConnections > server.Limits.MaxConnections || server.Limits.MaxUnauthenticatedConnections < 1 || server.Limits.MaxChannelsPerClient < 1 || server.Limits.OpenTimeoutSeconds < 1 || server.Limits.BlockedWriteTimeoutSeconds < 1 || server.Limits.HalfCloseDrainTimeoutSeconds < 1 || server.Limits.TcpIdleTimeoutSeconds is < 0 or > 86_400)
         {
             throw new ConfigurationException("Server limits are invalid.");
         }

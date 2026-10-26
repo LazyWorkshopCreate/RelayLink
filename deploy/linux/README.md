@@ -2,11 +2,16 @@
 
 ## Server
 
-先在构建机运行 `scripts/publish.ps1 -RuntimeIdentifier linux-x64 -Component Server`，再将 Linux 发布产物放入 `/opt/relaylink/server`。将服务端配置、客户端目录与 TLS 私钥放入 `/etc/relaylink`。使用 `relaylink` 专用账号，并确保该账号只能读取必要配置和证书私钥。
+先在构建机运行 `scripts/publish.ps1 -RuntimeIdentifier linux-x64 -Component Server`，再将 Linux 发布产物放入 `/opt/relaylink/server`。将服务端配置、客户端目录与 TLS 私钥放入 `/etc/relaylink`。使用 `relaylink` 专用账号，并确保该账号只能读取必要配置和证书私钥。配置、客户端密钥和数据库目录只允许服务账号访问。`/etc/relaylink` 与 `clients` 为 `0700`，`server.json`、客户端 JSON 和 TLS 私钥为 `0600`。服务进程写出的客户端 JSON、服务端配置和 SQLite 文件也会收紧到仅所有者可读写；若启动时发现这些路径对组或其他用户可读，会在错误日志和标准错误写 `SECURITY`。进程新建的数据库目录为 `0700`。已经存在的 `/tmp`、系统临时目录或其他用户可写目录不会被改权限，启动拒绝在其中打开数据库。数据库路径会先解析符号链接；文件本身是符号链接，或解析后落在文件系统根上时，启动拒绝打开。无法收紧进程创建的数据库文件时，启动失败。systemd 单元设置 `UMask=0077`。
+
+```bash
+sudo install -d -o relaylink -g relaylink -m 0700 /etc/relaylink /etc/relaylink/clients /var/lib/relaylink /var/lib/relaylink/logs
+sudo install -o relaylink -g relaylink -m 0600 ./server.json /etc/relaylink/server.json
+```
+
+先用上面的命令创建运行日志目录。systemd 模板指定此目录；普通文件 `server-*.jsonl` 保留 14 天，错误文件 `server-error-*.jsonl` 永久保留，均按天或 10 MiB 轮转。`journalctl -u relaylink-server` 保留启动与标准错误诊断。旧部署须更新 systemd 的 `ExecStart` 和 `UMask` 并执行 `daemon-reload`；配置预检不创建日志文件。
 
 部署前执行：
-
-先用 `sudo install -d -o relaylink -g relaylink -m 0700 /var/lib/relaylink/logs` 创建运行日志目录。systemd 模板指定此目录；普通文件 `server-*.jsonl` 保留 14 天，错误文件 `server-error-*.jsonl` 永久保留，均按天或 10 MiB 轮转。`journalctl -u relaylink-server` 保留启动与标准错误诊断。旧部署须更新 systemd 的 `ExecStart` 日志目录参数并执行 `daemon-reload`；配置预检不创建日志文件。
 
 ```bash
 /opt/relaylink/server/RelayLink.Server --config /etc/relaylink/server.json --check-config
@@ -15,7 +20,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now relaylink-server
 ```
 
-服务重启会断开所有控制会话和现有代理连接。Agent 必须能访问控制端口 `tunnel.port` 和独立数据端口 `tunnel.dataPort`（缺省为控制端口加一）；代理端口和仪表盘端口只应在内网可达。普通数据端口目前不加密，开放范围应限于 Agent 来源，并由受信隔离链路或网络层加密保护；安全组不提供保密性。升级时 Server 与 Agent 必须一起更新，旧版本不能混用。
+服务重启会断开所有控制会话和现有代理连接。Agent 必须能访问控制端口 `tunnel.port` 和独立数据端口 `tunnel.dataPort`（缺省为控制端口加一）；代理端口和仪表盘端口只应在内网可达。普通数据端口目前不加密，开放范围应限于 Agent 来源，并由受信隔离链路或网络层加密保护；安全组不提供保密性。当前 Server 接受 v3、v4 和 v5 Agent：可先升级 Server 并保留 v3 Agent 的 TCP；UDP 需要 v4，HTTP/HTTPS 需要 v5。不必为了普通 TCP 同时更换全部 Agent。版本和入口说明见 [UDP 转发](../../docs/operations/udp-forwarding.md) 与 [HTTP 反向代理](../../docs/operations/http-reverse-proxy.md)。
 
 ## Agent
 
@@ -49,7 +54,7 @@ sudo systemctl enable --now relaylink-agent
 
 无需增加管理页面专用协议。可以在 RelayLink Server 所在 Linux 主机同时运行一个标准 Linux Agent，并按普通授权互访流程配置：
 
-1. 将 Server 的 `dashboard.listenAddress` 设为 `127.0.0.1`、端口设为 `18080`，避免管理页直接暴露到外部网络。
+1. 将 Server 的 `dashboard.listenAddress` 设为 `127.0.0.1`、端口设为 `18080`。这是示例和 Docker 入门配置的默认值。管理端口是明文 HTTP，不在此端口上启用 TLS；若绑定到非 loopback 地址，启动时会在错误日志和标准错误写出 `SECURITY` 告警。
 2. 为同机 Linux Agent 创建一个启用的授权互访通道，目标为 `127.0.0.1:18080`；例如通道 ID 使用 `server-dashboard`，并打开“仅允许授权客户端互访”。
 3. 为获准访问的另一客户端创建指向该 Linux Agent 与 `server-dashboard` 通道的端到端访问入口。
 4. 在访问方 Agent 本机状态页读取实际入口地址，并在同机浏览器打开 `http://127.0.0.1:<入口端口>/`。

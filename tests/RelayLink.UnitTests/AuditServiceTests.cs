@@ -63,6 +63,29 @@ public sealed class AuditServiceTests
         finally { SqliteConnection.ClearAllPools(); if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true); }
     }
 
+    [Fact]
+    public async Task Permission_refusal_is_reported_as_audit_unavailable()
+    {
+        if (!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS()) return;
+        var directory = Directory.CreateTempSubdirectory("relaylink-audit-perm-").FullName;
+        var openedMode = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute;
+        try
+        {
+            var path = Path.Combine(directory, "audit.db");
+            var service = Service(path);
+            await service.StartAsync(CancellationToken.None);
+            File.SetUnixFileMode(directory, openedMode | UnixFileMode.GroupRead | UnixFileMode.GroupWrite | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherWrite | UnixFileMode.OtherExecute | UnixFileMode.StickyBit);
+            var exception = await Assert.ThrowsAsync<AuditUnavailableException>(() => service.RecordAsync(new AuditEvent("admin_logout", "success")));
+            Assert.IsType<InvalidOperationException>(exception.InnerException);
+        }
+        finally
+        {
+            File.SetUnixFileMode(directory, openedMode);
+            SqliteConnection.ClearAllPools();
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
     private static AuditService Service(string path)
     {
         var server = new ServerConfiguration(1,

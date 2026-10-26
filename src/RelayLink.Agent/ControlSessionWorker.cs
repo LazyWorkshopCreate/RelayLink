@@ -12,6 +12,8 @@ namespace RelayLink.Agent;
 public sealed class ControlSessionWorker(AgentConfiguration configuration, AgentStatus status, AgentDiagnosticLog diagnostics, AgentConnectionQuota quota, ILogger<ControlSessionWorker> logger) : BackgroundService
 {
     private readonly HttpProxyRuntime httpProxy = new(configuration, logger);
+    private TimeSpan halfCloseDrainTimeout = TimeSpan.FromSeconds(300);
+    private TimeSpan tcpIdleTimeout = TimeSpan.Zero;
     private readonly Random random = new();
     private readonly X509Certificate2Collection? trustedRoots = configuration.UseTls ? AgentConfigurationLoader.LoadTrustedRoots(configuration) : null;
     private readonly AgentIdentity identity = AgentIdentity.LoadOrCreate(configuration.E2eIdentityPath, configuration.ClientId);
@@ -77,6 +79,8 @@ public sealed class ControlSessionWorker(AgentConfiguration configuration, Agent
         if (accepted?.Type != FrameType.RegisterAccepted) throw new ProtocolException("Expected RegisterAccepted.");
         var registration = JsonProtocolSerializer.Deserialize<RegisterAcceptedMessage>(accepted.Payload.Span);
         ValidateSnapshot(registration);
+        halfCloseDrainTimeout = TimeSpan.FromSeconds(registration.HalfCloseDrainTimeoutSeconds < 1 ? 300 : registration.HalfCloseDrainTimeoutSeconds);
+        tcpIdleTimeout = TimeSpan.FromSeconds(Math.Max(0, registration.TcpIdleTimeoutSeconds));
         await writer.WriteAsync(new Frame(FrameType.ConfigAck, JsonProtocolSerializer.Serialize(new ConfigAckMessage(registration.SessionId, registration.ConfigVersion))), stoppingToken);
         var ready = await reader.ReadAsync(ProtocolConstants.MaxControlPayloadLength, stoppingToken);
         if (ready?.Type == FrameType.Error) throw AgentPermanentException.FromServerError(ready, "configuration acknowledgement");
@@ -90,14 +94,14 @@ public sealed class ControlSessionWorker(AgentConfiguration configuration, Agent
         logger.LogInformation("Agent control session is online with session {SessionId}.", registration.SessionId);
         using var sessionCancellation = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
         var activeConfiguration = new SessionConfiguration(registration.ConfigVersion, registration.Config);
-        await using var peerSession = new PeerSessionCoordinator(configuration, identity, registration.SessionId, writer, logger, quota, sessionCancellation.Token, httpProxy);
+        await using var peerSession = new PeerSessionCoordinator(configuration, identity, registration.SessionId, writer, logger, quota, sessionCancellation.Token, httpProxy, halfCloseDrainTimeout, tcpIdleTimeout);
         await httpProxy.PrepareAsync(registration.Config, sessionCancellation.Token);
         await writer.WriteAsync(new Frame(FrameType.HttpStatus, JsonProtocolSerializer.Serialize(new HttpStatusMessage(registration.SessionId, registration.ConfigVersion, httpProxy.States))), sessionCancellation.Token);
         peerSession.ApplyConfiguration(httpProxy.EffectivePeerConfiguration(registration.Config));
         if (registration.Config.OutboundMappings.Count > 0)
             await writer.WriteAsync(new Frame(FrameType.PeerMappingStatus, JsonProtocolSerializer.Serialize(new PeerMappingStatusMessage(registration.SessionId, registration.ConfigVersion, peerSession.Addresses))), sessionCancellation.Token);
         status.SetOnline(registration.Config, peerSession.Addresses, httpProxy.States, httpProxy.MappingStates(registration.Config));
-        using var openLimit = new SemaphoreSlim(Math.Min(registration.Config.MaxConnections, configuration.MaxConnections));
+        var openLimit = new AdjustableConnectionLimit(Math.Min(registration.Config.MaxConnections, configuration.MaxConnections));
         var startSignals = new ConcurrentDictionary<Guid, TaskCompletionSource>();
         var openTasks = new ConcurrentDictionary<long, Task>();
         long nextOpenTaskId = 0;
@@ -143,6 +147,7 @@ public sealed class ControlSessionWorker(AgentConfiguration configuration, Agent
                     if (update.SessionId != registration.SessionId) throw new ProtocolException("Configuration update did not belong to the current session.");
                     ValidateSnapshot(update.ConfigVersion, update.Config);
                     activeConfiguration.Replace(update.ConfigVersion, update.Config);
+                    openLimit.SetMaximum(Math.Min(update.Config.MaxConnections, configuration.MaxConnections));
                     await httpProxy.PrepareAsync(update.Config, sessionCancellation.Token);
                     peerSession.ApplyConfiguration(httpProxy.EffectivePeerConfiguration(update.Config));
                     await writer.WriteAsync(new Frame(FrameType.ConfigAck, JsonProtocolSerializer.Serialize(new ConfigAckMessage(update.SessionId, update.ConfigVersion))), sessionCancellation.Token);
@@ -183,7 +188,7 @@ public sealed class ControlSessionWorker(AgentConfiguration configuration, Agent
         }
     }
 
-    private async Task HandleOpenWithLimitAsync(OpenMessage open, Guid sessionId, SessionConfiguration activeConfiguration, FrameWriter controlWriter, SemaphoreSlim openLimit, ConcurrentDictionary<Guid, TaskCompletionSource> startSignals, CancellationToken cancellationToken)
+    private async Task HandleOpenWithLimitAsync(OpenMessage open, Guid sessionId, SessionConfiguration activeConfiguration, FrameWriter controlWriter, AdjustableConnectionLimit openLimit, ConcurrentDictionary<Guid, TaskCompletionSource> startSignals, CancellationToken cancellationToken)
     {
         using var lease = quota.TryAcquirePending();
         if (lease is null)
@@ -192,7 +197,8 @@ public sealed class ControlSessionWorker(AgentConfiguration configuration, Agent
             await SendOpenFailedAsync(open, ErrorCode.CapacityExceeded, controlWriter, cancellationToken);
             return;
         }
-        if (!await openLimit.WaitAsync(0, cancellationToken))
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!openLimit.TryAcquire())
         {
             await diagnostics.WriteAsync(open.ConnectionId, open.ChannelId, "capacity_rejected");
             await SendOpenFailedAsync(open, ErrorCode.CapacityExceeded, controlWriter, cancellationToken);
@@ -299,22 +305,25 @@ public sealed class ControlSessionWorker(AgentConfiguration configuration, Agent
             await diagnostics.WriteAsync(open.ConnectionId, open.ChannelId, phase, elapsedMs: (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds);
 
             using var relayCancellation = CancellationTokenSource.CreateLinkedTokenSource(sessionCancellation);
+            using var idle = new RelayIdleWatch(tcpIdleTimeout, relayCancellation.Token);
             using var progressCancellation = new CancellationTokenSource();
             var progress = ReportProgressAsync(open.ConnectionId, open.ChannelId, started,
                 () => (Interlocked.Read(ref toServerBytes), Interlocked.Read(ref toTargetBytes), Interlocked.Read(ref lastToServer), Interlocked.Read(ref lastToTarget)),
                 progressCancellation.Token);
             try
             {
-                var toServer = CopyDirectionAsync(open.ConnectionId, open.ChannelId, "target_to_server", target.Client, dataClient.Client, relayCancellation.Token,
-                    count => { Interlocked.Add(ref toServerBytes, count); Interlocked.Exchange(ref lastToServer, Stopwatch.GetTimestamp()); });
-                var toTarget = CopyDirectionAsync(open.ConnectionId, open.ChannelId, "server_to_target", dataClient.Client, target.Client, relayCancellation.Token,
-                    count => { Interlocked.Add(ref toTargetBytes, count); Interlocked.Exchange(ref lastToTarget, Stopwatch.GetTimestamp()); });
+                TcpKeepAlive.Enable(target.Client);
+                TcpKeepAlive.Enable(dataClient.Client);
+                var toServer = CopyDirectionAsync(open.ConnectionId, open.ChannelId, "target_to_server", target.Client, dataClient.Client, idle.Token,
+                    count => { Interlocked.Add(ref toServerBytes, count); Interlocked.Exchange(ref lastToServer, Stopwatch.GetTimestamp()); idle.Touch(); });
+                var toTarget = CopyDirectionAsync(open.ConnectionId, open.ChannelId, "server_to_target", dataClient.Client, target.Client, idle.Token,
+                    count => { Interlocked.Add(ref toTargetBytes, count); Interlocked.Exchange(ref lastToTarget, Stopwatch.GetTimestamp()); idle.Touch(); });
                 await RelayPump.CompleteBidirectionalAsync(toServer, toTarget, () =>
                 {
                     relayCancellation.Cancel();
                     target.Dispose();
                     dataClient.Dispose();
-                }, TimeSpan.FromSeconds(300));
+                }, halfCloseDrainTimeout);
                 outcome = "completed";
             }
             finally { progressCancellation.Cancel(); await progress; }

@@ -1,4 +1,54 @@
 {
+  "v0.1.0-rc.11": {
+    "title": "RelayLink v0.1.0-rc.11",
+    "intro": "A release candidate after v0.1.0-rc.10 that tightens the management plane, runtime connection limits, and secret-file permissions. The admin endpoint stays plain HTTP and the examples and Docker setup listen on loopback by default. Client connection limits apply immediately, and TCP connections that are silent in both directions close after the server idle timeout.",
+    "sections": [
+      {
+        "title": "Highlights",
+        "items": [
+          "Example configs and Docker bind dashboard.listenAddress to 127.0.0.1. A non-loopback admin listener writes a SECURITY error to the log and stderr, and the process still starts. The recommended path is still an Agent on the server and an end-to-end encrypted peer channel to the admin UI on 127.0.0.1. This candidate does not add mandatory admin HTTPS.",
+          "Passwords longer than 1024 UTF-8 bytes are rejected before PBKDF2. A wrong username still runs PBKDF2. Five failures from the same source lock that source, with backoff from 1 second up to 15 minutes. After a lock expires, one in-flight retry is allowed and failures keep accumulating. The failure cache holds at most 10,000 sources, keeps unexpired history when it prunes, and refuses new sources when it is full of unexpired state.",
+          "An existing login session is replaced only after the login-success audit event is stored. If that write fails, login returns 503 and the previous session stays valid.",
+          "Before the secret has been checked, ClientNotFound, ClientDisabled, and InvalidSecret are sent to the peer as AuthenticationFailed. The detailed reasons stay in the audit log and server logs. Failures after the secret check stay specific.",
+          "Every management response sets Content-Security-Policy (including frame-ancestors 'none'), X-Content-Type-Options: nosniff, and X-Frame-Options: DENY. /api stays Cache-Control: no-store.",
+          "Client maxConnections and maxPendingConnections take effect immediately. Lowering a limit blocks new slots. Connections that already hold a permit keep it until they finish, and releasing one does not open a slot above the new maximum. Saving a client limit pushes a configuration snapshot to a ready Agent.",
+          "Channel and client updates write the JSON first, then switch listeners and the in-memory configuration. If binding fails, the previous file is written back and existing connections stay. A client directory that cannot accept the temp file fails before any listener changes. Deleting a client removes the file first and restores it if the listener update fails.",
+          "limits.tcpIdleTimeoutSeconds cancels an established ordinary TCP proxy or authorized peer relay when both directions have been silent for that long, then releases the connection slot. Omitting the field uses 900 seconds; 0 disables idle close. Accepted TCP sockets enable keepalive, and the admin overview shows the active value. Cancellation while waiting for an unauthenticated handshake slot, or a full slot, disposes the accepted socket on the control and data acceptors. RegisterAccepted carries halfCloseDrainTimeoutSeconds and tcpIdleTimeoutSeconds. Current Agents use those values for ordinary TCP relays and for encrypted or plaintext peer copies, including half-close drain. Older peers ignore the new fields. The values follow server.json and are picked up on the next registration.",
+          "Client JSON, rewritten server.json, and the SQLite audit and traffic files are readable only by the service account: Unix mode 0600, database directories created for them 0700, and a Windows DACL for the current process identity with inheritance removed. A group- or world-readable secret, private key, client directory, or database is reported as SECURITY in the log and on stderr. Other-writable shared database directories, the process temp directory, /tmp, a filesystem root, and any existing other-writable directory are refused, and the process asks for a RelayLink-only directory. A dedicated database directory is tightened so later WAL and SHM files are not world-readable; a shared parent is not rewritten. The systemd unit sets UMask=0077. Linux deployment docs match the Agent docs: /etc/relaylink and clients are 0700, and secret files are 0600.",
+          "Third-party GitHub Actions in CI, release, and Pages are pinned to commit SHAs, with the version tag kept in a comment.",
+          "The root README no longer describes the HTTP design as unimplemented. The HTTP design stays Draft and now says the v5 path is on main, while the evaluation and unmeasured capacity sections remain draft. Linux and Windows deployment notes no longer require upgrading Server and Agent together. They follow the v3 TCP / v4 UDP / v5 HTTP matrix and point at the UDP and HTTP operations guides."
+        ]
+      },
+      {
+        "title": "Upgrade and compatibility",
+        "items": [
+          "NTP1 remains v5, and JSON schemaVersion remains 1. Server continues to accept v3, v4, and v5.",
+          "The admin UI remains plain HTTP on loopback by design.",
+          "Before upgrading, confirm that secret paths and database directories meet the new permission checks. Windows Docker Desktop bind mounts may need an explicit chmod 0700 or 0600 inside the Linux VM. Omitting tcpIdleTimeoutSeconds now defaults to 900 seconds; set 0 to keep the previous behavior of no application idle timeout.",
+          "Otherwise, ordinary TCP/UDP and HTTP proxy behavior is unchanged from v0.1.0-rc.10."
+        ]
+      },
+      {
+        "title": "Verification and limitations",
+        "items": [
+          "The merged changes #3 (890a282), #4 (d9e03b8), and #2 (e5834f5) passed CI on Ubuntu, Windows, and macOS (Intel and Apple Silicon).",
+          "Live Docker smoke on TestClient-01 (Windows, Docker Desktop 29.5.3) at e5834f5: /health/ready and /health/live returned 200; the admin UI returned 200 with CSP, X-Frame-Options, and nosniff; the admin listener inside the container was 127.0.0.1:18080. Docker Desktop network_mode: host is the Linux VM host, not Windows loopback; that was checked with a host-network sidecar.",
+          "Known Windows Desktop friction: the admin password is entered interactively on the first compose start, and bind-mount modes need chmod inside the VM. This note does not include multipass or remote test-server verification.",
+          "Windows installers are unsigned, and macOS archives are unsigned and not notarized, the same as v0.1.0-rc.10."
+        ]
+      },
+      {
+        "title": "Release assets",
+        "items": [
+          "Self-contained Linux x64 and Windows x64 Server archives",
+          "Self-contained Linux x64 Agent archive",
+          "Self-contained and framework-dependent Windows x64 Agent archives and installers",
+          "Self-contained macOS Intel and Apple Silicon Agent archives",
+          "SHA256SUMS checksum manifest"
+        ]
+      }
+    ]
+  },
   "v0.1.0-rc.10": {
     "title": "RelayLink v0.1.0-rc.10",
     "intro": "A release candidate that adds HTTP/HTTPS application proxying on the target Agent. Public listeners and encrypted peer access are both checked and forwarded to a fixed web upstream, with tighter WebSocket origin checks, idle timeouts, and client-address header handling.",

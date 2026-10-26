@@ -4,6 +4,10 @@
     <RootNamespace>RelayLink.Server</RootNamespace>
   </PropertyGroup>
   <ItemGroup>
+    <InternalsVisibleTo Include="RelayLink.UnitTests" />
+    <Content Include="admin-security.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" Link="wwwroot/admin-security.txt" TargetPath="wwwroot/admin-security.txt" />
+  </ItemGroup>
+  <ItemGroup>
     <!-- Local test outputs must never become Web SDK publish content. -->
     <Content Remove="artifacts/**" />
     <None Remove="artifacts/**" />
@@ -29,6 +33,12 @@
       <AdminWebFile Include="$(MSBuildProjectDirectory)/../RelayLink.AdminWeb/dist/**/*" />
     </ItemGroup>
     <Copy SourceFiles="@(AdminWebFile)" DestinationFiles="@(AdminWebFile->'$(TargetDir)wwwroot/%(RecursiveDir)%(Filename)%(Extension)')" />
+  </Target>
+  <Target Name="CopyAdminSecurityProbeToBuild" AfterTargets="CopyAdminWebToBuild">
+    <Copy SourceFiles="$(MSBuildProjectDirectory)/admin-security.txt" DestinationFolder="$(TargetDir)wwwroot" SkipUnchangedFiles="true" />
+  </Target>
+  <Target Name="CopyAdminSecurityProbeToPublish" AfterTargets="CopyAdminWebToPublish">
+    <Copy SourceFiles="$(MSBuildProjectDirectory)/admin-security.txt" DestinationFolder="$(PublishDir)wwwroot" SkipUnchangedFiles="true" />
   </Target>
   <Target Name="CopyAdminWebToPublish" AfterTargets="Publish" DependsOnTargets="BuildAdminWeb">
     <ItemGroup>

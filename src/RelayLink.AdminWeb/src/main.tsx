@@ -38,6 +38,8 @@ type Overview = {
     bytesToCaller: number;
     peerCiphertextToTarget: number;
     peerCiphertextToCaller: number;
+    tcpIdleTimeoutSeconds?: number;
+    halfCloseDrainTimeoutSeconds?: number;
 };
 type Client = {
     clientId: string;
@@ -928,7 +930,14 @@ export function App() {
                         <div>
                             <span>转发中连接</span>
                             <strong>{overview?.activeConnections ?? '—'}</strong>
-                            <small>当前活动连接</small>
+                            <small>
+                                当前活动连接
+                                {overview?.tcpIdleTimeoutSeconds
+                                    ? ` · TCP 空闲 ${overview.tcpIdleTimeoutSeconds} 秒`
+                                    : overview
+                                      ? ' · TCP 空闲超时关闭'
+                                      : ''}
+                            </small>
                         </div>
                     </div>
                     <div className="metric wide">

@@ -17,6 +17,13 @@ namespace RelayLink.IntegrationTests;
 
 public sealed class PeerConnectionTests
 {
+    [Fact]
+    public void Reserved_dashboard_port_stays_bound_until_the_server_starts()
+    {
+        using var fixture = new Fixture();
+        Assert.Throws<SocketException>(fixture.TryBindDashboardPort);
+    }
+
 #if LEGACY_AGENT_TESTS
     [Fact]
     public async Task Udp_peer_request_to_real_v3_target_is_rejected_without_disconnect()
@@ -776,6 +783,7 @@ public sealed class PeerConnectionTests
         private readonly List<Process> processes = [];
         private readonly List<StringBuilder> processLogs = [];
         private readonly HashSet<int> allocatedPorts = [];
+        private readonly Dictionary<int, TcpListener> heldPorts = [];
         private int targetConnections;
         private int targetConnectionsB;
         public int TargetConnections => Volatile.Read(ref targetConnections);
@@ -793,6 +801,12 @@ public sealed class PeerConnectionTests
         private int DashboardPort { get; }
         private string caPath = string.Empty;
         public string DashboardAddress => $"127.0.0.1:{DashboardPort}";
+
+        internal void TryBindDashboardPort()
+        {
+            using var thief = new TcpListener(IPAddress.Loopback, DashboardPort);
+            thief.Start();
+        }
         public string ClientConfigurationJson(string clientId) => File.ReadAllText(Path.Combine(directory, "clients", $"{clientId}.json"));
         public string IntruderSecret { get; } = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
         public string CallerSecret { get; private set; } = string.Empty;
@@ -880,12 +894,17 @@ public sealed class PeerConnectionTests
                 new HistoryConfiguration(true, Path.Combine(directory, "traffic.db")));
             var serverPath = Path.Combine(directory, "server.json");
             await File.WriteAllTextAsync(serverPath, JsonSerializer.Serialize(serverConfig, json));
+            // Echo listeners bind port 0 while these sockets are still held, so they cannot
+            // take the dashboard, tunnel, data, or proxy ports the server is about to claim.
+            ReleaseHeldPortsExcept(AgentDashboardPort, VisitedDashboardPort);
             StartProcess(typeof(ConfigurationLoader).Assembly.Location, serverPath);
             await WaitReadyAsync();
 
             await File.WriteAllTextAsync(Path.Combine(visitedDirectory, "agent.json"), AgentJson("visited", secret));
             await File.WriteAllTextAsync(Path.Combine(callerDirectory, "agent.json"), AgentJson("caller", callerSecret));
+            ReleaseHeldPort(VisitedDashboardPort);
             StartProcess(targetAssembly ?? typeof(ControlSessionWorker).Assembly.Location, Path.Combine(visitedDirectory, "agent.json"));
+            ReleaseHeldPort(AgentDashboardPort);
             if (startCallerAgent) StartProcess(callerAssembly ?? typeof(ControlSessionWorker).Assembly.Location, Path.Combine(callerDirectory, "agent.json"));
         }
 
@@ -910,7 +929,7 @@ public sealed class PeerConnectionTests
                 {
                     throw new InvalidOperationException($"Agents did not become online. {Logs()}");
                 }
-                if (processes.Any(process => process.HasExited)) throw new InvalidOperationException(Logs());
+                ThrowIfProcessExited();
                 try { await Task.Delay(100, token); }
                 catch (OperationCanceledException) when (token.IsCancellationRequested)
                 {
@@ -966,9 +985,45 @@ public sealed class PeerConnectionTests
         {
             while (true)
             {
-                var port = FreePort();
-                if (allocatedPorts.Add(port)) return port;
+                var listener = new TcpListener(IPAddress.Loopback, 0);
+                listener.Start();
+                var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+                if (allocatedPorts.Add(port))
+                {
+                    heldPorts.Add(port, listener);
+                    return port;
+                }
+
+                listener.Stop();
+                listener.Dispose();
             }
+        }
+
+        private void ReleaseHeldPortsExcept(params int[] keep)
+        {
+            var retained = new HashSet<int>(keep);
+            foreach (var port in heldPorts.Keys.Where(port => !retained.Contains(port)).ToArray())
+                ReleaseHeldPort(port);
+        }
+
+        private void ReleaseHeldPort(int port)
+        {
+            if (!heldPorts.Remove(port, out var listener)) return;
+            listener.Stop();
+            listener.Dispose();
+        }
+
+        private void ThrowIfProcessExited()
+        {
+            if (!processes.Any(process => process.HasExited)) return;
+            foreach (var process in processes)
+            {
+                if (!process.HasExited) continue;
+                // The parameterless wait drains redirected output after the process has already exited.
+                process.WaitForExit();
+            }
+
+            throw new InvalidOperationException(Logs());
         }
 
         private bool TryReadPort(string mappingId, out int port)
@@ -1006,7 +1061,7 @@ public sealed class PeerConnectionTests
             {
                 try { if ((await http.GetAsync($"http://127.0.0.1:{DashboardPort}/health/ready", deadline.Token)).IsSuccessStatusCode) return; }
                 catch (HttpRequestException) { }
-                if (processes.Any(process => process.HasExited)) throw new InvalidOperationException(Logs());
+                ThrowIfProcessExited();
                 await Task.Delay(100, deadline.Token);
             }
         }
@@ -1115,13 +1170,54 @@ public sealed class PeerConnectionTests
             return $"PBKDF2-SHA256$100000${Convert.ToBase64String(salt)}${Convert.ToBase64String(hash)}";
         }
 
-        public string Logs() => string.Join("\n", processLogs.Select((output, index) => $"process {index}: " + string.Join("\n", output.ToString().Split('\n').Where(line => line.Contains("RelayLink.") || line.Contains("Exception") || line.Contains("failed", StringComparison.OrdinalIgnoreCase)))));
+        public string Logs()
+        {
+            var builder = new StringBuilder();
+            for (var index = 0; index < processLogs.Count; index++)
+            {
+                var text = processLogs[index].ToString();
+                var interesting = string.Join("\n", text.Split('\n').Where(line => line.Contains("RelayLink.") || line.Contains("Exception") || line.Contains("failed", StringComparison.OrdinalIgnoreCase)));
+                builder.Append("process ").Append(index).Append(": ").Append(interesting);
+                if (index < processes.Count && processes[index].HasExited)
+                {
+                    builder.Append(" exit=").Append(processes[index].ExitCode);
+                    if (string.IsNullOrWhiteSpace(interesting) && !string.IsNullOrWhiteSpace(text))
+                    {
+                        var raw = text.Length > 2000 ? text[^2000..] : text;
+                        builder.Append(" raw=").Append(raw.Trim());
+                    }
+                }
+
+                builder.Append('\n');
+            }
+
+            var logDirectory = Path.Combine(directory, "logs");
+            if (Directory.Exists(logDirectory))
+            {
+                foreach (var path in Directory.EnumerateFiles(logDirectory, "*.jsonl"))
+                {
+                    string text;
+                    try { text = File.ReadAllText(path); }
+                    catch (IOException) { continue; }
+                    if (text.Length > 4000) text = text[^4000..];
+                    builder.Append("log ").Append(Path.GetFileName(path)).Append(": ").Append(text.Trim()).Append('\n');
+                }
+            }
+
+            return builder.ToString();
+        }
 
         public void Dispose()
         {
             target.Stop();
             udpTarget?.Dispose();
             targetB.Stop();
+            foreach (var listener in heldPorts.Values)
+            {
+                listener.Stop();
+                listener.Dispose();
+            }
+            heldPorts.Clear();
             foreach (var process in processes)
             {
                 if (!process.HasExited) process.Kill(entireProcessTree: true);
@@ -1130,11 +1226,5 @@ public sealed class PeerConnectionTests
             try { Directory.Delete(directory, recursive: true); } catch (IOException) { }
         }
 
-        private static int FreePort()
-        {
-            using var listener = new TcpListener(IPAddress.Loopback, 0);
-            listener.Start();
-            return ((IPEndPoint)listener.LocalEndpoint).Port;
-        }
     }
 }
