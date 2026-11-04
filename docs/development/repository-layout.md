@@ -2,8 +2,8 @@
 
 文档 ID：DEV-001\
 状态：Active\
-版本：v1.12.0\
-更新日期：2026-10-23
+版本：v1.13.0\
+更新日期：2026-10-31
 
 ```text
 RelayLink/
@@ -49,13 +49,15 @@ RelayLink/
 
 - HTTP/HTTPS 宿主与 YARP 位于 RelayLink.Agent/HttpProxyRuntime.cs；PeerApplicationStream 在 Transport 解开既有互访 TLS 应用记录，Protocol 定义 v5 HTTP 配置/上下文/状态；Server 负责集中配置、版本/readiness 及中继。业务 HTTP 虚拟入口不创建 OS socket，现有状态页独立。部署与证据见 [运维](../operations/http-reverse-proxy.md) 和 [验证](../testing/http-reverse-proxy-verification.md)。
 
+- Server 的可审计 HTTP 使用 `Runtime/HttpInspectionRelay.cs` 的虚拟 Kestrel/YARP，SSH 由 `SshInspectionSession.cs` 管理会话；与 Agent 既有 `HttpProxyRuntime` 分开。共用阶段期限在 Transport，v7 阶段消息在 Protocol，凭据恢复仍在 Server。
+
 - 当前已进入开发阶段，根目录使用 `RelayLink.slnx` 与各项目 csproj。共享库不得依赖 Server 或 Agent；Protocol 不依赖宿主和配置文件 I/O。
 - Server 与 Agent 通过 `RelayLink.Logging` 复用文件日志策略；组件分别决定日志目录与名称，日志库不依赖协议、运行配置或业务载荷。
 - 各目录剩余的 `.gitkeep` 仅标识尚未放入对应类别的实际文件；出现实际内容时应删除该占位。
 - config/examples 仅存脱敏示例，命名 `*.example.json`。真实部署配置放仓库外；临时本地配置如必须留在仓库目录，放被忽略的 `.local/`。
 - deploy 保存实际部署模板；docs/design 解释策略。模板形成后，设计文档链接它，避免长期维护两份相同模板。
 - scripts 保存可重复执行的工具脚本；实验文件放被忽略的 work/，构建产物放被忽略的 artifacts/。
-- .github/workflows 保存日常验证、tag 发行、GitHub Pages 部署。
+- .github/workflows 保存日常验证、tag 发行和 GitHub Pages 部署，不存真实配置或部署凭据。说明见 [GitHub Actions 流水线](ci.md)。
 - website 保存 GitHub Pages 静态网站模板、文章目录、快速开始片段、英文界面及发布说明翻译、锁定构建依赖和站点测试；`scripts/build-website.mjs` 从仓库 Markdown 生成使用/文档/发布列表及详情，缺少发布英文版本、章节或条目时失败。输出位于被忽略的 `artifacts/site/`，中文位于根路径，英文位于 `/en/`；维护方法见 [网站维护说明](website.md)。
 - tools 保存独立的模拟目标与模拟调用方程序，不作为服务端或 Agent 的运行依赖。
 - 需要新增 docs/operations 等类别时，须在有实际内容后创建并加入索引，不预建大量空文档。

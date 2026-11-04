@@ -69,6 +69,11 @@ public sealed class ConfigurationLoader
         foreach (var path in clientFiles.OrderBy(path => path, StringComparer.Ordinal))
         {
             var client = Deserialize<ClientConfiguration>(path);
+            var clientDirectory = Path.GetDirectoryName(path)!;
+            client = client with
+            {
+                Channels = client.Channels.Select(channel => channel with { ConfigurationDirectory = clientDirectory }).ToArray()
+            };
             ValidateClient(client, path, server);
             if (!Path.GetFileNameWithoutExtension(path).Equals(client.ClientId, StringComparison.Ordinal))
             {
@@ -264,6 +269,7 @@ public sealed class ConfigurationLoader
             }
             catch (ArgumentException exception) { throw new ConfigurationException(exception.Message); }
             if (channel.ApplicationProtocol == "http" && !server.Tunnel.TlsEnabled) throw new ConfigurationException("HTTP requires control TLS.");
+            if (channel.InspectionMode != "none" && !server.Tunnel.TlsEnabled) throw new ConfigurationException("Inspection channels require control TLS.");
             ValidateAddressAndPort(channel.ListenAddress, channel.ListenPort, $"channel {channel.ChannelId} listener");
             ValidatePort(channel.TargetPort, $"channel {channel.ChannelId} target");
             if (string.IsNullOrWhiteSpace(channel.TargetHost) || channel.MaxConnections < 1 || channel.MaxConnections > client.MaxConnections || channel.TargetConnectTimeoutSeconds is < 1 or > 300)
@@ -278,6 +284,7 @@ public sealed class ConfigurationLoader
                 (channel.AuthorizedClientsOnly || !server.SecurityGroups.Any(group => group.Id == channel.SecurityGroupId)))
                 throw new ConfigurationException($"Invalid security group for {client.ClientId}/{channel.ChannelId}.");
             ValidateTags(channel.Tags, $"channel {client.ClientId}/{channel.ChannelId}");
+            ChannelApplication.Validate(channel, $"{client.ClientId}/{channel.ChannelId}", Path.GetDirectoryName(path)!);
         }
 
         var mappingIds = new HashSet<string>(StringComparer.Ordinal);
@@ -344,13 +351,13 @@ public sealed class ConfigurationLoader
 
     public void ValidateChannelUpdate(LoadedConfiguration current, ClientConfiguration updatedClient)
     {
-        ValidateClient(updatedClient, "dashboard update", current.Server);
+        ValidateClient(updatedClient, Path.Combine(current.Server.ClientsDirectory, updatedClient.ClientId + ".json"), current.Server);
         ValidateGlobalConflicts(current.Server, current.Clients.Values.Select(client => client.ClientId == updatedClient.ClientId ? updatedClient : client));
     }
 
     public void ValidateClientUpdate(LoadedConfiguration configuration)
     {
-        foreach (var client in configuration.Clients.Values) ValidateClient(client, "dashboard update", configuration.Server);
+        foreach (var client in configuration.Clients.Values) ValidateClient(client, Path.Combine(configuration.Server.ClientsDirectory, client.ClientId + ".json"), configuration.Server);
         ValidateGlobalConflicts(configuration.Server, configuration.Clients.Values);
     }
 

@@ -317,6 +317,36 @@ button:disabled {
     background: #edf0f4;
     color: #65758a;
 }
+.agent-badge.compact {
+    padding: 2px 8px;
+    font-size: 11px;
+}
+.address-line {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    max-width: 100%;
+}
+.copy-button {
+    border: 0;
+    background: transparent;
+    color: #8b9bb0;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border-radius: 5px;
+    display: inline-grid;
+    place-items: center;
+    flex: none;
+    cursor: pointer;
+}
+.copy-button:hover {
+    background: #eef3fb;
+    color: #315fe4;
+}
+.copy-button.copied {
+    color: #15825d;
+}
 .agent-delete,
 .agent-close {
     border: 1px solid #e2e8f0;
@@ -367,13 +397,47 @@ button:disabled {
     margin-left: 5px;
 }
 .agent-table-scroll {
-    overflow-x: auto;
+    min-width: 0;
 }
 table {
     width: 100%;
     border-collapse: collapse;
     font-size: 12px;
-    white-space: nowrap;
+}
+.agent-panels table {
+    table-layout: fixed;
+}
+.agent-panels > .agent-panel:first-child col:nth-child(1) {
+    width: 24%;
+}
+.agent-panels > .agent-panel:first-child col:nth-child(2) {
+    width: 26%;
+}
+.agent-panels > .agent-panel:first-child col:nth-child(3) {
+    width: 32%;
+}
+.agent-panels > .agent-panel:first-child col:nth-child(4) {
+    width: 18%;
+}
+.agent-panels > .agent-panel:last-child col:nth-child(1) {
+    width: 32%;
+}
+.agent-panels > .agent-panel:last-child col:nth-child(2) {
+    width: 22%;
+}
+.agent-panels > .agent-panel:last-child col:nth-child(3) {
+    width: 31%;
+}
+.agent-panels > .agent-panel:last-child col:nth-child(4) {
+    width: 15%;
+}
+.agent-panels th,
+.agent-panels td {
+    overflow-wrap: break-word;
+}
+.agent-panels td code {
+    white-space: normal;
+    overflow-wrap: break-word;
 }
 th {
     text-align: left;
@@ -523,7 +587,7 @@ td code {
     color: #187153;
     font-size: 13px;
     font-weight: 600;
-    overflow-wrap: anywhere;
+    overflow-wrap: break-word;
 }
 .agent-import-summary dl {
     display: grid;
@@ -540,7 +604,7 @@ td code {
     font-size: 13px;
     font-weight: 600;
     margin: 4px 0 0;
-    overflow-wrap: anywhere;
+    overflow-wrap: break-word;
 }
 .agent-import-summary p,
 .agent-edit-hint {

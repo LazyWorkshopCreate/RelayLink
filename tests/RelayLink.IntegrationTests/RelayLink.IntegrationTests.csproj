@@ -12,6 +12,9 @@
   <PropertyGroup Condition="'$(EnableLegacyV4AgentTests)' == 'true'">
     <DefineConstants>$(DefineConstants);LEGACY_V4_AGENT_TESTS</DefineConstants>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(EnableLegacyV5AgentTests)' == 'true'">
+    <DefineConstants>$(DefineConstants);LEGACY_V5_AGENT_TESTS</DefineConstants>
+  </PropertyGroup>
   <ItemGroup>
     <Compile Include="..\Support\TestDirectory.cs" Link="TestDirectory.cs" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />

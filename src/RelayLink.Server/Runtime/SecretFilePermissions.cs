@@ -91,6 +91,11 @@ internal static class SecretFilePermissions
             yield return database + "-shm";
             yield return Path.GetDirectoryName(database)!;
         }
+
+        var credentials = CredentialStore.DirectoryFor(serverConfigurationPath);
+        yield return credentials;
+        yield return Path.Combine(credentials, "key");
+        yield return Path.Combine(credentials, "store");
     }
 
     public static IReadOnlyList<string> FindLoose(IEnumerable<string> paths)

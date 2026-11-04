@@ -19,7 +19,7 @@ using Serilog;
 
 namespace RelayLink.IntegrationTests;
 
-public sealed class ServerTunnelTests
+public sealed partial class ServerTunnelTests
 {
     [Fact]
     public void Fixture_ports_stay_distinct_and_bound_until_the_server_starts()
@@ -84,27 +84,55 @@ public sealed class ServerTunnelTests
             new { username = "admin", password = "test-password" }, token);
         login.EnsureSuccessStatusCode();
         var csrf = (await login.Content.ReadFromJsonAsync<JsonElement>(cancellationToken: token)).GetProperty("csrfToken").GetString();
-        foreach (var protocol in new[] { "udp", "tcp" })
+        using (var rejected = new HttpRequestMessage(HttpMethod.Put,
+            $"http://127.0.0.1:{fixture.DashboardPort}/api/v1/admin/clients/test-agent/channels/echo")
+        { Content = JsonContent.Create(new { displayName = "Echo", enabled = true, listenAddress = "127.0.0.1", listenPort = fixture.ProxyPort,
+            targetHost = "127.0.0.1", targetPort = fixture.TargetPort, maxConnections = 5, targetConnectTimeoutSeconds = 5, transportProtocol = "udp" }) })
         {
-            using var update = new HttpRequestMessage(HttpMethod.Put,
-                $"http://127.0.0.1:{fixture.DashboardPort}/api/v1/admin/clients/test-agent/channels/echo")
-            { Content = JsonContent.Create(new { displayName = "Echo", enabled = true, listenAddress = "127.0.0.1", listenPort = fixture.ProxyPort,
-                targetHost = "127.0.0.1", targetPort = fixture.TargetPort, maxConnections = 5, targetConnectTimeoutSeconds = 5, transportProtocol = protocol }) };
-            update.Headers.Add("X-RelayLink-CSRF", csrf);
-            using var saved = await http.SendAsync(update, token);
-            saved.EnsureSuccessStatusCode();
+            rejected.Headers.Add("X-RelayLink-CSRF", csrf);
+            using var rejectedResponse = await http.SendAsync(rejected, token);
+            Assert.Equal(HttpStatusCode.BadRequest, rejectedResponse.StatusCode);
+            Assert.Contains("Channel type cannot be changed.", await rejectedResponse.Content.ReadAsStringAsync(token));
+        }
+        async Task<ConfigUpdateMessage> ExpectLegacyUpdateAsync()
+        {
             var frame = await reader.ReadAsync(ProtocolConstants.MaxControlPayloadLength, token);
             Assert.Equal(FrameType.ConfigUpdate, frame?.Type);
             var message = JsonProtocolSerializer.Deserialize<ConfigUpdateMessage>(frame!.Payload.Span);
             using var document = JsonDocument.Parse(frame.Payload);
-            // The old binary hashes its own deserialized v3 shape; this wire fixture has exactly that shape.
             var rawConfig = document.RootElement.GetProperty("config").GetRawText();
             Assert.DoesNotContain("transportProtocol", rawConfig);
             Assert.DoesNotContain("udpIdleTimeoutSeconds", rawConfig);
+            Assert.DoesNotContain("inspectionMode", rawConfig);
+            Assert.DoesNotContain("\"application\":", rawConfig);
             Assert.Equal(Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(rawConfig))), message.ConfigVersion);
-            Assert.Equal(protocol == "tcp" ? 1 : 0, message.Config.Channels.Count);
+            Assert.Equal(["echo"], message.Config.Channels.Select(channel => channel.ChannelId).ToArray());
             await writer.WriteAsync(new Frame(FrameType.ConfigAck, JsonProtocolSerializer.Serialize(new ConfigAckMessage(message.SessionId, message.ConfigVersion))), token);
+            return message;
         }
+        using (var update = new HttpRequestMessage(HttpMethod.Put,
+            $"http://127.0.0.1:{fixture.DashboardPort}/api/v1/admin/clients/test-agent/channels/echo")
+        { Content = JsonContent.Create(new { displayName = "Echo renamed", enabled = true, listenAddress = "127.0.0.1", listenPort = fixture.ProxyPort,
+            targetHost = "127.0.0.1", targetPort = fixture.TargetPort, maxConnections = 5, targetConnectTimeoutSeconds = 5, transportProtocol = "tcp" }) })
+        {
+            update.Headers.Add("X-RelayLink-CSRF", csrf);
+            using var saved = await http.SendAsync(update, token);
+            saved.EnsureSuccessStatusCode();
+        }
+        await ExpectLegacyUpdateAsync();
+        using var listenHolder = new TcpListener(IPAddress.Loopback, 0);
+        listenHolder.Start();
+        var udpListenPort = ((IPEndPoint)listenHolder.LocalEndpoint).Port;
+        listenHolder.Stop();
+        using (var create = new HttpRequestMessage(HttpMethod.Post, $"http://127.0.0.1:{fixture.DashboardPort}/api/v1/admin/clients/test-agent/channels")
+        { Content = JsonContent.Create(new { channelId = "datagram", displayName = "Datagram", enabled = true, listenAddress = "127.0.0.1", listenPort = udpListenPort,
+            targetHost = "127.0.0.1", targetPort = fixture.TargetPort, maxConnections = 5, targetConnectTimeoutSeconds = 5, transportProtocol = "udp" }) })
+        {
+            create.Headers.Add("X-RelayLink-CSRF", csrf);
+            using var created = await http.SendAsync(create, token);
+            Assert.True(created.IsSuccessStatusCode, await created.Content.ReadAsStringAsync(token));
+        }
+        await ExpectLegacyUpdateAsync();
         var ping = await reader.ReadAsync(ProtocolConstants.MaxControlPayloadLength, token);
         Assert.Equal(FrameType.Ping, ping?.Type);
         var sequence = JsonProtocolSerializer.Deserialize<PingMessage>(ping!.Payload.Span).Sequence;
@@ -1142,7 +1170,7 @@ public sealed class ServerTunnelTests
 
         public string ReadLogs() => string.Concat(Directory.GetFiles(Path.Combine(directory, "logs"), "*.jsonl").Select(ReadActiveLog));
 
-        public async Task StartAsync(string? pinnedIdentity = null, bool enabled = true, string transportProtocol = "tcp", bool restrictSource = false, string dashboardListenAddress = "127.0.0.1")
+        public async Task StartAsync(string? pinnedIdentity = null, bool enabled = true, string transportProtocol = "tcp", bool restrictSource = false, string dashboardListenAddress = "127.0.0.1", Action<string>? configureBeforeStart = null)
         {
             Directory.CreateDirectory(Path.Combine(directory, "clients"));
             targetListener.Start();
@@ -1168,6 +1196,7 @@ public sealed class ServerTunnelTests
                 clientsDirectory = Path.Combine(directory, "clients"),
                 limits = new { maxConnections = 20, maxPendingConnections = 10, maxUnauthenticatedConnections = 10, maxChannelsPerClient = 10, openTimeoutSeconds = 10, blockedWriteTimeoutSeconds = 120, halfCloseDrainTimeoutSeconds = 300 }
             }));
+            configureBeforeStart?.Invoke(configPath);
             ReleaseHeldPorts();
             var assembly = typeof(RelayLink.Server.Configuration.ConfigurationLoader).Assembly.Location;
             server = Process.Start(new ProcessStartInfo("dotnet", $"\"{assembly}\" --config \"{configPath}\"") { UseShellExecute = false, RedirectStandardError = true, RedirectStandardOutput = true })!;

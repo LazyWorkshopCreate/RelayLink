@@ -4,7 +4,7 @@ using RelayLink.Server.Configuration;
 
 namespace RelayLink.Server.Runtime;
 
-public sealed class ClientConfigurationEditor(string serverConfigurationPath, ConfigurationLoader loader, ServerRuntime runtime, ProxyListenerService proxyListeners, PeerRelayRegistry peerRelays, SessionRegistry sessions, ConfigurationWriteLock writeLock)
+public sealed class ClientConfigurationEditor(string serverConfigurationPath, ConfigurationLoader loader, ServerRuntime runtime, ProxyListenerService proxyListeners, PeerRelayRegistry peerRelays, SessionRegistry sessions, ConfigurationWriteLock writeLock, CredentialStore? credentials = null)
 {
     private static readonly JsonSerializerOptions JsonOptions = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, WriteIndented = true };
     private readonly string configurationPath = Path.GetFullPath(serverConfigurationPath);
@@ -33,6 +33,7 @@ public sealed class ClientConfigurationEditor(string serverConfigurationPath, Co
             return bound;
         }
         catch (ConfigurationException exception) { throw new ClientUpdateException(exception.Message); }
+        catch (CredentialStoreException exception) { throw new ClientUpdateException(exception.Message); }
         finally { writeLock.Gate.Release(); }
     }
 
@@ -80,6 +81,9 @@ public sealed class ClientConfigurationEditor(string serverConfigurationPath, Co
             loader.ValidateClientUpdate(updated);
             var path = Path.Combine(current.Server.ClientsDirectory, $"{client.ClientId}.json");
             var previous = await File.ReadAllTextAsync(path, cancellationToken);
+            if (credentials is not null) await credentials.BeginDeletionAsync(clientId, null, cancellationToken);
+            proxyListeners.RevokeClientConnections(clientId);
+            peerRelays.RevokeClientConnections(clientId);
             File.Delete(path);
             try
             {
@@ -92,11 +96,13 @@ public sealed class ClientConfigurationEditor(string serverConfigurationPath, Co
                 throw;
             }
             runtime.ReplaceConfiguration(updated);
+            if (credentials is not null) await credentials.TryCompleteDeletionAsync(clientId, null);
             proxyListeners.RevokeClientConnections(clientId);
             peerRelays.RevokeClientConnections(clientId);
             if (sessions.TryGet(clientId, out var session) && session is not null) sessions.Remove(clientId, session.SessionId);
         }
         catch (ConfigurationException exception) { throw new ClientUpdateException(exception.Message); }
+        catch (CredentialStoreException exception) { throw new ClientUpdateException(exception.Message); }
         finally { writeLock.Gate.Release(); }
     }
 
@@ -114,6 +120,13 @@ public sealed class ClientConfigurationEditor(string serverConfigurationPath, Co
             var current = loader.Load(configurationPath);
             var (updated, client, isNew) = change(current);
             loader.ValidateClientUpdate(updated);
+            if (isNew && credentials is not null)
+            {
+                if ((await credentials.PendingDeletionsAsync(cancellationToken)).Any(item => item.ClientId == client.ClientId))
+                    throw new ClientUpdateException("Credential cleanup is pending for this client; retry deletion before reuse.");
+                await credentials.BeginDeletionAsync(client.ClientId, null, cancellationToken);
+                await credentials.CompleteDeletionAsync(client.ClientId, null, cancellationToken);
+            }
             var path = Path.Combine(updated.Server.ClientsDirectory, $"{client.ClientId}.json");
             var serialized = JsonSerializer.Serialize(client, JsonOptions);
             var previous = isNew || !File.Exists(path) ? null : await File.ReadAllTextAsync(path, cancellationToken);
@@ -148,6 +161,7 @@ public sealed class ClientConfigurationEditor(string serverConfigurationPath, Co
             return (client, online && client.Enabled ? AgentPushReport.Sent : AgentPushReport.Offline);
         }
         catch (ConfigurationException exception) { throw new ClientUpdateException(exception.Message); }
+        catch (CredentialStoreException exception) { throw new ClientUpdateException(exception.Message); }
         finally { writeLock.Gate.Release(); }
     }
 }

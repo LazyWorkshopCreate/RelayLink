@@ -1,7 +1,7 @@
 # Agent 本机写接口使用管理令牌
 
 文档 ID：ADR-0027\
-状态：Accepted\
+状态：Superseded（由 [ADR-0034](0034-agent-local-write-session.md) 取代）\
 日期：2026-10-23
 
 ## 背景

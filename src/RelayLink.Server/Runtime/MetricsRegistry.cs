@@ -45,6 +45,8 @@ public sealed class ChannelMetrics
     private long peerFailed;
     private long peerCiphertextToTarget;
     private long peerCiphertextToCaller;
+    private long applicationToTarget;
+    private long applicationToCaller;
     private int peerPending;
     private int peerActive;
     private long udpDropped;
@@ -67,6 +69,8 @@ public sealed class ChannelMetrics
     public void PeerClosed() => Interlocked.Decrement(ref peerActive);
     public void AddPeerCiphertextToTarget(int bytes) => Interlocked.Add(ref peerCiphertextToTarget, bytes);
     public void AddPeerCiphertextToCaller(int bytes) => Interlocked.Add(ref peerCiphertextToCaller, bytes);
+    public void AddApplicationToTarget(int bytes) => Interlocked.Add(ref applicationToTarget, bytes);
+    public void AddApplicationToCaller(int bytes) => Interlocked.Add(ref applicationToCaller, bytes);
     public long DatagramDropped() => Interlocked.Increment(ref udpDropped);
     public void MarkHttpIngressReady() => Volatile.Write(ref targetResult, new TargetConnectionResult("http_ingress_ready", DateTimeOffset.UtcNow));
     public void MarkTargetSuccess() => Volatile.Write(ref targetResult, new TargetConnectionResult("success", DateTimeOffset.UtcNow));
@@ -93,6 +97,8 @@ public sealed class ChannelMetrics
         PeerActiveConnections = Volatile.Read(ref peerActive),
         PeerCiphertextToTarget = Interlocked.Read(ref peerCiphertextToTarget),
         PeerCiphertextToCaller = Interlocked.Read(ref peerCiphertextToCaller),
+        ApplicationToTarget = Interlocked.Read(ref applicationToTarget),
+        ApplicationToCaller = Interlocked.Read(ref applicationToCaller),
         UdpDroppedTotal = Interlocked.Read(ref udpDropped)
     };
 }
@@ -106,6 +112,8 @@ public sealed record ChannelMetricsSnapshot(long AcceptedTotal, long OpenedTotal
     public int PeerActiveConnections { get; init; }
     public long PeerCiphertextToTarget { get; init; }
     public long PeerCiphertextToCaller { get; init; }
+    public long ApplicationToTarget { get; init; }
+    public long ApplicationToCaller { get; init; }
     public long UdpDroppedTotal { get; init; }
 }
 public sealed record TargetConnectionResult(string Result, DateTimeOffset TimeUtc);

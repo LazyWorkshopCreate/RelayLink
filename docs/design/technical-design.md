@@ -2,8 +2,8 @@
 
 文档 ID：DES-001\
 状态：Draft（待评审）\
-版本：v2.24.4 设计评审稿\
-更新日期：2026-10-23\
+版本：v2.25.0 设计评审稿\
+更新日期：2026-10-31\
 调研日期：2026-09-15\
 配套文档：[需求文档索引](../requirements/README.md)
 
@@ -23,6 +23,8 @@
 UDP 使用来源会话与长度封装，复用独立 TCP 隧道；普通 TCP 原始复制保持不变。协议版本 4 的增量、超时、统计口径与兼容性见 [UDP 设计](udp-forwarding.md)。
 
 HTTP/HTTPS 模式采用目标 Agent 的 YARP/Kestrel 虚拟入口，保留 raw TCP/UDP；公网浏览器 TLS 在目标 Agent 终止，HTTP 互访保留内层 TLS/访问证明及应用解帧。集中配置、版本 v5 与 readiness 已接入，详见 [HTTP 设计](http-reverse-proxy.md)、[ADR-0026](../adr/0026-http-proxy-over-tcp-tunnels.md)、[运维](../operations/http-reverse-proxy.md) 和 [验证](../testing/http-reverse-proxy-verification.md)。
+
+服务端可视互访、服务端跳板代理和应用检查见 [REQ-001O](../requirements/2026-10-28-plugin-system.md)、[DES-009](plugin-system.md)。整体需求仍 Draft；2026-10-31 用户授权按 [DEV-006](../development/plugin-system-improvement-plan.md) 修复已有 HTTP/HTTPS、SSH、生命周期、配置与凭据路径。当前使用 v7 阶段通知、逐请求/动作审计、SSH 目标指纹及应用流量列。RDP、管理员批准闭环和桥应用尚未实现，具体能力与证据以插件设计及验证记录为准，不改变普通代理和目标 Agent HTTP 的处理位置。
 
 ## 2. 调研与方案比较
 
@@ -224,7 +226,7 @@ Agent 主程序现在仅接受包含 `servers[]` 的新格式；配置示例见[
 
 预认证 TLS 并发上限和握手期限属于资源保护，不是网络 ACL。身份错误对外统一返回 `AUTH_FAILED`，服务端日志按内部原因区分，且不记录提交的密钥。
 
-## 7. 协议 v2
+## 7. 协议帧格式（当前版本 7）
 
 ### 7.1 通用帧格式
 
@@ -233,7 +235,7 @@ Agent 主程序现在仅接受包含 `servers[]` 的新格式；配置示例见[
 | 偏移 | 长度 | 字段 |
 |---|---|---|
 | 0 | 4 字节 | ASCII magic：`NTP1` |
-| 4 | 1 字节 | version，支持 3 / 4 / 5；首帧锁定版本，v3 保留 TCP，v4 增加 UDP，v5 增加 HTTP；未知版本或连接内切换被拒绝 |
+| 4 | 1 字节 | version，支持 3 / 4 / 5 / 6 / 7；首帧锁定版本，v3 保留 TCP，v4 增加 UDP，v5 增加 HTTP，v6 引入 inspectionMode/application，v7 才允许可审计能力并增加阶段通知（ADR-0030）；未知版本或连接内切换被拒绝 |
 | 5 | 1 字节 | type |
 | 6 | 2 字节 | flags，当前版本必须为 0，大端 |
 | 8 | 4 字节 | payloadLength，无符号大端，不含头 |
@@ -262,6 +264,8 @@ Agent 主程序现在仅接受包含 `servers[]` 的新格式；配置示例见[
 | 14 | Error | 任一端→对端；code、可选的控制拒绝原因 reason，不含异常堆栈或秘密 |
 | 23 | HttpStatus | v5 Agent→Server，控制连接；sessionId、configVersion、channels（channelId、policyHash、state）；状态不能代替 ConfigAck |
 | 24 | HttpIngressReady | v5 Agent→Server，控制连接；connectionId；HTTP 宿主就绪，不代表 Web 上游连通，之后仍需 Start |
+| 25 | InspectionActive | v7 Server→Agent，控制连接；sessionId、connectionId；目标应用认证完成且允许审计已落库，双方转 active、释放首次 pending，详见 ADR-0030 |
+| 26 | InspectionTargetReady | v7 Agent→Server，控制连接；sessionId、connectionId、targetConnectDurationMs；目标 TCP 已就绪并可承载上游认证；Server 校验会话与连接归属，目标失败仍走 OpenFailed |
 | 32 | Data | 仅互访数据中继；按通道模式承载内层 TLS 记录或明文业务块 |
 | 33 | Fin | 仅互访数据中继；该发送方向结束 |
 | 34 | Reset | 仅互访数据中继；异常终止 |
@@ -413,7 +417,7 @@ Agent：Disconnected → Connecting → Authenticating → Configuring → Onlin
 - 两者不含帧头、TLS/TCP 开销；成功写入代表转交给传输层，不证明 SQL 已消费或提交。
 - 写入异常时可能有部分字节已发送，累计为成功完成操作的载荷下界，不用于计费。
 - `acceptedTotal`：通道 accept 成功次数，含离线/容量拒绝。
-- `openedTotal`：服务端发出 Start 并进入 Relay 的次数，不代表 SQL 登录成功。
+- `openedTotal`：普通通道为服务端发出 Start 并进入 Relay 的次数，不代表 SQL 登录成功；可审计通道在目标应用认证完成并转 active 时计数，prepared 不计业务成功。
 - `openFailedTotal`：Relay 前终结的连接数，按错误原因分类。
 - `activeConnections`：处于 Relay/HalfClosed 的连接数；`pendingConnections` 为已接收但未进入 Relay 的数量。
 - `normalClosedTotal` / `abortedTotal`：建立后的正常/异常终结数，分别记录，不混入建立失败。
@@ -435,7 +439,7 @@ Agent：Disconnected → Connecting → Authenticating → Configuring → Onlin
 ▶ 成都节点 02  [Offline] 最近断线 ...
 ```
 
-采用 ASP.NET Core Minimal API + `src/RelayLink.AdminWeb` 独立 React/TypeScript/Vite 项目。构建输出复制到 Server 的 `wwwroot/` 由同源静态文件中间件托管，不依赖外部 CDN；生产发布物不依赖 Node.js。React 默认转义配置展示名称，目标地址属于内网运维信息，不向公网提供。页面不设左侧侧栏；匿名只读，客户端卡片下的端到端访问入口以表格展示入口 ID、当前 Agent 上报的本机地址、目标和状态；仅登录后显示删除操作。登录入口点击后以弹窗呈现；管理表单打开时暂停轮询。常规轮询使用分页的管理台聚合快照，一页同时返回客户端、通道、入口和总览，避免按客户端分别请求通道与入口形成 N+1 请求；后续分页按顺序读取，且同一浏览器页面只允许一个刷新任务在途，避免慢请求与定时器叠加形成请求风暴。架构决定见 [ADR-0004](../adr/0004-standalone-admin-web.md)。
+采用 ASP.NET Core Minimal API + `src/RelayLink.AdminWeb` 独立 React/TypeScript/Vite 项目。构建输出复制到 Server 的 `wwwroot/` 由同源静态文件中间件托管，不依赖外部 CDN；生产发布物不依赖 Node.js。React 默认转义配置展示名称，目标地址属于内网运维信息，不向公网提供。页面不设左侧侧栏；匿名只读，客户端卡片下的端到端访问入口以表格展示入口 ID、当前 Agent 上报的本机地址、目标和在线状态，地址旁可复制地址与端口；仅登录后显示删除操作。登录入口点击后以弹窗呈现；管理表单打开时暂停轮询。常规轮询使用分页的管理台聚合快照，一页同时返回客户端、通道、入口和总览，避免按客户端分别请求通道与入口形成 N+1 请求；后续分页按顺序读取，且同一浏览器页面只允许一个刷新任务在途，避免慢请求与定时器叠加形成请求风暴。架构决定见 [ADR-0004](../adr/0004-standalone-admin-web.md)。
 
 点击通道的“建连中 / 转发中”数字打开实时连接弹窗；普通代理与端到端转发分别从运行时连接注册表读取，使用同一连接 ID 关联协议和管理操作。列表含来源（普通代理为远端 IP:端口，端到端为访问方客户端 ID）、阶段、建立时间与两个方向的已转发字节；端到端字节为服务端可见的密文 DATA 载荷，不表示业务明文。弹窗每 5 秒刷新，也可手动刷新；匿名可读，已登录管理员可在二次确认后断开单条连接。断开通过取消连接生命周期令牌释放数据通道与配额，不删除通道配置；ID 必须同时匹配目标客户端及通道，已结束连接返回 404。运行时快照与汇总计数由不同并发结构读取，瞬时竞争下可能短暂不一致。
 

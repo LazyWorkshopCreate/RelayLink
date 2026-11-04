@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Net.Sockets;
 using System.Security.Cryptography;
 using RelayLink.Server.Configuration;
@@ -9,6 +10,11 @@ namespace RelayLink.Server.Runtime;
 public sealed class PendingConnectionRegistry
 {
     private readonly ConcurrentDictionary<Guid, PendingConnection> pending = new();
+    private readonly object completionGate = new();
+    private readonly Dictionary<Guid, RecentCompletion> recentCompletions = new();
+    private readonly Queue<(Guid ConnectionId, RecentCompletion Completion)> completionOrder = new();
+    internal const int RecentCompletionCapacity = 1024;
+    private static readonly TimeSpan RecentCompletionRetention = TimeSpan.FromMinutes(2);
 
     public PendingConnection Create(Session session, ChannelConfiguration channel, Socket? caller, TimeSpan timeout, Guid connectionId)
     {
@@ -31,9 +37,43 @@ public sealed class PendingConnectionRegistry
 
     public void Remove(PendingConnection connection)
     {
-        pending.TryRemove(new KeyValuePair<Guid, PendingConnection>(connection.ConnectionId, connection));
+        // Publish removal and its ownership together: control readiness can arrive
+        // after cancellation has already closed the corresponding data tunnel.
+        lock (completionGate)
+        {
+            if (pending.TryRemove(new KeyValuePair<Guid, PendingConnection>(connection.ConnectionId, connection)))
+            {
+                var completion = new RecentCompletion(connection.SessionId, Stopwatch.GetTimestamp());
+                recentCompletions[connection.ConnectionId] = completion;
+                completionOrder.Enqueue((connection.ConnectionId, completion));
+                PruneCompletions();
+            }
+        }
         connection.Dispose();
     }
+
+    internal bool IsRecentlyCompleted(Guid sessionId, Guid connectionId)
+    {
+        lock (completionGate)
+        {
+            PruneCompletions();
+            return !pending.ContainsKey(connectionId) && recentCompletions.TryGetValue(connectionId, out var completion)
+                && completion.SessionId == sessionId;
+        }
+    }
+
+    private void PruneCompletions()
+    {
+        while (completionOrder.TryPeek(out var oldest) &&
+            (completionOrder.Count > RecentCompletionCapacity || Stopwatch.GetElapsedTime(oldest.Completion.Timestamp) > RecentCompletionRetention))
+        {
+            completionOrder.Dequeue();
+            if (recentCompletions.TryGetValue(oldest.ConnectionId, out var current) && ReferenceEquals(current, oldest.Completion))
+                recentCompletions.Remove(oldest.ConnectionId);
+        }
+    }
+
+    private sealed record RecentCompletion(Guid SessionId, long Timestamp);
 
     public void Cancel(Guid sessionId, Guid connectionId)
     {

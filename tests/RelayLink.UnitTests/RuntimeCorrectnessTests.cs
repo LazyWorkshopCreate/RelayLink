@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using System.Text.Json;
 using Microsoft.Extensions.Logging.Abstractions;
 using RelayLink.Protocol;
@@ -184,6 +185,44 @@ public sealed class RuntimeCorrectnessTests
         await workspace.Service.StopAsync(CancellationToken.None);
     }
 
+    [Fact]
+    public async Task Inspection_channel_type_and_application_are_immutable_and_jump_listens()
+    {
+        using var workspace = new ConfigWorkspace(tlsEnabled: true);
+        var before = await File.ReadAllTextAsync(workspace.ClientPath);
+        var jumpPort = FreePort();
+        var changed = Update(workspace.Port) with { InspectionMode = "server-jump" };
+        var typeChange = await Assert.ThrowsAsync<ChannelUpdateException>(() => workspace.Editor.UpdateAsync("agent", "echo", changed, CancellationToken.None));
+        Assert.Equal("Channel type cannot be changed.", typeChange.Message);
+        Assert.Equal(before, await File.ReadAllTextAsync(workspace.ClientPath));
+
+        var tagged = await Assert.ThrowsAsync<ChannelUpdateException>(() => workspace.Editor.UpdateAsync("agent", "echo",
+            Update(workspace.Port) with { Tags = ["app:ssh"] }, CancellationToken.None));
+        Assert.Equal("Application tags must be chosen with the application field.", tagged.Message);
+
+        var (saved, _) = await workspace.Editor.UpdateAsync("agent", "echo", Update(workspace.Port) with { Application = "ssh", Tags = ["ops"] }, CancellationToken.None);
+        Assert.Equal("ssh", saved.Application);
+        Assert.Equal(["ops", "app:ssh"], saved.Tags);
+        var locked = await Assert.ThrowsAsync<ChannelUpdateException>(() => workspace.Editor.UpdateAsync("agent", "echo",
+            Update(workspace.Port) with { Application = "rdp", Tags = ["ops"] }, CancellationToken.None));
+        Assert.Equal("Application cannot be changed.", locked.Message);
+        Assert.Contains("app:ssh", await File.ReadAllTextAsync(workspace.ClientPath));
+        Assert.DoesNotContain("app:rdp", await File.ReadAllTextAsync(workspace.ClientPath));
+
+        var (jump, _) = await workspace.Editor.CreateAsync("agent", new ChannelCreateRequest("jump", "Jump", true, "127.0.0.1", jumpPort, "10.0.0.8", 22, 2, 5)
+        { InspectionMode = "server-jump", Application = "ssh" }, CancellationToken.None);
+        Assert.Equal("server-jump", jump.InspectionMode);
+        using var probe = new TcpClient();
+        await probe.ConnectAsync("127.0.0.1", jumpPort);
+        using var readDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        try
+        {
+            Assert.Equal(0, await probe.GetStream().ReadAsync(new byte[1], readDeadline.Token));
+        }
+        catch (IOException) { }
+        await workspace.Service.StopAsync(CancellationToken.None);
+    }
+
     private static ChannelUpdateRequest Update(int port) =>
         new("Echo", true, "127.0.0.1", port, "127.0.0.1", 9, 2, 5);
 
@@ -215,7 +254,7 @@ public sealed class RuntimeCorrectnessTests
         public string ClientsDirectory { get; }
         public string ClientPath { get; }
 
-        public ConfigWorkspace()
+        public ConfigWorkspace(bool tlsEnabled = false)
         {
             ClientsDirectory = Path.Combine(directory, "clients");
             Directory.CreateDirectory(ClientsDirectory);
@@ -228,10 +267,22 @@ public sealed class RuntimeCorrectnessTests
                 channels = new[] { new { channelId = "echo", displayName = "Echo", enabled = true, listenAddress = "127.0.0.1", listenPort = Port, targetHost = "127.0.0.1", targetPort = 9, maxConnections = 2, targetConnectTimeoutSeconds = 5 } }
             }));
             var serverPath = Path.Combine(directory, "server.json");
+            var certificatePath = "";
+            var keyPath = "";
+            if (tlsEnabled)
+            {
+                using var key = RSA.Create(2048);
+                var request = new CertificateRequest("CN=localhost", key, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+                using var certificate = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(1));
+                certificatePath = Path.Combine(directory, "cert.pem");
+                keyPath = Path.Combine(directory, "key.pem");
+                File.WriteAllText(certificatePath, certificate.ExportCertificatePem());
+                File.WriteAllText(keyPath, key.ExportPkcs8PrivateKeyPem());
+            }
             File.WriteAllText(serverPath, JsonSerializer.Serialize(new
             {
                 schemaVersion = 1,
-                tunnel = new { listenAddress = "127.0.0.1", port = FreePort(), dataPort = FreePort(), tlsEnabled = false, certificatePemPath = "", privateKeyPemPath = "", handshakeTimeoutSeconds = 10, heartbeatIntervalSeconds = 15, heartbeatTimeoutSeconds = 45 },
+                tunnel = new { listenAddress = "127.0.0.1", port = FreePort(), dataPort = FreePort(), tlsEnabled, certificatePemPath = certificatePath, privateKeyPemPath = keyPath, handshakeTimeoutSeconds = 10, heartbeatIntervalSeconds = 15, heartbeatTimeoutSeconds = 45 },
                 dashboard = new { listenAddress = "127.0.0.1", port = FreePort(), refreshSeconds = 5, admin = new { username = "admin", passwordHash = "PBKDF2-SHA256$100000$AA==$AA==", sessionLifetimeMinutes = 60 } },
                 clientsDirectory = ClientsDirectory,
                 limits = new { maxConnections = 20, maxPendingConnections = 10, maxUnauthenticatedConnections = 10, maxChannelsPerClient = 10, openTimeoutSeconds = 10, blockedWriteTimeoutSeconds = 120, halfCloseDrainTimeoutSeconds = 30 }

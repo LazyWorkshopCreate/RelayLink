@@ -2,8 +2,8 @@
 
 文档 ID：OPS-001\
 状态：Active\
-版本：v2.8.0\
-更新日期：2026-10-23
+版本：v2.9.0\
+更新日期：2026-10-31
 
 RelayLink 转发 TCP 字节流与单播 UDP 报文，不替代目标服务自身的账号、权限、TLS 和网络访问控制。
 
@@ -134,6 +134,16 @@ RelayLink.Server --config <server.json> --check-config
 - WAL 模式会产生 `-wal` 和 `-shm` 文件。运行中备份时不能只复制主 `.db` 文件。
 - 旧 `.jsonl` 历史路径会在首次启动时迁移到同名 `.db`；确认迁移结果前不要删除旧文件。
 
+### 4.5 可审计通道升级与秘密库恢复
+
+本节只适用于已实现的 `server-peer` / `server-jump` HTTP/HTTPS、SSH。先升级 Server，再升级使用这些通道的 Agent 到协议 v7；旧 v3–v6 Agent 继续使用原有 `none` 能力，可审计通道不向旧端下发。Server 控制 TLS 为前提。参照 [插件配置示例](../../config/examples/inspection-client.example.json)，替换占位密钥和目标 SSH 指纹后再启用；SSH 必须通过可信渠道取得真实主机公钥指纹，不能直接信任首次连接结果。
+
+HTTPS 证书、私钥及上游 CA 路径相对所属 client JSON 目录解析，管理页编辑其他字段会保留原路径。RDP 审计仍不支持，管理员批准页面、桥应用及凭据发放也尚未实现；审批配置当前会等待后拒绝。普通 RDP/HTTPS 标签不受这些限制。
+
+管理员可用 `GET /api/v1/admin/credentials/status` 检查 `available`、`pendingAudits`、`pendingDeletions`。秘密库不可用时可审计入口拒绝，管理诊断与 `none` 通道仍运行。不要删除故障 key/store 来尝试恢复。成套备份并离线恢复配置、`credentials/key` 和 `credentials/store`（其中包含操作回执/删除标记），保持私有文件权限后重启；不匹配的文件组合会失败关闭。旧版本 key-only 情况如何处理见 [ADR-0031](../adr/0031-credential-mutation-and-deletion-recovery.md#恢复与迁移)。
+
+凭据 PUT/DELETE 的调用者应生成并保存 UUID `Idempotency-Key`，响应丢失时在至少 24 小时保证期内重用同键。已应用但结果审计待补记时返回成功及 `X-RelayLink-Audit-Status: pending`，PUT 还返回 `applied/auditStatus`；后台每 10 秒对账，不能把 pending 当成未保存再次改写。删除配置成功后，清理可能仍在恢复中，待清理标记会禁止同 ID 重建。详见 ADR-0031 的容量与错误响应契约。
+
 ## 5. 创建并安装 Agent
 
 ### 5.1 下载专属配置
@@ -165,8 +175,8 @@ Windows 已有安装时：
 ### 5.3 确认在线
 
 - 管理页面中客户端应显示“在线”。
-- Agent 本机状态页默认为 `http://127.0.0.1:18081/`。状态接口匿名只读。新增、修改、删除和启停需要配置目录中的 `local-management.token`：Agent 首次打开本机页面时生成它，Unix 为 `0600`，Windows 仅服务身份、SYSTEM 和管理员可读。把令牌粘贴到页面的“本机管理令牌”框，不需要另设密码。
-- 在多用户主机上不要用 LocalSystem 或 root 运行 Agent。能使用专用低权限账号时就使用它，并只把配置目录授给该账号和管理员。能读到令牌文件的人可以改写 Agent 的出站连接。
+- Agent 本机状态页默认为 `http://127.0.0.1:18081/`。状态接口匿名只读。新增、修改、删除和启停不需要管理密码或本机令牌文件，页面会取得短期写会话；写请求由 Agent 校验同源来源、会话 Cookie 与 CSRF 令牌。
+- 在多用户主机上不要用 LocalSystem 或 root 运行 Agent。能使用专用低权限账号时就使用它，并只把配置目录授给该账号和管理员。自 2026-11-04 起（[ADR-0034](../adr/0034-agent-local-write-session.md)）任何能打开本机页面的本机用户都可以改写 Agent 的出站连接，因此这种情况只适用于单用户主机或由管理员操作的主机。
 - 导入 `useTls=false` 的服务端时，页面要求输入 `CONNECT_WITHOUT_TLS`。明文控制连接会把客户端注册密钥发给该主机。
 - `dashboardPort` 设为 `0` 时，状态页和本机 API 均关闭。
 

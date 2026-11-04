@@ -105,7 +105,7 @@ public sealed class PeerConnectionTests
 
 #if PEER_TLS_TESTS
     [Fact]
-    public async Task Peer_transport_changes_push_dependent_mapping_and_rebuild_the_local_listener()
+    public async Task Peer_transport_change_is_rejected_and_the_udp_listener_keeps_working()
     {
         using var fixture = new Fixture();
         await fixture.StartAsync(udp: true);
@@ -117,44 +117,348 @@ public sealed class PeerConnectionTests
             new { username = "admin", password = "test-password" }, token);
         login.EnsureSuccessStatusCode();
         var csrf = (await login.Content.ReadFromJsonAsync<JsonElement>(cancellationToken: token)).GetProperty("csrfToken").GetString();
-        async Task ChangeAsync(string protocol, int targetPort)
-        {
-            using var request = new HttpRequestMessage(HttpMethod.Put,
-                $"http://{fixture.DashboardAddress}/api/v1/admin/clients/visited/channels/private")
-            { Content = JsonContent.Create(new { displayName = "Private", enabled = true, listenAddress = "127.0.0.1",
-                listenPort = fixture.ProxyPort, targetHost = "127.0.0.1", targetPort, maxConnections = 10,
-                targetConnectTimeoutSeconds = 5, transportProtocol = protocol }) };
-            request.Headers.Add("X-RelayLink-CSRF", csrf);
-            using var response = await http.SendAsync(request, token);
-            response.EnsureSuccessStatusCode();
-            while (true)
-            {
-                var status = await http.GetFromJsonAsync<JsonElement>($"http://127.0.0.1:{fixture.AgentDashboardPort}/api/v2/status", token);
-                var mapping = status.GetProperty("servers")[0].GetProperty("mappings").EnumerateArray().Single(m => m.GetProperty("mappingId").GetString() == "to-visited");
-                if (mapping.GetProperty("transportProtocol").GetString() == protocol) return;
-                await Task.Delay(50, token);
-            }
-        }
         using var first = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
         first.Connect(IPAddress.Loopback, fixture.LocalPort);
         await first.SendAsync(new byte[] { 1 }, token);
         Assert.Equal(new byte[] { 1 }, (await first.ReceiveAsync(token)).Buffer);
-        await ChangeAsync("tcp", fixture.TcpTargetPort);
-        using (var tcp = await fixture.ConnectLocalAsync(token))
+        using (var request = new HttpRequestMessage(HttpMethod.Put,
+            $"http://{fixture.DashboardAddress}/api/v1/admin/clients/visited/channels/private")
+        { Content = JsonContent.Create(new { displayName = "Private", enabled = true, listenAddress = "127.0.0.1",
+            listenPort = fixture.ProxyPort, targetHost = "127.0.0.1", targetPort = fixture.TcpTargetPort, maxConnections = 10,
+            targetConnectTimeoutSeconds = 5, transportProtocol = "tcp" }) })
         {
-            var stream = tcp.GetStream();
-            await stream.WriteAsync(new byte[] { 2, 3 }, token);
-            tcp.Client.Shutdown(SocketShutdown.Send);
-            var reply = new byte[2];
-            await stream.ReadExactlyAsync(reply, token);
-            Assert.Equal(new byte[] { 2, 3 }, reply);
+            request.Headers.Add("X-RelayLink-CSRF", csrf);
+            using var response = await http.SendAsync(request, token);
+            Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+            Assert.Contains("Channel type cannot be changed.", await response.Content.ReadAsStringAsync(token));
         }
-        await ChangeAsync("udp", fixture.TargetPort);
+        var status = await http.GetFromJsonAsync<JsonElement>($"http://127.0.0.1:{fixture.AgentDashboardPort}/api/v2/status", token);
+        var mapping = status.GetProperty("servers")[0].GetProperty("mappings").EnumerateArray().Single(item => item.GetProperty("mappingId").GetString() == "to-visited");
+        Assert.Equal("udp", mapping.GetProperty("transportProtocol").GetString());
         using var last = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
         last.Connect(IPAddress.Loopback, fixture.LocalPort);
         await last.SendAsync(new byte[] { 4 }, token);
         Assert.Equal(new byte[] { 4 }, (await last.ReceiveAsync(token)).Buffer);
     }
+
+    [Fact]
+    public async Task Server_peer_proves_both_legs_and_closes_without_reaching_the_target()
+    {
+        using var fixture = new Fixture();
+        await fixture.StartAsync(inspectionMode: "server-peer");
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(40));
+        var token = deadline.Token;
+        await fixture.WaitOnlineAsync(token);
+        var port = await fixture.WaitPortAsync("to-visited", token);
+        using var client = new TcpClient();
+        await client.ConnectAsync(IPAddress.Loopback, port, token);
+        try
+        {
+            await client.GetStream().WriteAsync(new byte[] { 9 }, token);
+            _ = await client.GetStream().ReadAsync(new byte[8], token);
+        }
+        catch (IOException) { }
+        client.Close();
+        await Task.Delay(300, token);
+        Assert.True(fixture.TargetConnections == 0, fixture.Logs());
+    }
+
+    [Fact]
+    public async Task Server_jump_relays_plaintext_over_target_leg_tls_and_blocks_unhandled_applications()
+    {
+        using var fixture = new Fixture();
+        await fixture.StartAsync(inspectionMode: "server-jump");
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(40));
+        var token = deadline.Token;
+        await fixture.WaitOnlineAsync(token);
+        using (var client = await fixture.ConnectLocalAsync(fixture.ProxyPort, token))
+        {
+            var stream = client.GetStream();
+            var payload = new byte[] { 7, 8, 9 };
+            await stream.WriteAsync(payload, token);
+            // Some platforms deliver the payload and the FIN together and abort the reply;
+            // keep the request direction open briefly so the target can echo first.
+            await Task.Delay(150, token);
+            client.Client.Shutdown(SocketShutdown.Send);
+            var echoed = new byte[payload.Length];
+            await stream.ReadExactlyAsync(echoed, token);
+            Assert.Equal(payload, echoed);
+        }
+        Assert.Equal(1, fixture.TargetConnections);
+
+        using var denied = new Fixture();
+        await denied.StartAsync(inspectionMode: "server-jump", jumpApplication: "ssh");
+        using var deniedDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(40));
+        await denied.WaitOnlineAsync(deniedDeadline.Token);
+        using var blocked = new TcpClient();
+        await blocked.ConnectAsync(IPAddress.Loopback, denied.ProxyPort, deniedDeadline.Token);
+        var blockedStream = blocked.GetStream();
+        try
+        {
+            await blockedStream.WriteAsync(new byte[] { 1 }, deniedDeadline.Token);
+            _ = await blockedStream.ReadAsync(new byte[8], deniedDeadline.Token);
+        }
+        catch (IOException) { }
+        blocked.Close();
+        await Task.Delay(300, deniedDeadline.Token);
+        Assert.True(denied.TargetConnections == 0, denied.Logs());
+    }
+
+    [Fact]
+    public async Task Http_inspection_relays_allowed_requests_and_blocks_denied_ones()
+    {
+        var requests = 0;
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        using var acceptLifetime = new CancellationTokenSource(TimeSpan.FromSeconds(40));
+        var serving = Task.Run(async () =>
+        {
+            while (!acceptLifetime.IsCancellationRequested)
+            {
+                TcpClient accepted;
+                try { accepted = await listener.AcceptTcpClientAsync(acceptLifetime.Token); }
+                catch (OperationCanceledException) { break; }
+                using (accepted)
+                {
+                    Interlocked.Increment(ref requests);
+                    var buffer = new byte[1024];
+                    _ = await accepted.GetStream().ReadAsync(buffer, acceptLifetime.Token);
+                    await accepted.GetStream().WriteAsync("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK"u8.ToArray(), acceptLifetime.Token);
+                }
+            }
+        });
+        var policy = new InspectionPolicy { Rules = [new InspectionRule { PathPrefix = "/secret", Action = "deny" }] };
+
+        using (var fixture = new Fixture())
+        {
+            await fixture.StartAsync(inspectionMode: "server-jump", jumpApplication: "http", jumpTargetPort: port, jumpInspection: policy);
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(40));
+            await fixture.WaitOnlineAsync(deadline.Token);
+            using var client = new TcpClient();
+            await client.ConnectAsync(IPAddress.Loopback, fixture.ProxyPort, deadline.Token);
+            var stream = client.GetStream();
+            var request = "GET /health?token=secret HTTP/1.1\r\nHost: example.test\r\nAuthorization: Bearer secret\r\n\r\n"u8.ToArray();
+            await stream.WriteAsync(request, deadline.Token);
+            var response = new byte[64];
+            var read = await stream.ReadAtLeastAsync(response, 12, cancellationToken: deadline.Token);
+            Assert.Contains("200", Encoding.ASCII.GetString(response, 0, read), StringComparison.Ordinal);
+        }
+        Assert.Equal(1, Volatile.Read(ref requests));
+
+        using (var denied = new Fixture())
+        {
+            await denied.StartAsync(inspectionMode: "server-jump", jumpApplication: "http", jumpTargetPort: port, jumpInspection: policy);
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(40));
+            await denied.WaitOnlineAsync(deadline.Token);
+            using var client = new TcpClient();
+            await client.ConnectAsync(IPAddress.Loopback, denied.ProxyPort, deadline.Token);
+            var stream = client.GetStream();
+            try
+            {
+                await stream.WriteAsync("GET /secret HTTP/1.1\r\nHost: example.test\r\n\r\n"u8.ToArray(), deadline.Token);
+                var rejected = new byte[32];
+                var read = await stream.ReadAtLeastAsync(rejected, 12, cancellationToken: deadline.Token);
+                Assert.Contains("403", Encoding.ASCII.GetString(rejected, 0, read), StringComparison.Ordinal);
+            }
+            catch (IOException) { }
+        }
+        await Task.Delay(300);
+        Assert.Equal(1, Volatile.Read(ref requests));
+        acceptLifetime.Cancel();
+        listener.Stop();
+        try { await serving; } catch (OperationCanceledException) { }
+    }
+
+    [Fact]
+    public async Task Peer_http_inspection_relays_after_both_proofs()
+    {
+        var requests = 0;
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        using var acceptLifetime = new CancellationTokenSource(TimeSpan.FromSeconds(40));
+        var serving = Task.Run(async () =>
+        {
+            while (!acceptLifetime.IsCancellationRequested)
+            {
+                TcpClient accepted;
+                try { accepted = await listener.AcceptTcpClientAsync(acceptLifetime.Token); }
+                catch (OperationCanceledException) { break; }
+                using (accepted)
+                {
+                    Interlocked.Increment(ref requests);
+                    var buffer = new byte[1024];
+                    _ = await accepted.GetStream().ReadAsync(buffer, acceptLifetime.Token);
+                    await accepted.GetStream().WriteAsync("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK"u8.ToArray(), acceptLifetime.Token);
+                }
+            }
+        });
+        var policy = new InspectionPolicy { Rules = [new InspectionRule { PathPrefix = "/secret", Action = "deny" }] };
+        using (var fixture = new Fixture())
+        {
+            await fixture.StartAsync(inspectionMode: "server-peer", peerApplication: "http", peerTargetPort: port, peerInspection: policy);
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(40));
+            await fixture.WaitOnlineAsync(deadline.Token);
+            var loopback = await fixture.WaitPortAsync("to-visited", deadline.Token);
+            using var client = new TcpClient();
+            await client.ConnectAsync(IPAddress.Loopback, loopback, deadline.Token);
+            var stream = client.GetStream();
+            await stream.WriteAsync("GET /health HTTP/1.1\r\nHost: example.test\r\n\r\n"u8.ToArray(), deadline.Token);
+            var response = new byte[64];
+            var read = await stream.ReadAtLeastAsync(response, 12, cancellationToken: deadline.Token);
+            Assert.Contains("200", Encoding.ASCII.GetString(response, 0, read), StringComparison.Ordinal);
+        }
+        Assert.Equal(1, Volatile.Read(ref requests));
+
+        using (var denied = new Fixture())
+        {
+            await denied.StartAsync(inspectionMode: "server-peer", peerApplication: "http", peerTargetPort: port, peerInspection: policy);
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(40));
+            await denied.WaitOnlineAsync(deadline.Token);
+            var loopback = await denied.WaitPortAsync("to-visited", deadline.Token);
+            using var client = new TcpClient();
+            await client.ConnectAsync(IPAddress.Loopback, loopback, deadline.Token);
+            try
+            {
+                await client.GetStream().WriteAsync("GET /secret HTTP/1.1\r\nHost: example.test\r\n\r\n"u8.ToArray(), deadline.Token);
+                var rejected = new byte[32];
+                var read = await client.GetStream().ReadAtLeastAsync(rejected, 12, cancellationToken: deadline.Token);
+                Assert.Contains("403", Encoding.ASCII.GetString(rejected, 0, read), StringComparison.Ordinal);
+            }
+            catch (IOException) { }
+        }
+        await Task.Delay(300);
+        Assert.Equal(1, Volatile.Read(ref requests));
+        acceptLifetime.Cancel();
+        listener.Stop();
+        try { await serving; } catch (OperationCanceledException) { }
+    }
+
+    [Fact]
+    public async Task Https_inspection_checks_the_upstream_name_before_sending_the_request()
+    {
+        var directory = Directory.CreateTempSubdirectory("relaylink-https-inspection-").FullName;
+        try
+        {
+            var upstreamCaPath = Path.Combine(directory, "upstream-ca.pem");
+            using var upstreamKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+            var upstreamRequest = new CertificateRequest("CN=127.0.0.1", upstreamKey, HashAlgorithmName.SHA256);
+            var upstreamSan = new SubjectAlternativeNameBuilder();
+            upstreamSan.AddIpAddress(IPAddress.Loopback);
+            upstreamRequest.CertificateExtensions.Add(upstreamSan.Build());
+            upstreamRequest.CertificateExtensions.Add(new X509BasicConstraintsExtension(true, false, 0, true));
+            upstreamRequest.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.DigitalSignature | X509KeyUsageFlags.KeyCertSign, true));
+            upstreamRequest.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension([new Oid("1.3.6.1.5.5.7.3.1")], true));
+            using var upstreamSigned = upstreamRequest.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-5), DateTimeOffset.UtcNow.AddHours(2));
+            using var upstreamCertificate = X509CertificateLoader.LoadPkcs12(upstreamSigned.Export(X509ContentType.Pkcs12), null, X509KeyStorageFlags.UserKeySet);
+            File.WriteAllText(upstreamCaPath, upstreamCertificate.ExportCertificatePem());
+            var httpRequests = 0;
+            using var listener = new TcpListener(IPAddress.Loopback, 0);
+            listener.Start();
+            var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+            using var acceptLifetime = new CancellationTokenSource(TimeSpan.FromSeconds(40));
+            var serving = Task.Run(async () =>
+            {
+                while (!acceptLifetime.IsCancellationRequested)
+                {
+                    TcpClient accepted;
+                    try { accepted = await listener.AcceptTcpClientAsync(acceptLifetime.Token); }
+                    catch (OperationCanceledException) { break; }
+                    using (accepted)
+                    {
+                        var tls = new SslStream(accepted.GetStream(), false);
+                        try
+                        {
+                            await tls.AuthenticateAsServerAsync(new SslServerAuthenticationOptions
+                            {
+                                ServerCertificate = upstreamCertificate,
+                                EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
+                                ApplicationProtocols = new List<SslApplicationProtocol> { SslApplicationProtocol.Http11 }
+                            }, acceptLifetime.Token);
+                            var buffer = new byte[1024];
+                            var read = await tls.ReadAsync(buffer, acceptLifetime.Token);
+                            if (Encoding.ASCII.GetString(buffer, 0, read).Contains("GET ", StringComparison.Ordinal))
+                                Interlocked.Increment(ref httpRequests);
+                            await tls.WriteAsync("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK"u8.ToArray(), acceptLifetime.Token);
+                        }
+                        catch (Exception exception) when (exception is IOException or AuthenticationException or OperationCanceledException) { }
+                        finally { await tls.DisposeAsync(); }
+                    }
+                }
+            });
+            var allowedPolicy = new InspectionPolicy
+            {
+                Https = new HttpsInspectionMaterial { CertificatePemPath = "server", PrivateKeyPemPath = "server", UpstreamName = "127.0.0.1", UpstreamCaPemPath = upstreamCaPath }
+            };
+            using (var fixture = new Fixture())
+            {
+                await fixture.StartAsync(inspectionMode: "server-jump", jumpApplication: "https", jumpTargetPort: port, jumpInspection: allowedPolicy, jumpUseServerCertificate: true);
+                using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(40));
+                await fixture.WaitOnlineAsync(deadline.Token);
+                using var client = new TcpClient();
+                await client.ConnectAsync(IPAddress.Loopback, fixture.ProxyPort, deadline.Token);
+                using var tls = new SslStream(client.GetStream(), false);
+                await tls.AuthenticateAsClientAsync(new SslClientAuthenticationOptions
+                {
+                    TargetHost = "127.0.0.1",
+                    EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
+                    ApplicationProtocols = new List<SslApplicationProtocol> { SslApplicationProtocol.Http11 },
+                    RemoteCertificateValidationCallback = ValidateNamedCertificate(fixture.ServerCaPath)
+                }, deadline.Token);
+                await tls.WriteAsync("GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"u8.ToArray(), deadline.Token);
+                var response = new byte[64];
+                var read = await tls.ReadAtLeastAsync(response, 12, cancellationToken: deadline.Token);
+                Assert.Contains("200", Encoding.ASCII.GetString(response, 0, read), StringComparison.Ordinal);
+            }
+            Assert.Equal(1, Volatile.Read(ref httpRequests));
+
+            var rejectedPolicy = allowedPolicy with
+            {
+                Https = allowedPolicy.Https! with { UpstreamName = "wrong.example" }
+            };
+            using (var fixture = new Fixture())
+            {
+                await fixture.StartAsync(inspectionMode: "server-jump", jumpApplication: "https", jumpTargetPort: port, jumpInspection: rejectedPolicy, jumpUseServerCertificate: true);
+                using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(40));
+                await fixture.WaitOnlineAsync(deadline.Token);
+                using var client = new TcpClient();
+                await client.ConnectAsync(IPAddress.Loopback, fixture.ProxyPort, deadline.Token);
+                using var tls = new SslStream(client.GetStream(), false);
+                await tls.AuthenticateAsClientAsync(new SslClientAuthenticationOptions
+                {
+                    TargetHost = "127.0.0.1",
+                    EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
+                    ApplicationProtocols = new List<SslApplicationProtocol> { SslApplicationProtocol.Http11 },
+                    RemoteCertificateValidationCallback = ValidateNamedCertificate(fixture.ServerCaPath)
+                }, deadline.Token);
+                try
+                {
+                    await tls.WriteAsync("GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"u8.ToArray(), deadline.Token);
+                    Assert.Equal(0, await tls.ReadAsync(new byte[8], deadline.Token));
+                }
+                catch (IOException) { }
+            }
+            await Task.Delay(300);
+            Assert.Equal(1, Volatile.Read(ref httpRequests));
+            acceptLifetime.Cancel();
+            listener.Stop();
+            try { await serving; } catch (OperationCanceledException) { }
+        }
+        finally { try { Directory.Delete(directory, true); } catch (IOException) { } }
+    }
+
+    private static RemoteCertificateValidationCallback ValidateNamedCertificate(string caPath) => (_, certificate, _, errors) =>
+    {
+        if (certificate is null || (errors & SslPolicyErrors.RemoteCertificateNameMismatch) != 0) return false;
+        using var presented = new X509Certificate2(certificate);
+        using var authority = X509Certificate2.CreateFromPem(File.ReadAllText(caPath));
+        using var chain = new X509Chain();
+        chain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
+        chain.ChainPolicy.CustomTrustStore.Add(authority);
+        chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
+        return chain.Build(presented);
+    };
 
     [Fact]
     public async Task Standard_private_channel_can_reach_server_dashboard_through_target_agent()
@@ -597,8 +901,7 @@ public sealed class PeerConnectionTests
         using var fixture = new Fixture();
         await fixture.StartAsync();
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-        using var intruder = new TcpClient();
-        await intruder.ConnectAsync(IPAddress.Loopback, fixture.TunnelPort, deadline.Token);
+        using var intruder = await fixture.ConnectLocalAsync(fixture.TunnelPort, deadline.Token);
         await using var outerTls = new SslStream(intruder.GetStream(), false, (_, _, _, _) => true);
         await outerTls.AuthenticateAsClientAsync(new SslClientAuthenticationOptions { TargetHost = "127.0.0.1", EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13, CertificateRevocationCheckMode = X509RevocationMode.NoCheck }, deadline.Token);
         var reader = new FrameReader(outerTls);
@@ -803,6 +1106,7 @@ public sealed class PeerConnectionTests
         public int DataPort { get; }
         private int DashboardPort { get; }
         private string caPath = string.Empty;
+        public string ServerCaPath => caPath;
         public string DashboardAddress => $"127.0.0.1:{DashboardPort}";
 
         internal void TryBindDashboardPort()
@@ -826,7 +1130,7 @@ public sealed class PeerConnectionTests
         }
 
         public async Task StartAsync(bool startCallerAgent = true, bool mapDashboard = false, bool udp = false, bool encryption = true, string? callerAssembly = null, string? targetAssembly = null,
-            HttpProxyOptions? httpOptions = null, int? httpTargetPort = null, Action<string>? prepareHttpResources = null)
+            HttpProxyOptions? httpOptions = null, int? httpTargetPort = null, Action<string>? prepareHttpResources = null, string inspectionMode = "none", string? jumpApplication = null, int? jumpTargetPort = null, InspectionPolicy? jumpInspection = null, bool jumpUseServerCertificate = false, string? peerApplication = null, int? peerTargetPort = null, InspectionPolicy? peerInspection = null, int openTimeoutSeconds = 20, int maxPendingConnections = 20, int tcpIdleTimeoutSeconds = 900, Func<string, Task>? prepareServer = null)
         {
             var clients = Path.Combine(directory, "clients");
             var visitedDirectory = Path.Combine(directory, "visited");
@@ -871,6 +1175,15 @@ public sealed class PeerConnectionTests
             if (mapDashboard)
                 visitedChannels.Add(new ChannelConfiguration("server-dashboard", "Server Dashboard", true, "127.0.0.1", AllocatePort(), "127.0.0.1", DashboardPort, 10, 5)
                 { AuthorizedClientsOnly = true, AccessSecret = dashboardAccessSecret });
+            if (inspectionMode == "server-peer")
+                visitedChannels[0] = visitedChannels[0] with
+                {
+                    InspectionMode = "server-peer", Tags = [$"app:{peerApplication ?? "ssh"}"], EndToEndEncryptionEnabled = true,
+                    TargetPort = peerTargetPort ?? visitedChannels[0].TargetPort, Inspection = peerInspection
+                };
+            if (inspectionMode == "server-jump")
+                visitedChannels.Add(new ChannelConfiguration("jump", "Jump", true, "127.0.0.1", ProxyPort, "127.0.0.1", jumpTargetPort ?? targetPort, 10, 5)
+                { InspectionMode = "server-jump", Tags = jumpApplication is null ? [] : [$"app:{jumpApplication}"], Inspection = jumpInspection });
             var visited = new ClientConfiguration(1, "visited", "Visited", true, secret, 30, 20, visitedChannels) { E2eCertificateSha256 = fingerprint };
             var callerSecret = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
             CallerSecret = callerSecret;
@@ -883,23 +1196,32 @@ public sealed class PeerConnectionTests
             { OutboundMappings = callerMappings };
             var intruder = new ClientConfiguration(1, "intruder", "Intruder", true, IntruderSecret, 5, 2, []);
             var json = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
-            await File.WriteAllTextAsync(Path.Combine(clients, "visited.json"), JsonSerializer.Serialize(visited, json));
-            await File.WriteAllTextAsync(Path.Combine(clients, "caller.json"), JsonSerializer.Serialize(caller, json));
-            await File.WriteAllTextAsync(Path.Combine(clients, "intruder.json"), JsonSerializer.Serialize(intruder, json));
             caPath = Path.Combine(directory, "root-ca.pem");
             var certificatePath = Path.Combine(directory, "server-cert.pem");
             var keyPath = Path.Combine(directory, "server-key.pem");
             CreateOuterCertificate(caPath, certificatePath, keyPath);
+            if (jumpUseServerCertificate)
+                visited = visited with
+                {
+                    Channels = visited.Channels.Select(channel => channel.Inspection?.Https is null ? channel : channel with
+                    {
+                        Inspection = channel.Inspection with { Https = channel.Inspection.Https! with { CertificatePemPath = certificatePath, PrivateKeyPemPath = keyPath } }
+                    }).ToArray()
+                };
+            await File.WriteAllTextAsync(Path.Combine(clients, "visited.json"), JsonSerializer.Serialize(visited, json));
+            await File.WriteAllTextAsync(Path.Combine(clients, "caller.json"), JsonSerializer.Serialize(caller, json));
+            await File.WriteAllTextAsync(Path.Combine(clients, "intruder.json"), JsonSerializer.Serialize(intruder, json));
             var serverConfig = new ServerConfiguration(1,
                 new TunnelConfiguration("127.0.0.1", TunnelPort, true, certificatePath, keyPath, 10, 15, 45) { DataPort = DataPort },
                 new DashboardConfiguration("127.0.0.1", DashboardPort, 5, new DashboardAdminConfiguration("admin", PasswordHash(), 60)),
-                clients, new LimitsConfiguration(50, 20, 50, 10, 20, 120, 300),
+                clients, new LimitsConfiguration(50, maxPendingConnections, 50, 10, openTimeoutSeconds, 120, 300) { TcpIdleTimeoutSeconds = tcpIdleTimeoutSeconds },
                 new HistoryConfiguration(true, Path.Combine(directory, "traffic.db")));
             var serverPath = Path.Combine(directory, "server.json");
             await File.WriteAllTextAsync(serverPath, JsonSerializer.Serialize(serverConfig, json));
             // Echo listeners bind port 0 while these sockets are still held, so they cannot
             // take the dashboard, tunnel, data, or proxy ports the server is about to claim.
             ReleaseHeldPortsExcept(AgentDashboardPort, VisitedDashboardPort);
+            if (prepareServer is not null) await prepareServer(serverPath);
             StartProcess(typeof(ConfigurationLoader).Assembly.Location, serverPath);
             await WaitReadyAsync();
 

@@ -2,13 +2,15 @@
 
 文档 ID：DES-002\
 状态：Draft\
-版本：v1.11.2\
-更新日期：2026-10-24\
+版本：v1.11.8\
+更新日期：2026-10-31\
 调研日期：2026-09-17
 
 ## 1. 范围与调研结论
 
 HTTP/HTTPS 互访新增方向见 [REQ-001N](../requirements/2026-10-12-http-reverse-proxy.md)、[DES-008](http-reverse-proxy.md) 和 [ADR-0026](../adr/0026-http-proxy-over-tcp-tunnels.md)：目标 Agent 在内层 TLS/访问证明后处理 HTTP，支持 Host/Origin 覆写，HTTP 互访禁止关闭内层加密，浏览器 HTTPS 可嵌套其中。核心运行接入已实现，实际验证见 [HTTP 验证](../testing/http-reverse-proxy-verification.md)；本文下述 raw TCP/UDP 的既有可选加密及协议行为保持，新 HTTP 的能力、证明与就绪字段不得静默套用于旧端。
+
+另有草案提出由服务端分别终结两侧 TLS 的可视互访，供服务端插件审计，见 [DES-009](plugin-system.md) 和 [ADR-0028](../adr/0028-server-inspection-channels.md)。草案未采纳，不改变本节的密文中继和可选明文复制。
 
 `Register`/`ConfigUpdate` 通过独立控制入口下发配置；普通 `Open`/`BindData` 路径在数据入口完成绑定后直接复制明文 TCP 字节，服务端可见业务数据。互访路径必须额外验证访问方身份，并按目标通道选择是否提供业务流端到端加密。
 
@@ -45,7 +47,7 @@ Windows Schannel 在运行时需把文件私钥加载到当前用户密钥提供
 
 ## 3. 协议与状态
 
-沿用 `NTP1` magic，线协议当前为 `5`；版本 3 加入 `endToEndEncryptionEnabled`，版本 4 增加 `transportProtocol` 确认和 UDP 快照字段，两端必须按同一模式处理。新版 Server 兼容 v3 Agent 的 TCP 互访，各端响应与数据帧头使用其会话版本；v3 响应不包含 UDP 增量字段，配置摘要遵循旧结构。UDP 请求要求访问方与目标方均支持 v4 或以后版本，否则返回 ChannelUnavailable；未知版本与连接内版本切换被拒绝。见 [ADR-0025](../adr/0025-v3-client-compatibility.md)。v5 增加 HTTP 上下文、独立证明域与入口就绪 byte=2；证明后由 PeerApplicationStream 解开既有内层 TLS 长度应用记录，再将浏览器字节交给目标 HTTP 入口；raw 就绪 byte=1 及应用帧保持。已实现帧：
+沿用 `NTP1` magic，线协议当前为 `6`；版本 3 加入 `endToEndEncryptionEnabled`，版本 4 增加 `transportProtocol` 确认和 UDP 快照字段，两端必须按同一模式处理。v6 快照增加 `inspectionMode` 与 `application`；v5 及更低的序列化删除这两个字段，并滤掉可审计通道及其入口。`server-peer` 在绑定后改为两侧分别与服务端做腿部 TLS 和证明，不走本节的 Agent 间内层 TLS。HTTP、HTTPS 与 SSH 在证明后交给服务端插件；其他应用没有插件时失败关闭。`none` 的互访复制不变。新版 Server 兼容 v3 Agent 的 TCP 互访，各端响应与数据帧头使用其会话版本；v3 响应不包含 UDP 增量字段，配置摘要遵循旧结构。UDP 请求要求访问方与目标方均支持 v4 或以后版本，否则返回 ChannelUnavailable；未知版本与连接内版本切换被拒绝。见 [ADR-0025](../adr/0025-v3-client-compatibility.md)。v5 增加 HTTP 上下文、独立证明域与入口就绪 byte=2；证明后由 PeerApplicationStream 解开既有内层 TLS 长度应用记录，再将浏览器字节交给目标 HTTP 入口；raw 就绪 byte=1 及应用帧保持。已实现帧：
 
 | 帧 | 发送方向 | 作用 |
 |---|---|---|
@@ -70,7 +72,7 @@ Server 只验证帧类型、长度、配对关系与资源限额，将 `Data/Fin
 
 Agent 先校验整份 `OutboundMappings`（地址、密钥 Base64 与长度、协议组合、映射 ID 唯一），全部通过后才停止旧入口并创建新入口。无效快照记为永久配置错误并保持已有入口，不在校验中途改监听。通过后先绑定本机端口并保存端口状态，再在认证控制连接上上报 `PeerMappingStatus`。服务端校验会话、已确认的配置版本、映射归属、端口范围与同一报告内不重复，然后仅在该会话在线时展示上报地址。配置更新时先确认新版本，再上报新地址；断线时服务端清除会话状态。本机网页默认在 `http://127.0.0.1:18081/`，可用 `dashboardPort` 调整，设为 0 时网页和本机 API 一并关闭；二者由同一个 Kestrel 实例绑定 IPv4 loopback，不额外开放端口。
 
-供第三方本机软件读取的现有稳定接口为 `GET /api/v1/status`、`GET /api/v1/channels` 和 `GET /api/v1/mappings`；旧 `GET /api/status` 保留兼容。聚合接口字段为 `clientId`、`online`、`updatedAtUtc`、`channels` 与 `outboundMappings`；两个资源接口保留相同的客户端状态元数据，并分别返回 `channels` 或 `mappings`。数据直接取自不可变的 `AgentStatusSnapshot`：在线时来自已确认的控制快照及实际端口绑定，离线时返回空列表，避免把旧地址表示为仍可用。当前接口只注册 GET 路由，写方法由框架返回 405；全部响应禁止缓存，不启用 CORS。视图模型只包含页面已经允许展示的字段，不包含客户端密钥、通道访问密钥、目标证书指纹、私钥或令牌。当前本机网页只读显示通道、访问目标及已监听地址；拟议的多服务端页面将另设受保护的服务端增删操作，见[多服务端技术设计](multi-server-agent.md)，不提供已保存注册密钥读取。服务端匿名状态页也按客户端以表格展示访问入口和当前上报地址；公开映射查询不返回访问密钥或目标证书指纹，写入仍受管理员会话及 CSRF 保护。
+供第三方本机软件读取的现有稳定接口为 `GET /api/v1/status`、`GET /api/v1/channels` 和 `GET /api/v1/mappings`；旧 `GET /api/status` 保留兼容。聚合接口字段为 `clientId`、`online`、`updatedAtUtc`、`channels` 与 `outboundMappings`；两个资源接口保留相同的客户端状态元数据，并分别返回 `channels` 或 `mappings`。数据直接取自不可变的 `AgentStatusSnapshot`：在线时来自已确认的控制快照及实际端口绑定，离线时返回空列表，避免把旧地址表示为仍可用。当前接口只注册 GET 路由，写方法由框架返回 405；全部响应禁止缓存，不启用 CORS。视图模型只包含页面已经允许展示的字段，不包含客户端密钥、通道访问密钥、目标证书指纹、私钥或令牌。当前本机网页只读显示通道、访问目标、入口在线状态和已监听地址，并提供复制地址与端口；拟议的多服务端页面将另设受保护的服务端增删操作，见[多服务端技术设计](multi-server-agent.md)，不提供已保存注册密钥读取。服务端匿名状态页也按客户端以表格展示访问入口、在线状态和当前上报地址，地址旁可复制地址与端口；公开映射查询不返回访问密钥或目标证书指纹，写入仍受管理员会话及 CSRF 保护。
 
 ```text
 本机应用 → 访问 Agent loopback Accept → Server 验证已认证会话及 mappingId

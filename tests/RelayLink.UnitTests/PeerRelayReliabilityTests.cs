@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using System.Net.Sockets;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using RelayLink.Protocol;
@@ -11,6 +12,68 @@ namespace RelayLink.UnitTests;
 
 public sealed class PeerRelayReliabilityTests
 {
+    [Fact]
+    public async Task Completed_target_readiness_is_not_replaced_by_late_transport_failure()
+    {
+        var caller = new Session(Guid.NewGuid(), "caller", DateTimeOffset.UtcNow);
+        var target = new Session(Guid.NewGuid(), "target", DateTimeOffset.UtcNow);
+        var relay = new PeerRelay(caller, target, "channel", TimeSpan.FromSeconds(5));
+        Assert.True(relay.TrySetTargetReady());
+        Assert.False(relay.FailTarget(new IOException("late transport failure")));
+        await relay.WaitForTargetReadyAsync(CancellationToken.None);
+        relay.Complete();
+    }
+
+    [Fact]
+    public async Task Termination_waits_for_inflight_successful_write_before_releasing_capacity_and_recording_bytes()
+    {
+        using var directory = new TestDirectory("relaylink-peer-final-bytes-");
+        var runtime = Runtime(directory, openTimeoutSeconds: 30, maxConnections: 2);
+        var metrics = new MetricsRegistry(runtime.Configuration);
+        var audit = new AuditService(runtime, NullLogger<AuditService>.Instance);
+        await audit.StartAsync(CancellationToken.None);
+        var registry = new PeerRelayRegistry(runtime, metrics, audit, NullLogger<PeerRelayRegistry>.Instance);
+        var (caller, callerControl) = ReadySession(runtime, "caller");
+        var (target, targetControl) = ReadySession(runtime, "visited");
+        await registry.RequestAsync(caller, new PeerOpenRequestMessage(Guid.NewGuid(), "visited-private"), CancellationToken.None);
+        callerControl.Position = 0; targetControl.Position = 0;
+        var grantedFrame = await new FrameReader(callerControl).ReadAsync(ProtocolConstants.MaxControlPayloadLength, CancellationToken.None);
+        var openFrame = await new FrameReader(targetControl).ReadAsync(ProtocolConstants.MaxControlPayloadLength, CancellationToken.None);
+        var granted = JsonProtocolSerializer.Deserialize<PeerOpenGrantedMessage>(grantedFrame!.Payload.Span);
+        var open = JsonProtocolSerializer.Deserialize<PeerOpenMessage>(openFrame!.Payload.Span);
+        using var callerInput = new MemoryStream();
+        await new FrameWriter(callerInput).WriteAsync(new Frame(FrameType.Data, new byte[] { 1, 2, 3 }), CancellationToken.None);
+        callerInput.Position = 0;
+        using var callerOutput = new MemoryStream();
+        using var targetInput = new WaitingReadStream();
+        using var targetOutput = new DelayedDataFlushStream();
+        using var callerSocket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+        using var targetSocket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+        Assert.True(registry.TryBind(new PeerBindDataMessage(granted.ConnectionId, caller.SessionId, granted.Token, "caller"),
+            new DataTunnel(callerInput, new FrameReader(callerInput), new FrameWriter(callerOutput), callerSocket), out _));
+        Assert.True(registry.TryBind(new PeerBindDataMessage(granted.ConnectionId, target.SessionId, open.Token, "target"),
+            new DataTunnel(targetInput, new FrameReader(targetInput), new FrameWriter(targetOutput), targetSocket), out _));
+        await targetOutput.DataWritten.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.True(registry.TryDisconnect("visited", "private", granted.ConnectionId));
+        try
+        {
+            Assert.Equal(1, runtime.GlobalConnectionLimit.CurrentCount);
+            Assert.Empty((await ReadClosed()).Events);
+        }
+        finally { targetOutput.CompleteWrite.TrySetResult(); }
+        AuditPage page;
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        do { await Task.Delay(20, deadline.Token); page = await ReadClosed(); } while (page.Total == 0);
+        var closed = Assert.Single(page.Events);
+        Assert.Equal(3, closed.BytesToTarget);
+        Assert.Equal(metrics.For("visited", "private").Snapshot().PeerCiphertextToTarget, closed.BytesToTarget);
+        Assert.Equal(2, runtime.GlobalConnectionLimit.CurrentCount);
+        Assert.Equal("admin_disconnected", closed.ReasonCode);
+
+        Task<AuditPage> ReadClosed() => audit.ReadAsync(DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow.AddMinutes(1),
+            "peer_connection_closed", "visited", 1, 100, CancellationToken.None);
+    }
+
     [Fact]
     public async Task Duplicate_request_id_does_not_take_another_relay_or_quota()
     {
@@ -108,5 +171,31 @@ public sealed class PeerRelayReliabilityTests
         public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) =>
             Entries.Add((logLevel, formatter(state, exception)));
         private sealed class NullScope : IDisposable { public static readonly NullScope Instance = new(); public void Dispose() { } }
+    }
+
+    private sealed class WaitingReadStream : MemoryStream
+    {
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        { await Task.Delay(Timeout.Infinite, cancellationToken); return 0; }
+    }
+
+    private sealed class DelayedDataFlushStream : MemoryStream
+    {
+        private bool data;
+        public TaskCompletionSource DataWritten { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource CompleteWrite { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            if (buffer.Length == ProtocolConstants.HeaderLength && buffer.Span[..4].SequenceEqual("NTP1"u8))
+                data = buffer.Span[5] == (byte)FrameType.Data;
+            return base.WriteAsync(buffer, CancellationToken.None);
+        }
+        public override async Task FlushAsync(CancellationToken cancellationToken)
+        {
+            if (!data) return;
+            DataWritten.TrySetResult();
+            // Model an OS write that completed successfully while cancellation raced.
+            await CompleteWrite.Task;
+        }
     }
 }

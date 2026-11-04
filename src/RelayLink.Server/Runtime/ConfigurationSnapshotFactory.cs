@@ -14,6 +14,7 @@ public static class ConfigurationSnapshotFactory
             client.MaxConnections,
             client.MaxPendingConnections,
             client.Channels.OrderBy(channel => channel.ChannelId, StringComparer.Ordinal)
+                .Where(channel => protocolVersion >= ProtocolConstants.InspectionVersion || channel.InspectionMode == "none")
                 .Where(channel => protocolVersion >= 5 || channel.ApplicationProtocol == "raw")
                 .Where(channel => protocolVersion >= 4 || channel.TransportProtocol == "tcp")
                 .Select(channel => new ChannelSnapshot(channel.ChannelId, channel.DisplayName, channel.Enabled, channel.TargetHost, channel.TargetPort, channel.MaxConnections, channel.TargetConnectTimeoutSeconds)
@@ -24,10 +25,13 @@ public static class ConfigurationSnapshotFactory
                     UdpIdleTimeoutSeconds = channel.UdpIdleTimeoutSeconds,
                     AuthorizedClientsOnly = channel.AuthorizedClientsOnly,
                     EndToEndEncryptionEnabled = channel.EndToEndEncryptionEnabled,
-                    AccessSecret = channel.AuthorizedClientsOnly ? channel.AccessSecret : null
+                    AccessSecret = channel.AuthorizedClientsOnly ? channel.AccessSecret : null,
+                    InspectionMode = channel.InspectionMode,
+                    Application = channel.Application
                 }).ToArray())
         {
             OutboundMappings = client.OutboundMappings.OrderBy(mapping => mapping.MappingId, StringComparer.Ordinal)
+                .Where(mapping => protocolVersion >= ProtocolConstants.InspectionVersion || (Target(mapping)?.InspectionMode ?? "none") == "none")
                 .Where(mapping => protocolVersion >= 5 || (Target(mapping)?.ApplicationProtocol ?? "raw") == "raw")
                 .Where(mapping => protocolVersion >= 4 || (Target(mapping)?.TransportProtocol ?? "tcp") == "tcp")
                 .Select(mapping => new OutboundMappingSnapshot(mapping.MappingId, mapping.Enabled, mapping.LocalAddress, mapping.TargetClientId, mapping.TargetChannelId, mapping.AccessSecret, mapping.TargetCertificateSha256)
@@ -35,7 +39,9 @@ public static class ConfigurationSnapshotFactory
                     ApplicationProtocol = Target(mapping)?.ApplicationProtocol ?? "raw",
                     Http = Target(mapping) is { Http: {} http } target ? new HttpPeerOptions(http.PeerEntryScheme, http.PeerAuthorityHost, HttpProxyPolicy.Hash(ToHttpSnapshot(target))) : null,
                     TransportProtocol = Target(mapping)?.TransportProtocol ?? "tcp",
-                    UdpIdleTimeoutSeconds = Target(mapping)?.UdpIdleTimeoutSeconds ?? 60
+                    UdpIdleTimeoutSeconds = Target(mapping)?.UdpIdleTimeoutSeconds ?? 60,
+                    InspectionMode = Target(mapping)?.InspectionMode ?? "none",
+                    Application = Target(mapping)?.Application
                 }).ToArray()
         };
         return (snapshot, ConfigurationSnapshotHasher.Compute(snapshot, protocolVersion));

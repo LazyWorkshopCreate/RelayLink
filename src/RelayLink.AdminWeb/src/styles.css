@@ -358,6 +358,37 @@ button:disabled {
     text-overflow: ellipsis;
     color: #25324a;
 }
+.address-line {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    max-width: 100%;
+    vertical-align: middle;
+}
+.address-line > span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.copy-button {
+    border: 0;
+    background: transparent;
+    color: #8b9bb0;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border-radius: 5px;
+    display: inline-grid;
+    place-items: center;
+    flex: none;
+    cursor: pointer;
+}
+.copy-button:hover {
+    background: #eef3fb;
+    color: #3766dc;
+}
+.copy-button.copied {
+    color: #159866;
+}
 .client-heading {
     padding: 21px 23px;
     display: flex;

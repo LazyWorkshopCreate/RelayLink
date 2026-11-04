@@ -6,6 +6,7 @@ import {
     Check,
     CircleAlert,
     Cloud,
+    Copy,
     LockKeyhole,
     Plus,
     Power,
@@ -79,6 +80,44 @@ type Profile = {
 };
 type Session = { csrfToken: string; version: string };
 
+function mappingPresence(mapping: Mapping): "online" | "offline" | "disabled" {
+    if (!mapping.enabled) return "disabled";
+    if (!mapping.localAddress) return "offline";
+    if (mapping.httpState && mapping.httpState !== "ready") return "offline";
+    return "online";
+}
+
+function mappingStatusLabel(presence: "online" | "offline" | "disabled") {
+    if (presence === "online") return "● 在线";
+    if (presence === "offline") return "● 离线";
+    return "● 已禁用";
+}
+
+function CopyEndpointButton({ value }: { value: string }) {
+    const [copied, setCopied] = useState(false);
+    return (
+        <button
+            type="button"
+            className={`copy-button${copied ? " copied" : ""}`}
+            aria-label={copied ? `已复制 ${value}` : `复制 ${value}`}
+            title={copied ? "已复制" : "复制地址和端口"}
+            onClick={() => {
+                const write = navigator.clipboard?.writeText(value);
+                if (!write) return;
+                void write.then(
+                    () => {
+                        setCopied(true);
+                        window.setTimeout(() => setCopied(false), 1500);
+                    },
+                    () => undefined,
+                );
+            }}
+        >
+            {copied ? <Check size={13} /> : <Copy size={13} />}
+        </button>
+    );
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
     const response = await fetch(path, {
         cache: "no-store",
@@ -111,21 +150,12 @@ function App() {
     const [fileName, setFileName] = useState("");
     const [confirmExistingState, setConfirmExistingState] = useState(false);
     const [insecureConfirmation, setInsecureConfirmation] = useState("");
-    const [localToken, setLocalToken] = useState(
-        () => sessionStorage.getItem("relaylink.agent.localToken") ?? "",
-    );
     const [busy, setBusy] = useState(false);
-
-    function rememberToken(value: string) {
-        setLocalToken(value);
-        sessionStorage.setItem("relaylink.agent.localToken", value.trim());
-    }
 
     function writeHeaders(csrf: string): HeadersInit {
         return {
             "Content-Type": "application/json",
             "X-RelayLink-CSRF": csrf,
-            "X-RelayLink-Local-Token": localToken.trim(),
         };
     }
 
@@ -369,19 +399,6 @@ function App() {
                         <h1>Agent 连接概览</h1>
                         <p>查看各服务端的连接、通道和本机互访入口。</p>
                     </div>
-                    <label className="agent-token">
-                        本机管理令牌
-                        <input
-                            type="password"
-                            autoComplete="off"
-                            spellCheck={false}
-                            value={localToken}
-                            placeholder="local-management.token"
-                            onChange={(event) =>
-                                rememberToken(event.target.value)
-                            }
-                        />
-                    </label>
                     <button
                         className="ghost refresh"
                         onClick={() => void refresh()}
@@ -591,6 +608,12 @@ function App() {
                                     {server.channels.length ? (
                                         <div className="agent-table-scroll">
                                             <table>
+                                                <colgroup>
+                                                    <col />
+                                                    <col />
+                                                    <col />
+                                                    <col />
+                                                </colgroup>
                                                 <thead>
                                                     <tr>
                                                         <th>通道</th>
@@ -682,51 +705,80 @@ function App() {
                                     {server.mappings.length ? (
                                         <div className="agent-table-scroll">
                                             <table>
+                                                <colgroup>
+                                                    <col />
+                                                    <col />
+                                                    <col />
+                                                    <col />
+                                                </colgroup>
                                                 <thead>
                                                     <tr>
                                                         <th>入口</th>
                                                         <th>访问目标</th>
                                                         <th>本机地址</th>
+                                                        <th>状态</th>
                                                     </tr>
                                                 </thead>
                                                 <tbody>
                                                     {server.mappings.map(
-                                                        (mapping) => (
-                                                            <tr
-                                                                key={
-                                                                    mapping.mappingId
-                                                                }
-                                                            >
-                                                                <td>
-                                                                    <b>
-                                                                        {
-                                                                            mapping.mappingId
-                                                                        }
-                                                                    </b>
-                                                                </td>
-                                                                <td>
-                                                                    {
-                                                                        mapping.targetClientId
-                                                                    }{" "}
-                                                                    /{" "}
-                                                                    {
-                                                                        mapping.targetChannelId
+                                                        (mapping) => {
+                                                            const presence =
+                                                                mappingPresence(
+                                                                    mapping,
+                                                                );
+                                                            return (
+                                                                <tr
+                                                                    key={
+                                                                        mapping.mappingId
                                                                     }
-                                                                </td>
-                                                                <td>
-                                                                    {mapping.localAddress ? (
-                                                                        <code>
-                                                                            {mapping.accessUrl ??
-                                                                                `${(mapping.transportProtocol ?? "tcp").toUpperCase()} ${mapping.localAddress}`}
-                                                                        </code>
-                                                                    ) : (
-                                                                        <span className="agent-unavailable">
-                                                                            不可用
+                                                                >
+                                                                    <td>
+                                                                        <b>
+                                                                            {
+                                                                                mapping.mappingId
+                                                                            }
+                                                                        </b>
+                                                                    </td>
+                                                                    <td>
+                                                                        {
+                                                                            mapping.targetClientId
+                                                                        }{" "}
+                                                                        /{" "}
+                                                                        {
+                                                                            mapping.targetChannelId
+                                                                        }
+                                                                    </td>
+                                                                    <td>
+                                                                        {mapping.localAddress ? (
+                                                                            <span className="address-line">
+                                                                                <code>
+                                                                                    {mapping.accessUrl ??
+                                                                                        `${(mapping.transportProtocol ?? "tcp").toUpperCase()} ${mapping.localAddress}`}
+                                                                                </code>
+                                                                                <CopyEndpointButton
+                                                                                    value={
+                                                                                        mapping.localAddress
+                                                                                    }
+                                                                                />
+                                                                            </span>
+                                                                        ) : (
+                                                                            <span className="agent-unavailable">
+                                                                                —
+                                                                            </span>
+                                                                        )}
+                                                                    </td>
+                                                                    <td>
+                                                                        <span
+                                                                            className={`agent-badge compact ${presence}`}
+                                                                        >
+                                                                            {mappingStatusLabel(
+                                                                                presence,
+                                                                            )}
                                                                         </span>
-                                                                    )}
-                                                                </td>
-                                                            </tr>
-                                                        ),
+                                                                    </td>
+                                                                </tr>
+                                                            );
+                                                        },
                                                     )}
                                                 </tbody>
                                             </table>
@@ -899,7 +951,6 @@ function App() {
                                     busy ||
                                     !session ||
                                     !profile ||
-                                    !localToken.trim() ||
                                     (!profile.useTls &&
                                         insecureConfirmation.trim() !==
                                             "CONNECT_WITHOUT_TLS")

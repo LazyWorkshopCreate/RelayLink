@@ -1,4 +1,6 @@
 using System.Net;
+using System.Security.Cryptography;
+using System.Text;
 using Microsoft.Data.Sqlite;
 using RelayLink.Server.Configuration;
 using RelayLink.Server.Runtime;
@@ -69,10 +71,13 @@ try
     builder.Services.AddSingleton<AdminLoginGuard>();
     builder.Services.AddSingleton<ProxyListenerService>();
     builder.Services.AddSingleton<ConfigurationWriteLock>();
-    builder.Services.AddSingleton(sp => new ChannelConfigurationEditor(parsed.ConfigurationPath, loader, sp.GetRequiredService<ServerRuntime>(), sp.GetRequiredService<ProxyListenerService>(), sp.GetRequiredService<PeerRelayRegistry>(), sp.GetRequiredService<SessionRegistry>(), sp.GetRequiredService<ConfigurationWriteLock>()));
-    builder.Services.AddSingleton(sp => new ClientConfigurationEditor(parsed.ConfigurationPath, loader, sp.GetRequiredService<ServerRuntime>(), sp.GetRequiredService<ProxyListenerService>(), sp.GetRequiredService<PeerRelayRegistry>(), sp.GetRequiredService<SessionRegistry>(), sp.GetRequiredService<ConfigurationWriteLock>()));
+    builder.Services.AddSingleton(sp => new ChannelConfigurationEditor(parsed.ConfigurationPath, loader, sp.GetRequiredService<ServerRuntime>(), sp.GetRequiredService<ProxyListenerService>(), sp.GetRequiredService<PeerRelayRegistry>(), sp.GetRequiredService<SessionRegistry>(), sp.GetRequiredService<ConfigurationWriteLock>(), sp.GetRequiredService<CredentialStore>()));
+    builder.Services.AddSingleton(sp => new ClientConfigurationEditor(parsed.ConfigurationPath, loader, sp.GetRequiredService<ServerRuntime>(), sp.GetRequiredService<ProxyListenerService>(), sp.GetRequiredService<PeerRelayRegistry>(), sp.GetRequiredService<SessionRegistry>(), sp.GetRequiredService<ConfigurationWriteLock>(), sp.GetRequiredService<CredentialStore>()));
     builder.Services.AddSingleton(sp => new SecurityGroupEditor(parsed.ConfigurationPath, loader, sp.GetRequiredService<ServerRuntime>(), sp.GetRequiredService<ProxyListenerService>(), sp.GetRequiredService<ConfigurationWriteLock>()));
+    builder.Services.AddSingleton(CredentialStore.OpenForService(parsed.ConfigurationPath));
+    builder.Services.AddSingleton<CredentialMutationService>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<AuditService>());
+    builder.Services.AddHostedService<CredentialRecoveryService>();
     builder.Services.AddHostedService<TunnelAcceptorService>();
     builder.Services.AddHostedService<DataAcceptorService>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<ProxyListenerService>());
@@ -218,12 +223,14 @@ try
         clientsOnline = runtime.Sessions.Count,
         clientsTotal = runtime.Configuration.Clients.Count,
         channelsTotal = runtime.Configuration.Clients.Values.Sum(client => client.Channels.Count),
-        channelsAvailable = ChannelAvailability.CountAvailablePublicChannels(runtime.Configuration.Clients.Values, runtime.Sessions),
+        channelsAvailable = ChannelAvailability.CountAvailablePublicChannels(runtime.Configuration.Clients.Values, runtime.Sessions, runtime.Configuration.Server.Tunnel.TlsEnabled),
         activeConnections = snapshots.Sum(snapshot => snapshot.ActiveConnections + snapshot.PeerActiveConnections),
         bytesToTarget = snapshots.Sum(snapshot => snapshot.BytesToTarget),
         bytesToCaller = snapshots.Sum(snapshot => snapshot.BytesToCaller),
         peerCiphertextToTarget = snapshots.Sum(snapshot => snapshot.PeerCiphertextToTarget),
         peerCiphertextToCaller = snapshots.Sum(snapshot => snapshot.PeerCiphertextToCaller),
+        applicationToTarget = snapshots.Sum(snapshot => snapshot.ApplicationToTarget),
+        applicationToCaller = snapshots.Sum(snapshot => snapshot.ApplicationToCaller),
         tcpIdleTimeoutSeconds = runtime.Configuration.Server.Limits.TcpIdleTimeoutSeconds,
         halfCloseDrainTimeoutSeconds = runtime.Configuration.Server.Limits.HalfCloseDrainTimeoutSeconds
         });
@@ -263,7 +270,7 @@ try
             channels = client.Channels.Select(channel =>
             {
                 var metric = metrics.For(client.ClientId, channel.ChannelId).Snapshot();
-                return new { channelId = channel.ChannelId, displayName = channel.DisplayName, tags = channel.Tags, listenAddress = channel.ListenAddress, listenPort = channel.ListenPort, securityGroupId = channel.SecurityGroupId, targetHost = channel.TargetHost, targetPort = channel.TargetPort, enabled = channel.Enabled, authorizedClientsOnly = channel.AuthorizedClientsOnly, endToEndEncryptionEnabled = channel.EndToEndEncryptionEnabled, maxConnections = channel.MaxConnections, targetConnectTimeoutSeconds = channel.TargetConnectTimeoutSeconds, applicationProtocol = channel.ApplicationProtocol, httpState = channelSession?.HttpStates.FirstOrDefault(state => state.ChannelId == channel.ChannelId)?.State, entryScheme = channel.Http is null ? null : channel.AuthorizedClientsOnly ? channel.Http.PeerEntryScheme : channel.Http.PublicEntryScheme, transportProtocol = channel.TransportProtocol, udpIdleTimeoutSeconds = channel.UdpIdleTimeoutSeconds, listenerState = channel.AuthorizedClientsOnly ? "peer-only" : channel.Enabled ? "listening" : "stopped", available = ChannelAvailability.IsPublicChannelAvailable(channel, channelSession), pendingConnections = channel.AuthorizedClientsOnly ? metric.PeerPendingConnections : metric.PendingConnections, activeConnections = channel.AuthorizedClientsOnly ? metric.PeerActiveConnections : metric.ActiveConnections, acceptedTotal = channel.AuthorizedClientsOnly ? metric.PeerAcceptedTotal : metric.AcceptedTotal, openedTotal = channel.AuthorizedClientsOnly ? metric.PeerOpenedTotal : metric.OpenedTotal, openFailedTotal = channel.AuthorizedClientsOnly ? metric.PeerOpenFailedTotal : metric.OpenFailedTotal, metric.NormalClosedTotal, metric.AbortedTotal, metric.BytesToTarget, metric.BytesToCaller, metric.PeerCiphertextToTarget, metric.PeerCiphertextToCaller, udpDroppedTotal = metric.UdpDroppedTotal, targetLastResult = metric.TargetLastResult?.Result, targetLastResultTimeUtc = metric.TargetLastResult?.TimeUtc };
+                return new { channelId = channel.ChannelId, displayName = channel.DisplayName, tags = channel.Tags, listenAddress = channel.ListenAddress, listenPort = channel.ListenPort, securityGroupId = channel.SecurityGroupId, targetHost = channel.TargetHost, targetPort = channel.TargetPort, enabled = channel.Enabled, authorizedClientsOnly = channel.AuthorizedClientsOnly, endToEndEncryptionEnabled = channel.EndToEndEncryptionEnabled, inspectionMode = channel.InspectionMode, application = channel.Application, unavailableReason = ChannelAvailability.InspectionUnavailableReason(channel), maxConnections = channel.MaxConnections, targetConnectTimeoutSeconds = channel.TargetConnectTimeoutSeconds, applicationProtocol = channel.ApplicationProtocol, httpState = channelSession?.HttpStates.FirstOrDefault(state => state.ChannelId == channel.ChannelId)?.State, entryScheme = channel.Http is null ? null : channel.AuthorizedClientsOnly ? channel.Http.PeerEntryScheme : channel.Http.PublicEntryScheme, transportProtocol = channel.TransportProtocol, udpIdleTimeoutSeconds = channel.UdpIdleTimeoutSeconds, listenerState = channel.AuthorizedClientsOnly ? "peer-only" : channel.Enabled ? "listening" : "stopped", available = ChannelAvailability.IsPublicChannelAvailable(channel, channelSession, runtime.Configuration.Server.Tunnel.TlsEnabled), pendingConnections = channel.AuthorizedClientsOnly ? metric.PeerPendingConnections : metric.PendingConnections, activeConnections = channel.AuthorizedClientsOnly ? metric.PeerActiveConnections : metric.ActiveConnections, acceptedTotal = channel.AuthorizedClientsOnly ? metric.PeerAcceptedTotal : metric.AcceptedTotal, openedTotal = channel.AuthorizedClientsOnly ? metric.PeerOpenedTotal : metric.OpenedTotal, openFailedTotal = channel.AuthorizedClientsOnly ? metric.PeerOpenFailedTotal : metric.OpenFailedTotal, metric.NormalClosedTotal, metric.AbortedTotal, metric.BytesToTarget, metric.BytesToCaller, metric.PeerCiphertextToTarget, metric.PeerCiphertextToCaller, metric.ApplicationToTarget, metric.ApplicationToCaller, udpDroppedTotal = metric.UdpDroppedTotal, targetLastResult = metric.TargetLastResult?.Result, targetLastResultTimeUtc = metric.TargetLastResult?.TimeUtc };
             }).ToArray()
         });
     });
@@ -366,7 +373,7 @@ try
         try
         {
             var (saved, push) = await editor.UpdateAsync(id, channelId, update, cancellationToken);
-            return Results.Ok(new { channel = new { saved.ChannelId, saved.DisplayName, tags = saved.Tags, saved.Enabled, saved.ListenAddress, saved.ListenPort, saved.TargetHost, saved.TargetPort, saved.MaxConnections, saved.TargetConnectTimeoutSeconds, saved.TransportProtocol, saved.UdpIdleTimeoutSeconds, saved.AuthorizedClientsOnly, saved.EndToEndEncryptionEnabled }, pushedToAgent = push.PushedToAgent, pushFailureReason = push.FailureReason, message = PushMessage(push, "已保存；运行配置变化已下发，tag 变更仅用于列表筛选。", "已保存；客户端离线时将在下次连接获取运行配置，tag 变更仅用于列表筛选。", "已保存，但下发到在线客户端失败；重连后会取得最新配置。tag 变更仅用于列表筛选。") });
+            return Results.Ok(new { channel = new { saved.ChannelId, saved.DisplayName, tags = saved.Tags, saved.Enabled, saved.ListenAddress, saved.ListenPort, saved.TargetHost, saved.TargetPort, saved.MaxConnections, saved.TargetConnectTimeoutSeconds, saved.TransportProtocol, saved.UdpIdleTimeoutSeconds, saved.AuthorizedClientsOnly, saved.EndToEndEncryptionEnabled, saved.InspectionMode, application = saved.Application }, pushedToAgent = push.PushedToAgent, pushFailureReason = push.FailureReason, message = PushMessage(push, "已保存；运行配置变化已下发，tag 变更仅用于列表筛选。", "已保存；客户端离线时将在下次连接获取运行配置，tag 变更仅用于列表筛选。", "已保存，但下发到在线客户端失败；重连后会取得最新配置。tag 变更仅用于列表筛选。") });
         }
         catch (ChannelUpdateException exception) { return Results.BadRequest(new { error = exception.Message }); }
     });
@@ -376,9 +383,83 @@ try
         try
         {
             var (saved, push) = await editor.CreateAsync(id, create, cancellationToken);
-            return Results.Created($"/api/v1/clients/{id}/channels", new { channel = new { saved.ChannelId, saved.DisplayName, tags = saved.Tags, saved.Enabled, saved.ListenAddress, saved.ListenPort, saved.TargetHost, saved.TargetPort, saved.MaxConnections, saved.TargetConnectTimeoutSeconds, saved.TransportProtocol, saved.UdpIdleTimeoutSeconds, saved.AuthorizedClientsOnly, saved.EndToEndEncryptionEnabled }, pushedToAgent = push.PushedToAgent, pushFailureReason = push.FailureReason, message = PushMessage(push, "已新增并下发给在线客户端；服务端监听已更新。", "已新增并更新服务端监听；客户端离线，将在下次连接时下发。", "已新增并更新服务端监听，但下发失败；客户端重连后会取得最新配置。") });
+            return Results.Created($"/api/v1/clients/{id}/channels", new { channel = new { saved.ChannelId, saved.DisplayName, tags = saved.Tags, saved.Enabled, saved.ListenAddress, saved.ListenPort, saved.TargetHost, saved.TargetPort, saved.MaxConnections, saved.TargetConnectTimeoutSeconds, saved.TransportProtocol, saved.UdpIdleTimeoutSeconds, saved.AuthorizedClientsOnly, saved.EndToEndEncryptionEnabled, saved.InspectionMode, application = saved.Application }, pushedToAgent = push.PushedToAgent, pushFailureReason = push.FailureReason, message = PushMessage(push, "已新增并下发给在线客户端；服务端监听已更新。", "已新增并更新服务端监听；客户端离线，将在下次连接时下发。", "已新增并更新服务端监听，但下发失败；客户端重连后会取得最新配置。") });
         }
         catch (ChannelUpdateException exception) { return Results.BadRequest(new { error = exception.Message }); }
+    });
+    app.MapGet("/api/v1/admin/credentials/status", async (HttpRequest request, AdminSessionService sessions, CredentialStore credentials, CancellationToken token) =>
+    {
+        if (!sessions.TryAuthorize(request, requireCsrf: false, out _)) return Results.Unauthorized();
+        try
+        {
+            await credentials.CheckAvailableAsync(token);
+            return Results.Ok(new { available = true, pendingAudits = (await credentials.PendingAuditsAsync(token)).Count,
+                pendingDeletions = await credentials.PendingDeletionsAsync(token) });
+        }
+        catch (CredentialStoreException) { return Results.Ok(new { available = false, reason = "credential_store_unavailable" }); }
+    });
+    app.MapGet("/api/v1/admin/clients/{id}/channels/{channelId}/credentials", async (string id, string channelId, HttpRequest request, AdminSessionService sessions, ServerRuntime runtime, CredentialStore credentials, ConfigurationWriteLock writeLock, CancellationToken cancellationToken) =>
+    {
+        if (!sessions.TryAuthorize(request, requireCsrf: false, out _)) return Results.Unauthorized();
+        await writeLock.Gate.WaitAsync(cancellationToken);
+        try
+        {
+            if (!HasChannel(runtime, id, channelId)) return Results.NotFound();
+            return Results.Ok(new { credentials = await credentials.ListAsync(id, channelId, cancellationToken) });
+        }
+        catch (CredentialStoreException exception)
+        {
+            if (await StoreUnavailableAsync(credentials)) return Results.Problem("Credential store is unavailable.", statusCode: 503);
+            return Results.Problem(exception.Message, statusCode: StatusCodes.Status409Conflict);
+        }
+        finally { writeLock.Gate.Release(); }
+    });
+    app.MapPut("/api/v1/admin/clients/{id}/channels/{channelId}/credentials/{credentialId}", async (string id, string channelId, string credentialId, CredentialWriteRequest body, HttpContext context, AdminSessionService sessions, ServerRuntime runtime, CredentialStore credentials, CredentialMutationService mutations, ConfigurationWriteLock writeLock, CancellationToken cancellationToken) =>
+    {
+        if (!sessions.TryAuthorize(context.Request, requireCsrf: true, out _)) return Results.Unauthorized();
+        if (!TryCredentialOperationId(context.Request, out var operationId)) return Results.BadRequest(new { error = "Idempotency-Key must be a nonempty UUID." });
+        context.Response.Headers["X-RelayLink-Operation-Id"] = operationId.ToString();
+        await writeLock.Gate.WaitAsync(cancellationToken);
+        var secret = Encoding.UTF8.GetBytes(body.Secret ?? "");
+        try
+        {
+            if (!HasChannel(runtime, id, channelId)) return Results.NotFound();
+            var result = await mutations.ApplyAsync(operationId, id, channelId, credentialId, body, secret, cancellationToken);
+            context.Response.Headers["X-RelayLink-Audit-Status"] = result.AuditPending ? "pending" : "recorded";
+            var saved = result.Operation.Credential!;
+            return Results.Ok(new { saved.CredentialId, saved.Username, saved.Purpose, saved.Type, saved.UpdatedUtc,
+                operationId, applied = result.Operation.Applied, auditStatus = result.AuditPending ? "pending" : "recorded" });
+        }
+        catch (AuditUnavailableException) { return Results.Problem("Audit storage is unavailable; no credential change was applied.", statusCode: 503); }
+        catch (CredentialStoreException exception)
+        {
+            if (await StoreUnavailableAsync(credentials)) return Results.Problem("Credential store is unavailable.", statusCode: 503);
+            return Results.BadRequest(new { error = exception.Message, operationId });
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { return Results.Problem("Credential change outcome could not be confirmed; retry with the same operation ID.", statusCode: 503); }
+        finally { writeLock.Gate.Release(); CryptographicOperations.ZeroMemory(secret); }
+    });
+    app.MapDelete("/api/v1/admin/clients/{id}/channels/{channelId}/credentials/{credentialId}", async (string id, string channelId, string credentialId, HttpContext context, AdminSessionService sessions, ServerRuntime runtime, CredentialStore credentials, CredentialMutationService mutations, ConfigurationWriteLock writeLock, CancellationToken cancellationToken) =>
+    {
+        if (!sessions.TryAuthorize(context.Request, requireCsrf: true, out _)) return Results.Unauthorized();
+        if (!TryCredentialOperationId(context.Request, out var operationId)) return Results.BadRequest(new { error = "Idempotency-Key must be a nonempty UUID." });
+        context.Response.Headers["X-RelayLink-Operation-Id"] = operationId.ToString();
+        await writeLock.Gate.WaitAsync(cancellationToken);
+        try
+        {
+            if (!HasChannel(runtime, id, channelId)) return Results.NotFound();
+            var result = await mutations.ApplyAsync(operationId, id, channelId, credentialId, null, ReadOnlyMemory<byte>.Empty, cancellationToken);
+            context.Response.Headers["X-RelayLink-Audit-Status"] = result.AuditPending ? "pending" : "recorded";
+            return result.Operation.Applied ? Results.NoContent() : Results.NotFound();
+        }
+        catch (AuditUnavailableException) { return Results.Problem("Audit storage is unavailable; no credential change was applied.", statusCode: 503); }
+        catch (CredentialStoreException exception)
+        {
+            if (await StoreUnavailableAsync(credentials)) return Results.Problem("Credential store is unavailable.", statusCode: 503);
+            return Results.BadRequest(new { error = exception.Message, operationId });
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { return Results.Problem("Credential change outcome could not be confirmed; retry with the same operation ID.", statusCode: 503); }
+        finally { writeLock.Gate.Release(); }
     });
     app.MapDelete("/api/v1/admin/clients/{id}/channels/{channelId}", async (string id, string channelId, HttpRequest request, AdminSessionService sessions, ChannelConfigurationEditor editor, CancellationToken cancellationToken) =>
     {
@@ -400,6 +481,9 @@ catch (Exception exception)
     return 1;
 }
 
+static bool HasChannel(ServerRuntime runtime, string clientId, string channelId) =>
+    runtime.Configuration.Clients.TryGetValue(clientId, out var client) && client.Channels.Any(channel => channel.ChannelId == channelId);
+
 static string PushMessage(AgentPushReport push, string sent, string offline, string failed) =>
     push.FailureReason is not null ? failed : push.PushedToAgent ? sent : offline;
 
@@ -416,6 +500,22 @@ static async Task<IResult> LoginThrottled(HttpResponse response, AuditService au
         : Results.StatusCode(StatusCodes.Status429TooManyRequests);
 }
 
+static bool TryCredentialOperationId(HttpRequest request, out Guid operationId)
+{
+    operationId = Guid.Empty;
+    var supplied = request.Headers["Idempotency-Key"];
+    if (supplied.Count == 0) { operationId = Guid.NewGuid(); return true; }
+    return supplied.Count == 1 && Guid.TryParse(supplied[0], out operationId) && operationId != Guid.Empty;
+}
+
+// A credential mutation can fail because the request is invalid or because the secret store as a
+// whole is unavailable. Only the latter is a service-side failure and must not be reported as 400.
+static async Task<bool> StoreUnavailableAsync(CredentialStore store)
+{
+    try { await store.CheckAvailableAsync(CancellationToken.None); return false; }
+    catch (CredentialStoreException) { return true; }
+}
+
 static IResult GetMappingStatus(string id, ServerRuntime runtime)
 {
     if (!runtime.Configuration.Clients.TryGetValue(id, out var client)) return Results.NotFound();
@@ -425,7 +525,7 @@ static IResult GetMappingStatus(string id, ServerRuntime runtime)
         var address = agentSession?.PeerAddresses.FirstOrDefault(item => item.MappingId == mapping.MappingId);
         var target = runtime.Configuration.Clients.GetValueOrDefault(mapping.TargetClientId)?.Channels.SingleOrDefault(c => c.ChannelId == mapping.TargetChannelId);
         runtime.Sessions.TryGet(mapping.TargetClientId, out var targetSession);
-        return new { mapping.MappingId, mapping.Enabled, localAddress = address?.LocalAddress, localPort = address?.LocalPort, available = ChannelAvailability.IsOutboundMappingAvailable(mapping, address, target, agentSession, targetSession), applicationProtocol = target?.ApplicationProtocol ?? "raw", accessUrl = address is not null && target?.Http is not null ? $"{target.Http.PeerEntryScheme}://{target.Http.PeerAuthorityHost}:{address.LocalPort}" : null, mapping.TargetClientId, mapping.TargetChannelId, transportProtocol = runtime.Configuration.Clients.GetValueOrDefault(mapping.TargetClientId)?.Channels.SingleOrDefault(c => c.ChannelId == mapping.TargetChannelId)?.TransportProtocol ?? "tcp" };
+        return new { mapping.MappingId, mapping.Enabled, localAddress = address?.LocalAddress, localPort = address?.LocalPort, available = ChannelAvailability.IsOutboundMappingAvailable(mapping, address, target, agentSession, targetSession, runtime.Configuration.Server.Tunnel.TlsEnabled), applicationProtocol = target?.ApplicationProtocol ?? "raw", application = target?.Application, unavailableReason = ChannelAvailability.InspectionUnavailableReason(target), accessUrl = address is not null && target?.Http is not null ? $"{target.Http.PeerEntryScheme}://{target.Http.PeerAuthorityHost}:{address.LocalPort}" : null, mapping.TargetClientId, mapping.TargetChannelId, transportProtocol = runtime.Configuration.Clients.GetValueOrDefault(mapping.TargetClientId)?.Channels.SingleOrDefault(c => c.ChannelId == mapping.TargetChannelId)?.TransportProtocol ?? "tcp" };
     }).ToArray() });
 }
 
@@ -467,10 +567,12 @@ static IResult GetDashboardSnapshot(HttpRequest request, ServerRuntime runtime, 
                     enabled = channel.Enabled,
                     authorizedClientsOnly = channel.AuthorizedClientsOnly,
                     endToEndEncryptionEnabled = channel.EndToEndEncryptionEnabled,
+                    inspectionMode = channel.InspectionMode,
+                    application = channel.Application, unavailableReason = ChannelAvailability.PublicChannelUnavailableReason(channel, session, runtime.Configuration.Server.Tunnel.TlsEnabled),
                     maxConnections = channel.MaxConnections,
                     targetConnectTimeoutSeconds = channel.TargetConnectTimeoutSeconds,
                     listenerState = channel.AuthorizedClientsOnly ? "peer-only" : channel.Enabled ? "listening" : "stopped",
-                    available = ChannelAvailability.IsPublicChannelAvailable(channel, session),
+                    available = ChannelAvailability.IsPublicChannelAvailable(channel, session, runtime.Configuration.Server.Tunnel.TlsEnabled),
                     pendingConnections = channel.AuthorizedClientsOnly ? metric.PeerPendingConnections : metric.PendingConnections,
                     activeConnections = channel.AuthorizedClientsOnly ? metric.PeerActiveConnections : metric.ActiveConnections,
                     acceptedTotal = channel.AuthorizedClientsOnly ? metric.PeerAcceptedTotal : metric.AcceptedTotal,
@@ -481,7 +583,7 @@ static IResult GetDashboardSnapshot(HttpRequest request, ServerRuntime runtime, 
                     metric.BytesToTarget,
                     metric.BytesToCaller,
                     metric.PeerCiphertextToTarget,
-                    metric.PeerCiphertextToCaller,
+                    metric.PeerCiphertextToCaller, metric.ApplicationToTarget, metric.ApplicationToCaller,
                     udpDroppedTotal = metric.UdpDroppedTotal,
                     targetLastResult = metric.TargetLastResult?.Result,
                     targetLastResultTimeUtc = metric.TargetLastResult?.TimeUtc
@@ -498,8 +600,9 @@ static IResult GetDashboardSnapshot(HttpRequest request, ServerRuntime runtime, 
                     mapping.Enabled,
                     localAddress = address?.LocalAddress,
                     localPort = address?.LocalPort,
-                    available = ChannelAvailability.IsOutboundMappingAvailable(mapping, address, target, session, targetSession),
+                    available = ChannelAvailability.IsOutboundMappingAvailable(mapping, address, target, session, targetSession, runtime.Configuration.Server.Tunnel.TlsEnabled),
                     applicationProtocol = target?.ApplicationProtocol ?? "raw",
+                    application = target?.Application, unavailableReason = ChannelAvailability.OutboundMappingUnavailableReason(mapping, address, target, session, targetSession, runtime.Configuration.Server.Tunnel.TlsEnabled),
                     accessUrl = address is not null && target?.Http is not null ? $"{target.Http.PeerEntryScheme}://{target.Http.PeerAuthorityHost}:{address.LocalPort}" : null,
                     mapping.TargetClientId,
                     mapping.TargetChannelId,
@@ -535,12 +638,14 @@ static IResult GetDashboardSnapshot(HttpRequest request, ServerRuntime runtime, 
         clientsOnline = runtime.Sessions.Count,
         clientsTotal = allClients.Length,
         channelsTotal = allClients.Sum(client => client.Channels.Count),
-        channelsAvailable = ChannelAvailability.CountAvailablePublicChannels(allClients, runtime.Sessions),
+        channelsAvailable = ChannelAvailability.CountAvailablePublicChannels(allClients, runtime.Sessions, runtime.Configuration.Server.Tunnel.TlsEnabled),
         activeConnections = channelMetrics.Sum(snapshot => snapshot.ActiveConnections + snapshot.PeerActiveConnections),
         bytesToTarget = channelMetrics.Sum(snapshot => snapshot.BytesToTarget),
         bytesToCaller = channelMetrics.Sum(snapshot => snapshot.BytesToCaller),
         peerCiphertextToTarget = channelMetrics.Sum(snapshot => snapshot.PeerCiphertextToTarget),
         peerCiphertextToCaller = channelMetrics.Sum(snapshot => snapshot.PeerCiphertextToCaller),
+        applicationToTarget = channelMetrics.Sum(snapshot => snapshot.ApplicationToTarget),
+        applicationToCaller = channelMetrics.Sum(snapshot => snapshot.ApplicationToCaller),
         tcpIdleTimeoutSeconds = runtime.Configuration.Server.Limits.TcpIdleTimeoutSeconds,
         halfCloseDrainTimeoutSeconds = runtime.Configuration.Server.Limits.HalfCloseDrainTimeoutSeconds
     };

@@ -1,4 +1,5 @@
 using System.Net.Sockets;
+using System.Net.Security;
 
 namespace RelayLink.Transport;
 
@@ -48,4 +49,75 @@ public static class RelayPump
         }
     }
 
+    public static async Task CopySocketToStreamAsync(Socket source, Stream destination, CancellationToken cancellationToken, Action<int>? bytesWritten = null, TimeSpan? blockedWriteTimeout = null)
+    {
+        var buffer = new byte[32 * 1024];
+        while (true)
+        {
+            var read = await source.ReceiveAsync(buffer, SocketFlags.None, cancellationToken);
+            if (read == 0)
+            {
+                if (destination is SslStream tls) await ShutdownAsync(tls, cancellationToken, blockedWriteTimeout);
+                return;
+            }
+            await WriteAsync(destination, buffer.AsMemory(0, read), cancellationToken, blockedWriteTimeout);
+            bytesWritten?.Invoke(read);
+        }
+    }
+
+    public static async Task CopyStreamToSocketAsync(Stream source, Socket destination, CancellationToken cancellationToken, Action<int>? bytesWritten = null, TimeSpan? blockedWriteTimeout = null)
+    {
+        var buffer = new byte[32 * 1024];
+        while (true)
+        {
+            var read = await source.ReadAsync(buffer, cancellationToken);
+            if (read == 0)
+            {
+                destination.Shutdown(SocketShutdown.Send);
+                return;
+            }
+            var remaining = buffer.AsMemory(0, read);
+            while (!remaining.IsEmpty)
+            {
+                using var writeDeadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                writeDeadline.CancelAfter(blockedWriteTimeout ?? TimeSpan.FromSeconds(120));
+                var sent = await destination.SendAsync(remaining, SocketFlags.None, writeDeadline.Token);
+                if (sent == 0) throw new IOException("Socket closed during relay send.");
+                remaining = remaining[sent..];
+                bytesWritten?.Invoke(sent);
+            }
+        }
+    }
+
+    public static async Task CopyStreamToStreamAsync(Stream source, Stream destination, CancellationToken cancellationToken, Action<int>? bytesWritten = null, Func<ValueTask>? onSourceEof = null, TimeSpan? blockedWriteTimeout = null)
+    {
+        var buffer = new byte[32 * 1024];
+        while (true)
+        {
+            var read = await source.ReadAsync(buffer, cancellationToken);
+            if (read == 0)
+            {
+                if (onSourceEof is not null) await onSourceEof();
+                else if (destination is SslStream tls) await ShutdownAsync(tls, cancellationToken, blockedWriteTimeout);
+                return;
+            }
+            await WriteAsync(destination, buffer.AsMemory(0, read), cancellationToken, blockedWriteTimeout);
+            bytesWritten?.Invoke(read);
+        }
+    }
+
+    private static async ValueTask WriteAsync(Stream stream, ReadOnlyMemory<byte> bytes, CancellationToken token, TimeSpan? timeout)
+    {
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
+        deadline.CancelAfter(timeout ?? TimeSpan.FromSeconds(120));
+        await stream.WriteAsync(bytes, deadline.Token);
+    }
+
+    private static async Task ShutdownAsync(SslStream stream, CancellationToken token, TimeSpan? timeout)
+    {
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
+        deadline.CancelAfter(timeout ?? TimeSpan.FromSeconds(120));
+        try { await stream.ShutdownAsync().WaitAsync(deadline.Token); }
+        catch { stream.Dispose(); throw; }
+    }
 }

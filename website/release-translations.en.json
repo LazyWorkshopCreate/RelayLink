@@ -528,5 +528,54 @@
         ]
       }
     ]
+  },
+  "v0.1.0-rc.13": {
+    "title": "RelayLink v0.1.0-rc.13",
+    "intro": "This release candidate after v0.1.0-rc.12 introduces auditable inspection channels (the plugin system), protocol v7, and a credential store. Inspected channels cover HTTP/HTTPS and SSH for server-side visible peer access and jump proxying. RDP data-plane handling, a complete approval loop, and bridge applications remain unimplemented.",
+    "sections": [
+      {
+        "title": "Highlights",
+        "items": [
+          "Two auditable channel types: server-peer for server-side visible peer access and server-jump for a server-side jump proxy. The channel type is locked at creation. Application tags app:ssh, app:rdp, app:http, and app:https accept only canonical lowercase values; mixed case, duplicate, or non-canonical values are rejected.",
+          "Protocol v7: the wire protocol moves from v5 to v7. v6 introduced inspectionMode, derived application, target-leg TLS, and an access proof; v7 adds the InspectionActive (25) and InspectionTargetReady (26) stage notifications to separate target readiness from service activation. The server still accepts the original none capabilities of v3-v6, while auditable channels are only offered to v7; server-peer requires v7 on both sides and server-jump requires a v7 target.",
+          "Per-request HTTP/HTTPS inspection: a virtual Kestrel connection with YARP forwarding parses each HTTP/1.1 request, applies policy, waits for approval when required, and writes the decision to audit before forwarding. It covers Content-Length, chunked bodies, keep-alive, pipelining, Expect: 100-continue, interim responses, and WebSocket upgrades. Ambiguous requests such as CL/TE conflicts, duplicate Host/Content-Length, CONNECT, and non-origin-form targets fail closed. HTTPS validates upstream TLS and still requires the serverAuth purpose and name match for custom CAs.",
+          "SSH inspection: each channel pins the target host SHA-256 fingerprint and only reads the target credential after the target host is authenticated. The allow decision is persisted to audit before connecting or running shell/exec/subsystem, every action has its own audit, and an audit failure on rejection still rejects. Each caller channel keeps its own pty/env/window-change/signal state and has limits of 32 channels, 64 KiB initialization, and 64 concurrent requests; unimplemented TCP/agent/X11 forwarding is rejected explicitly.",
+          "Lifecycle and resources: setup, first header, approval, and target connection use staged deadlines. The first pending slot is held until the service becomes active, and later approvals use bounded leases without double-counting connections. Failures abort both directions, normal half-close drains, idle reclamation, and blocked-write deadlines behave consistently on server and agent; an administrator disconnect or configuration revocation releases capacity.",
+          "Audit and metrics: every HTTP request records decision/response entries with status, both directions of bytes, and request correlation; SSH channel close records exit status/signal and bytes; peer and proxy close events have a final byte snapshot. New applicationToTarget and applicationToCaller counters are separate from peerCiphertext*, and minute history only appends columns without rewriting old rows.",
+          "Credentials and secret store: channel credentials are separated from configuration JSON and stored in an encrypted secret store. Changes follow persist intent, atomic replace, and record result; operation IDs support idempotent retries and 24-hour receipt expiry, and failed result audits are reconciled in the background. Deleting a channel or client writes a recoverable deletion marker and cleans old credentials and front-door host keys; recreating the same ID does not reuse old secrets.",
+          "Configuration and administration: auditable channels require control TLS when loading files or saving through the API; server-peer availability depends on both sides on v7, readiness, address, mapping, and target material. New or re-enabled RDP inspection entries are rejected while existing entries can be disabled or deleted; new HTTPS inspection channels without certificate material are rejected, but existing file-configured entries remain editable. Relative certificate paths stay relative after edits and are resolved again after moving the configuration directory.",
+          "Agent local page: shows online state for local peer entries and supports copying the address; the peer-entry table no longer produces a horizontal scrollbar. Per ADR-0034 the local management token input and the X-RelayLink-Local-Token requirement are removed; write requests still validate Host, Origin, the short-lived HttpOnly SameSite=Strict session, and CSRF.",
+          "Documentation and verification: added ADR-0030 to ADR-0034, plugin-system requirements/design (still Draft/Proposed), TST-009 to TST-013 remediation records, and configuration examples. Local unit tests passed 358/358 and integration tests 156/156, including real v3/v4/v5 legacy agents; CI and release builds run again on the tag."
+        ]
+      },
+      {
+        "title": "Upgrade and compatibility",
+        "items": [
+          "Upgrade the server first, then agents that need auditable channels. Auditable channels require protocol v7; older v3-v6 agents keep the existing none TCP/UDP/HTTP paths and do not need to upgrade for ordinary forwarding.",
+          "Existing channel configuration needs no rewrite, but auditable channels require control TLS, SSH channels need a target host fingerprint registered by an administrator, and HTTPS channels need certificate material from a configuration file.",
+          "RDP inspection channels cannot be created or re-enabled; existing entries can be viewed, disabled, and deleted. The complete RDP data plane, administrator approval pages, credential release, bridge applications, and certificate/policy edit forms are still unimplemented, and the current reject-after-wait behavior is not an approval loop.",
+          "The Agent local write API no longer requires a management token. Any user on the same host who can open 127.0.0.1:18081 can change that agent's connection configuration, so this is suitable only for single-user hosts or hosts operated by an administrator; do not run the agent as LocalSystem or root on multi-user hosts.",
+          "The admin page and the Agent status page still listen on loopback only and use plain HTTP; this release does not change ordinary proxy, UDP, or target-agent HTTP handling."
+        ]
+      },
+      {
+        "title": "Verification and limitations",
+        "items": [
+          "On the local Windows machine, backend unit tests passed 358/358 and integration tests 156/156, including real v3/v4/v5 legacy agents; frontend checks and the website build passed. Cross-platform CI and release assets are authoritative for the tagged commit.",
+          "This candidate did not rerun the full integration suite on native Linux or macOS and did not run capacity or cross-host disaster-recovery tests; a local pass does not remove those limits. Native macOS integration also currently excludes two inspection half-close cases (PluginLifecycleTests.Client_half_close_drains_the_reverse_response_and_ends_completed and PeerConnectionTests.Server_jump_relays_plaintext_over_target_leg_tls_and_blocks_unhandled_applications) because the reverse response is still lost on macOS; that is a known unfixed issue, while Windows and Linux continue to run both cases.",
+          "Plugin-system requirement REQ-001O and design DES-009 remain Draft, and ADR-0028/0029 remain Proposed; this release does not claim their acceptance is complete."
+        ]
+      },
+      {
+        "title": "Release assets",
+        "items": [
+          "Self-contained server archives for Linux x64 and Windows x64",
+          "Self-contained Linux x64 agent archive",
+          "Windows x64 agent archives and installer for self-contained and framework-dependent builds",
+          "Self-contained macOS Intel and Apple Silicon agent archives",
+          "SHA256SUMS checksum list"
+        ]
+      }
+    ]
   }
 }

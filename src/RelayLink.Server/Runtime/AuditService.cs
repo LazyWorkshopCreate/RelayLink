@@ -5,6 +5,7 @@ namespace RelayLink.Server.Runtime;
 
 public sealed record AuditEvent(string EventType, string Outcome)
 {
+    public Guid? EventId { get; init; }
     public string? ReasonCode { get; init; }
     public Guid? ConnectionId { get; init; }
     public Guid? SessionId { get; init; }
@@ -109,8 +110,9 @@ public sealed class AuditService(ServerRuntime runtime, ILogger<AuditService> lo
                     VALUES ($id, $at, $type, $outcome, $reason, $connection, $session, $client,
                         $channel, $mapping, $caller, $target, $actor, $remote, $duration,
                         $toTarget, $toCaller, $instance)
+                    ON CONFLICT(event_id) DO NOTHING
                     """;
-                command.Parameters.AddWithValue("$id", Guid.NewGuid().ToString());
+                command.Parameters.AddWithValue("$id", (value.EventId ?? Guid.NewGuid()).ToString());
                 command.Parameters.AddWithValue("$at", DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
                 command.Parameters.AddWithValue("$type", value.EventType);
                 command.Parameters.AddWithValue("$outcome", value.Outcome);

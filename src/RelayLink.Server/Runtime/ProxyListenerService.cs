@@ -1,14 +1,17 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Net;
+using System.Net.Security;
 using System.Net.Sockets;
+using System.Security.Authentication;
+using System.Security.Cryptography.X509Certificates;
 using RelayLink.Protocol;
 using RelayLink.Server.Configuration;
 using RelayLink.Transport;
 
 namespace RelayLink.Server.Runtime;
 
-public sealed class ProxyListenerService(ServerRuntime runtime, PendingConnectionRegistry pendingConnections, MetricsRegistry metrics, AuditService audit, ILogger<ProxyListenerService> logger) : BackgroundService
+public sealed class ProxyListenerService(ServerRuntime runtime, PendingConnectionRegistry pendingConnections, MetricsRegistry metrics, AuditService audit, ILogger<ProxyListenerService> logger, CredentialStore? credentials = null) : BackgroundService
 {
     private readonly SemaphoreSlim configurationLock = new(1, 1);
     private readonly Dictionary<string, ListenerBinding> bindings = new(StringComparer.Ordinal);
@@ -17,6 +20,8 @@ public sealed class ProxyListenerService(ServerRuntime runtime, PendingConnectio
     private readonly ConcurrentDictionary<long, ActiveProxyConnection> activeConnections = new();
     private readonly SemaphoreSlim globalLimit = runtime.GlobalConnectionLimit;
     private readonly SemaphoreSlim globalPendingLimit = runtime.GlobalPendingLimit;
+    private readonly object certificateGate = new();
+    private X509Certificate2? serverCertificate;
     private long connectionTaskSequence;
     private int unexpectedListenerFailures;
     private int forcedAcceptFailures;
@@ -44,7 +49,7 @@ public sealed class ProxyListenerService(ServerRuntime runtime, PendingConnectio
                 clientPendingLimits.GetOrAdd(client.ClientId, _ => new AdjustableConnectionLimit(client.MaxPendingConnections)).SetMaximum(client.MaxPendingConnections);
                 foreach (var channel in client.Channels) metrics.For(client.ClientId, channel.ChannelId);
             }
-            var desired = configuration.Clients.Values.Where(client => client.Enabled).SelectMany(client => client.Channels.Where(channel => channel.Enabled && !channel.AuthorizedClientsOnly).Select(channel => new ListenerBinding(client, channel))).ToDictionary(binding => binding.Key, StringComparer.Ordinal);
+            var desired = configuration.Clients.Values.Where(client => client.Enabled).SelectMany(client => client.Channels.Where(channel => channel.Enabled && !channel.AuthorizedClientsOnly && channel.InspectionMode is "none" or "server-jump").Select(channel => new ListenerBinding(client, channel))).ToDictionary(binding => binding.Key, StringComparer.Ordinal);
             foreach (var existing in bindings.Values.Where(existing => existing.AcceptFailed && desired.ContainsKey(existing.Key)).ToArray())
                 existing.Stop();
             var additions = desired.Values.Where(candidate => !bindings.TryGetValue(candidate.Key, out var existing) || !existing.HasSameListener(candidate) || existing.AcceptFailed).ToArray();
@@ -277,7 +282,7 @@ public sealed class ProxyListenerService(ServerRuntime runtime, PendingConnectio
         using var connectionCancellation = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken, connection.RevocationToken, datagram?.Token ?? CancellationToken.None);
         var cancellationToken = connectionCancellation.Token;
         var globalHeld = false; var clientHeld = false; var channelHeld = false; var globalPendingHeld = false; var clientPendingHeld = false;
-        PendingConnection? pending = null; var relaying = false; var auditOpened = false; var relayCompletedNormally = false;
+        PendingConnection? pending = null; SslStream? jumpTls = null; var relaying = false; var auditOpened = false; var relayCompletedNormally = false;
         var started = Stopwatch.GetTimestamp();
         var phase = "accepted";
         var outcome = "rejected";
@@ -291,12 +296,15 @@ public sealed class ProxyListenerService(ServerRuntime runtime, PendingConnectio
             var channelMetrics = metrics.For(client.ClientId, channel.ChannelId);
             channelMetrics.Accepted();
             if (!runtime.Configuration.Clients.TryGetValue(client.ClientId, out var currentClient) || !currentClient.Enabled ||
-                currentClient.Channels.SingleOrDefault(current => current.ChannelId == channel.ChannelId) is not { Enabled: true, AuthorizedClientsOnly: false } currentChannel)
+                currentClient.Channels.SingleOrDefault(current => current.ChannelId == channel.ChannelId) is not { Enabled: true, AuthorizedClientsOnly: false } currentChannel ||
+                currentChannel.InspectionMode is not ("none" or "server-jump"))
             { outcome = "channel_unavailable"; caller?.Dispose(); return; }
             if (connection.SourceAddress is not { } source || !SecurityGroupMatcher.IsAllowed(currentChannel, runtime.Configuration.Server, source))
             { outcome = "security_group_denied"; caller?.Dispose(); return; }
             if (!runtime.Sessions.TryGet(client.ClientId, out var session) || session is not { IsReady: true }) { outcome = "agent_offline"; caller?.Dispose(); return; }
             if (channel.TransportProtocol == "udp" && session.ProtocolVersion < 4) { outcome = "udp_not_supported"; caller?.Dispose(); return; }
+            if (currentChannel.InspectionMode == "server-jump" && (session.ProtocolVersion < ProtocolConstants.InspectionVersion || currentChannel.TransportProtocol != "tcp" || !runtime.Configuration.Server.Tunnel.TlsEnabled))
+            { outcome = "inspection_unavailable"; caller?.Dispose(); return; }
             if (channel.ApplicationProtocol == "http" && !session.IsHttpReady(channel)) { outcome = "http_unavailable"; caller?.Dispose(); return; }
             globalHeld = await globalLimit.WaitAsync(0, cancellationToken); if (!globalHeld) { caller?.Dispose(); return; }
             cancellationToken.ThrowIfCancellationRequested();
@@ -308,19 +316,134 @@ public sealed class ProxyListenerService(ServerRuntime runtime, PendingConnectio
             pending = pendingConnections.Create(session, channel, caller, TimeSpan.FromSeconds(runtime.Configuration.Server.Limits.OpenTimeoutSeconds), connection.ConnectionId);
             phase = "open_sent";
             logger.LogInformation("Proxy {ConnectionId} opened for {ClientId}/{ChannelId}.", pending.ConnectionId, client.ClientId, channel.ChannelId);
-            await session.SendAsync(new Frame(FrameType.Open, JsonProtocolSerializer.Serialize(new OpenMessage(session.SessionId, pending.ConnectionId, channel.ChannelId, session.ConfigVersion, pending.Token, runtime.Configuration.Server.Limits.OpenTimeoutSeconds * 1000, channel.ApplicationProtocol == "http" ? new HttpIngressContext("public", channel.Http!.PublicEntryScheme, connection.SourceAddress?.ToString(), PolicyHash: HttpProxyPolicy.Hash(ConfigurationSnapshotFactory.ToHttpSnapshot(channel))) : null), session.ProtocolVersion)), cancellationToken);
+            await session.SendAsync(new Frame(FrameType.Open, JsonProtocolSerializer.Serialize(new OpenMessage(session.SessionId, pending.ConnectionId, channel.ChannelId, session.ConfigVersion, pending.Token, runtime.Configuration.Server.Limits.OpenTimeoutSeconds * 1000, channel.ApplicationProtocol == "http" ? new HttpIngressContext("public", channel.Http!.PublicEntryScheme, connection.SourceAddress?.ToString(), PolicyHash: HttpProxyPolicy.Hash(ConfigurationSnapshotFactory.ToHttpSnapshot(channel))) : null) { InspectionWaitTimeoutMilliseconds = PeerRelayRegistry.InspectionWaitMilliseconds(runtime.Configuration.Server.Limits.OpenTimeoutSeconds, channel) }, session.ProtocolVersion)), cancellationToken);
             using var openTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, session.LifetimeToken);
             openTimeout.CancelAfter(TimeSpan.FromSeconds(runtime.Configuration.Server.Limits.OpenTimeoutSeconds));
             var tunnel = await pending.WaitForTunnelAsync(openTimeout.Token);
             phase = "data_bound";
             logger.LogInformation("Proxy {ConnectionId} data bound after {ElapsedMs} ms.", pending.ConnectionId, (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds);
+            if (currentChannel.InspectionMode == "server-jump")
+            {
+                var limits = runtime.Configuration.Server.Limits;
+                using var sessionLifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, session.LifetimeToken);
+                using var lifecycle = new InspectionLifetime(sessionLifetime.Token,
+                    TimeSpan.FromMilliseconds(PeerRelayRegistry.InspectionWaitMilliseconds(limits.OpenTimeoutSeconds, currentChannel)),
+                    TimeSpan.FromSeconds(limits.TcpIdleTimeoutSeconds));
+                void Abort() { lifecycle.Abort(); caller?.Dispose(); tunnel.Socket.Dispose(); }
+                using var termination = lifecycle.Token.Register(() => { caller?.Dispose(); tunnel.Socket.Dispose(); });
+                jumpTls = new SslStream(tunnel.Stream, leaveInnerStreamOpen: true);
+                await jumpTls.AuthenticateAsServerAsync(new SslServerAuthenticationOptions
+                {
+                    ServerCertificate = ServerCertificate,
+                    EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
+                    ClientCertificateRequired = false,
+                    CertificateRevocationCheckMode = X509RevocationMode.NoCheck
+                }, openTimeout.Token);
+                if (!jumpTls.IsEncrypted) throw new AuthenticationException("Jump TLS is not encrypted.");
+                if (credentials is not null) await credentials.CheckAvailableAsync(openTimeout.Token);
+                void FromCaller(int count)
+                {
+                    channelMetrics.AddApplicationToTarget(count); connection.AddToTarget(count);
+                    Interlocked.Add(ref toAgentBytes, count); Interlocked.Exchange(ref lastToAgent, Stopwatch.GetTimestamp()); lifecycle.Touch();
+                }
+                void FromTarget(int count)
+                {
+                    channelMetrics.AddApplicationToCaller(count); connection.AddToCaller(count);
+                    Interlocked.Add(ref toCallerBytes, count); Interlocked.Exchange(ref lastToCaller, Stopwatch.GetTimestamp()); lifecycle.Touch();
+                }
+                async ValueTask<IDisposable?> AcquireApproval(CancellationToken token)
+                {
+                    if (!relaying) return new InspectionApprovalLease();
+                    if (!await globalPendingLimit.WaitAsync(0, token)) return null;
+                    if (!clientPendingLimits[client.ClientId].TryAcquire()) { globalPendingLimit.Release(); return null; }
+                    var idleSuspension = lifecycle.SuspendIdle();
+                    return new InspectionApprovalLease(() => { idleSuspension.Dispose(); clientPendingLimits[client.ClientId].Release(); globalPendingLimit.Release(); });
+                }
+                async Task<Stream> OpenTarget(CancellationToken token)
+                {
+                    using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token, lifecycle.Token);
+                    deadline.CancelAfter(TimeSpan.FromSeconds(channel.TargetConnectTimeoutSeconds + 1));
+                    await jumpTls.WriteAsync(new byte[] { 1 }, deadline.Token);
+                    await pending.WaitForTargetReadyAsync(deadline.Token);
+                    await audit.RecordAsync(new AuditEvent("proxy_connection_opened", "prepared")
+                    { ReasonCode = "inspection_preparing", ConnectionId = connection.ConnectionId, SessionId = session.SessionId,
+                        ClientId = client.ClientId, ChannelId = channel.ChannelId, RemoteIp = connection.SourceAddress?.ToString() }, deadline.Token);
+                    auditOpened = true;
+                    // Start enables the target leg for upstream TLS/SSH authentication, not final activation.
+                    await session.SendAsync(new Frame(FrameType.Start, JsonProtocolSerializer.Serialize(new StartMessage(pending.ConnectionId) { LegTls = true }, session.ProtocolVersion)), deadline.Token);
+                    return jumpTls;
+                }
+                async ValueTask Established(CancellationToken token)
+                {
+                    await audit.RecordAsync(new AuditEvent("inspection_session_opened", "success")
+                    { ConnectionId = connection.ConnectionId, SessionId = session.SessionId, ClientId = client.ClientId, ChannelId = channel.ChannelId }, token);
+                    await session.SendAsync(new Frame(FrameType.InspectionActive, JsonProtocolSerializer.Serialize(new InspectionActiveMessage(session.SessionId, pending.ConnectionId))), token);
+                    token.ThrowIfCancellationRequested();
+                    if (!lifecycle.Activate()) throw new OperationCanceledException(token);
+                    globalPendingLimit.Release(); globalPendingHeld = false;
+                    clientPendingLimits[client.ClientId].Release(); clientPendingHeld = false;
+                    channelMetrics.Opened(); relaying = true; connection.MarkRelaying(); phase = "relaying";
+                }
+                var callerStream = new NetworkStream(caller!, ownsSocket: false);
+                bool opened;
+                if (currentChannel.Application == "ssh" && credentials is not null)
+                {
+                    opened = await SshInspection.RelayAsync(callerStream, OpenTarget, client.ClientId, channel.ChannelId,
+                        currentChannel, credentials, audit, connection.ConnectionId, lifecycle.Token, fromCaller: FromCaller, fromTarget: FromTarget,
+                        onAuthenticated: token => Established(token).AsTask(), onActivity: lifecycle.Touch, setupTimeout: TimeSpan.FromSeconds(limits.OpenTimeoutSeconds),
+                writeTimeout: TimeSpan.FromSeconds(limits.BlockedWriteTimeoutSeconds), halfCloseTimeout: TimeSpan.FromSeconds(limits.HalfCloseDrainTimeoutSeconds), acquireApprovalLease: AcquireApproval, onRejected: reason => outcome = reason, logger: logger);
+                }
+                else if (currentChannel.Application is "http" or "https")
+                {
+                    opened = await HttpInspection.RelayAsync(callerStream, currentChannel, OpenTarget,
+                        async (decision, token) =>
+                        {
+                            if (!decision.Allowed) outcome = decision.Reason;
+                            await audit.RecordAsync(new AuditEvent("inspection_decision", decision.Allowed ? "success" : "denied")
+                            { ReasonCode = $"request:{decision.RequestId} " + decision.Summary + " " + decision.Reason, ConnectionId = connection.ConnectionId,
+                                SessionId = session.SessionId, ClientId = client.ClientId, ChannelId = channel.ChannelId,
+                                RemoteIp = connection.SourceAddress?.ToString() }, token);
+                        },
+                        async (response, token) => await audit.RecordAsync(new AuditEvent("inspection_response", response.Outcome)
+                        { ReasonCode = $"request:{response.RequestId} " + response.Summary + " " + response.StatusCode + " " + response.Reason, ConnectionId = connection.ConnectionId,
+                            BytesToTarget = response.BytesToTarget, BytesToCaller = response.BytesToCaller, DurationMs = (long)response.ElapsedMilliseconds,
+                            SessionId = session.SessionId, ClientId = client.ClientId, ChannelId = channel.ChannelId }, token),
+                        lifecycle.Token, FromCaller, FromTarget, Established,
+                        new HttpInspectionRelayOptions { SetupTimeout = TimeSpan.FromSeconds(limits.OpenTimeoutSeconds),
+                            BlockedWriteTimeout = TimeSpan.FromSeconds(limits.BlockedWriteTimeoutSeconds),
+                            HalfCloseTimeout = TimeSpan.FromSeconds(limits.HalfCloseDrainTimeoutSeconds), Abort = Abort, AcquireApprovalLease = AcquireApproval,
+                            OnApprovalWaiting = async (decision, token) => await audit.RecordAsync(new AuditEvent("inspection_decision", "waiting")
+                            { ReasonCode = $"request:{decision.RequestId} " + decision.Summary + " approval_waiting", ConnectionId = connection.ConnectionId,
+                                SessionId = session.SessionId, ClientId = client.ClientId, ChannelId = channel.ChannelId }, token) });
+                }
+                else if (currentChannel.Application is null)
+                {
+                    await audit.RecordAsync(new AuditEvent("inspection_decision", "success")
+                    { ReasonCode = "plain_allow", ConnectionId = connection.ConnectionId, ClientId = client.ClientId, ChannelId = channel.ChannelId }, lifecycle.Token);
+                    _ = await OpenTarget(lifecycle.Token);
+                    await Established(lifecycle.Token);
+                    var toTarget = RelayPump.CopySocketToStreamAsync(caller!, jumpTls, lifecycle.Token, FromCaller, TimeSpan.FromSeconds(limits.BlockedWriteTimeoutSeconds));
+                    var toCaller = RelayPump.CopyStreamToSocketAsync(jumpTls, caller!, lifecycle.Token, FromTarget, TimeSpan.FromSeconds(limits.BlockedWriteTimeoutSeconds));
+                    await RelayPump.CompleteBidirectionalAsync(toTarget, toCaller, Abort, TimeSpan.FromSeconds(limits.HalfCloseDrainTimeoutSeconds));
+                    opened = true;
+                }
+                else
+                {
+                    await jumpTls.WriteAsync(new byte[] { 0 }, lifecycle.Token);
+                    outcome = "inspection_denied";
+                    return;
+                }
+                relayCompletedNormally = opened;
+                if (outcome == "rejected") outcome = opened ? "completed" : "inspection_denied";
+                return;
+            }
             var targetConnectMs = await pending.WaitForTargetReadyAsync(openTimeout.Token);
             phase = "target_ready";
             logger.LogInformation("Proxy {ConnectionId} target ready after {ElapsedMs} ms; target connect {TargetConnectMs} ms.", pending.ConnectionId, (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds, targetConnectMs);
             await audit.RecordAsync(new AuditEvent("proxy_connection_opened", "success")
             { ConnectionId = connection.ConnectionId, SessionId = session.SessionId, ClientId = client.ClientId, ChannelId = channel.ChannelId, RemoteIp = connection.SourceAddress?.ToString() }, openTimeout.Token);
             auditOpened = true;
-            await session.SendAsync(new Frame(FrameType.Start, JsonProtocolSerializer.Serialize(new StartMessage(pending.ConnectionId))), openTimeout.Token);
+            await session.SendAsync(new Frame(FrameType.Start, JsonProtocolSerializer.Serialize(new StartMessage(pending.ConnectionId) { LegTls = jumpTls is not null }, session.ProtocolVersion)), openTimeout.Token);
             globalPendingLimit.Release(); globalPendingHeld = false; clientPendingLimits[client.ClientId].Release(); clientPendingHeld = false;
             channelMetrics.Opened(); relaying = true; connection.MarkRelaying(); phase = "relaying";
             logger.LogInformation("Proxy {ConnectionId} relay started after {ElapsedMs} ms.", pending.ConnectionId, (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds);
@@ -344,10 +467,16 @@ public sealed class ProxyListenerService(ServerRuntime runtime, PendingConnectio
                     using var idle = new RelayIdleWatch(TimeSpan.FromSeconds(runtime.Configuration.Server.Limits.TcpIdleTimeoutSeconds), relayCancellation.Token);
                     TcpKeepAlive.Enable(caller!);
                     TcpKeepAlive.Enable(tunnel.Socket);
-                    var toAgent = CopyDirectionAsync(pending.ConnectionId, "caller_to_agent", caller!, tunnel.Socket, idle.Token,
-                        count => { channelMetrics.AddToTarget(count); connection.AddToTarget(count); Interlocked.Add(ref toAgentBytes, count); Interlocked.Exchange(ref lastToAgent, Stopwatch.GetTimestamp()); idle.Touch(); }, writeTimeout);
-                    var toCaller = CopyDirectionAsync(pending.ConnectionId, "agent_to_caller", tunnel.Socket, caller!, idle.Token,
-                        count => { channelMetrics.AddToCaller(count); connection.AddToCaller(count); Interlocked.Add(ref toCallerBytes, count); Interlocked.Exchange(ref lastToCaller, Stopwatch.GetTimestamp()); idle.Touch(); }, writeTimeout);
+                    var toAgent = jumpTls is null
+                        ? CopyDirectionAsync(pending.ConnectionId, "caller_to_agent", caller!, tunnel.Socket, idle.Token,
+                            count => { channelMetrics.AddToTarget(count); connection.AddToTarget(count); Interlocked.Add(ref toAgentBytes, count); Interlocked.Exchange(ref lastToAgent, Stopwatch.GetTimestamp()); idle.Touch(); }, writeTimeout)
+                        : RelayPump.CopySocketToStreamAsync(caller!, jumpTls, idle.Token,
+                            count => { channelMetrics.AddToTarget(count); connection.AddToTarget(count); Interlocked.Add(ref toAgentBytes, count); Interlocked.Exchange(ref lastToAgent, Stopwatch.GetTimestamp()); idle.Touch(); });
+                    var toCaller = jumpTls is null
+                        ? CopyDirectionAsync(pending.ConnectionId, "agent_to_caller", tunnel.Socket, caller!, idle.Token,
+                            count => { channelMetrics.AddToCaller(count); connection.AddToCaller(count); Interlocked.Add(ref toCallerBytes, count); Interlocked.Exchange(ref lastToCaller, Stopwatch.GetTimestamp()); idle.Touch(); }, writeTimeout)
+                        : RelayPump.CopyStreamToSocketAsync(jumpTls, caller!, idle.Token,
+                            count => { channelMetrics.AddToCaller(count); connection.AddToCaller(count); Interlocked.Add(ref toCallerBytes, count); Interlocked.Exchange(ref lastToCaller, Stopwatch.GetTimestamp()); idle.Touch(); }, writeTimeout);
                     await RelayPump.CompleteBidirectionalAsync(toAgent, toCaller, () => { relayCancellation.Cancel(); caller?.Dispose(); tunnel.Socket.Dispose(); }, TimeSpan.FromSeconds(runtime.Configuration.Server.Limits.HalfCloseDrainTimeoutSeconds));
                 }
                 relayCompletedNormally = true;
@@ -358,7 +487,7 @@ public sealed class ProxyListenerService(ServerRuntime runtime, PendingConnectio
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { outcome = connection.RevocationReason ?? "service_stopping"; }
         catch (Exception exception)
         {
-            outcome = exception switch
+            if (outcome == "rejected") outcome = exception switch
             {
                 AuditUnavailableException => "audit_unavailable",
                 TimeoutException => "timeout",
@@ -376,6 +505,7 @@ public sealed class ProxyListenerService(ServerRuntime runtime, PendingConnectio
                     (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds,
                     (long)Stopwatch.GetElapsedTime(Interlocked.Read(ref lastToAgent)).TotalMilliseconds,
                     (long)Stopwatch.GetElapsedTime(Interlocked.Read(ref lastToCaller)).TotalMilliseconds);
+            jumpTls?.Dispose();
             if (pending is not null) { pending.Complete(); pendingConnections.Remove(pending); }
             var channelMetrics = metrics.For(client.ClientId, channel.ChannelId);
             if (relaying) channelMetrics.Closed(relayCompletedNormally); else channelMetrics.OpenFailed();
@@ -410,6 +540,20 @@ public sealed class ProxyListenerService(ServerRuntime runtime, PendingConnectio
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+    }
+
+    private X509Certificate2 ServerCertificate
+    {
+        get
+        {
+            if (serverCertificate is not null) return serverCertificate;
+            lock (certificateGate)
+            {
+                if (serverCertificate is not null) return serverCertificate;
+                var tunnel = runtime.Configuration.Server.Tunnel;
+                return serverCertificate = ServerCertificateLoader.Load(tunnel.CertificatePemPath, tunnel.PrivateKeyPemPath);
+            }
+        }
     }
 
     private async Task CopyDirectionAsync(Guid connectionId, string direction, Socket source, Socket destination,
@@ -483,7 +627,7 @@ public sealed class ProxyListenerService(ServerRuntime runtime, PendingConnectio
         public void MarkRelaying() => Volatile.Write(ref relaying, 1);
         public void AddToTarget(int count) => Interlocked.Add(ref bytesToTarget, count);
         public void AddToCaller(int count) => Interlocked.Add(ref bytesToCaller, count);
-        public ConnectionStatus Snapshot() => new(ConnectionId, "proxy", Volatile.Read(ref relaying) == 1 ? "relaying" : "connecting", Source, StartedAtUtc, Interlocked.Read(ref bytesToTarget), Interlocked.Read(ref bytesToCaller));
+        public ConnectionStatus Snapshot() => new(ConnectionId, Channel.InspectionMode == "server-jump" ? "server-jump" : "proxy", Volatile.Read(ref relaying) == 1 ? "relaying" : "connecting", Source, StartedAtUtc, Interlocked.Read(ref bytesToTarget), Interlocked.Read(ref bytesToCaller));
         public void Revoke(string reason = "configuration_changed")
         {
             if (Interlocked.Exchange(ref revoked, 1) == 1) return;

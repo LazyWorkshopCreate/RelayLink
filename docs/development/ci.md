@@ -2,10 +2,10 @@
 
 文档 ID：DEV-003\
 状态：Active\
-版本：v1.11.1\
-更新日期：2026-10-23
+版本：v1.12.0\
+更新日期：2026-10-25
 
-流水线分为[日常校验](../../.github/workflows/ci.yml)、[tag 发行](../../.github/workflows/release.yml)和 [GitHub Pages 站点部署](../../.github/workflows/pages.yml)三部分。推送到 `main` 或提交 Pull Request 时，在 Linux 与 Windows 上检查服务端前端的类型、组件测试和格式，以及 Agent 前端的构建和格式，再执行 .NET 单元和集成测试（包括 Agent 互访 TLS 测试）。同时在 GitHub 托管的 `macos-15-intel` 与 `macos-15` runner 上构建 Agent 前端，原生执行含互访 TLS 的集成测试，再发布并运行 `osx-x64`、`osx-arm64` Agent，检查 Mach-O 架构、配置、最小文件权限、launchd 启动与异常退出重启、只读状态页和端到端身份复用；测试脚本拒绝在非 GitHub-hosted runner 上操作系统目录。日常校验不创建 GitHub Release。.NET 测试自身仍会编译测试所需代码，但跳过前端的重复构建。
+流水线分为[日常校验](../../.github/workflows/ci.yml)、[tag 发行](../../.github/workflows/release.yml)和 [GitHub Pages 站点部署](../../.github/workflows/pages.yml)三部分。公开仓库和 tag 发行使用 GitHub-hosted runner 执行同一组检查。推送到 `main` 或提交 Pull Request 时，在 Linux 与 Windows 上检查服务端前端的类型、组件测试和格式，以及 Agent 前端的构建和格式，再执行 .NET 单元和集成测试（包括 Agent 互访 TLS 测试）。同时在 GitHub 托管的 `macos-15-intel` 与 `macos-15` runner 上构建 Agent 前端，原生执行含互访 TLS 的集成测试，再发布并运行 `osx-x64`、`osx-arm64` Agent，检查 Mach-O 架构、配置、最小文件权限、launchd 启动与异常退出重启、只读状态页和端到端身份复用；测试脚本拒绝在非 GitHub-hosted runner 上操作系统目录。日常校验不创建 GitHub Release。.NET 测试自身仍会编译测试所需代码，但跳过前端的重复构建。
 
 只有推送 `v1.2.3` 或 `v1.2.3-rc.1` 形式的版本 tag 才触发发行流水线。每个 tag 必须同时提交非空的 `docs/releases/<tag>.md`；缺失说明时在打包前失败。发行先复用日常校验；全部通过后，生成 Linux/Windows `linux-x64`/`win-x64` 自包含服务端压缩包、Linux Agent 自包含压缩包、Windows Agent 自包含及框架依赖各一份程序压缩包和安装包，以及 macOS `osx-x64`（Intel）和 `osx-arm64`（Apple Silicon）Agent 自包含压缩包。最后校验九个产物齐全，以仓库内对应文件作为 GitHub Release 正文，同时附上 SHA-256 校验清单；带预发布后缀的 tag 标记为预发布版。重复运行同一 tag 时更新说明并覆盖旧资产，不再依赖 GitHub 自动生成说明。作业间的临时产物保留 7 天。安装包编译器在 Windows 作业中从 Inno Setup 发布地址取得，并在执行前检查 Authenticode 发布者签名。商业使用 Inno Setup 的许可要求见 [官方说明](https://jrsoftware.org/isorder.php)。
 

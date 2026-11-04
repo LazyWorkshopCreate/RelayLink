@@ -61,7 +61,6 @@ public sealed class AgentLocalDashboard : BackgroundService
     private readonly AgentLocalWriteSession writeSession;
     private readonly ILogger configurationAudit;
     private readonly ILoggerFactory? loggerFactory;
-    private AgentLocalManagementToken? managementToken;
     private static readonly JsonSerializerOptions AdminJsonOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -150,8 +149,6 @@ public sealed class AgentLocalDashboard : BackgroundService
         app.MapGet("/api/status", () => Single(snapshot => snapshot));
         if (runtime is not null)
         {
-            managementToken = AgentLocalManagementToken.LoadOrCreate(runtime.ConfigurationDirectory);
-            configurationAudit.LogInformation("Local management token file is {TokenPath}. Write requests must send it; the token value is not logged.", managementToken.FilePath);
             app.MapGet("/api/v2/admin/session", (HttpContext context) =>
             {
                 var cookie = context.Request.Cookies[AdminCookie];
@@ -265,8 +262,6 @@ public sealed class AgentLocalDashboard : BackgroundService
 
     private IResult? RequireWriteSession(HttpContext context)
     {
-        if (managementToken is null || !managementToken.Matches(context.Request.Headers[AgentLocalManagementToken.HeaderName].ToString()))
-            return Results.Json(new { message = "Local management token is required." }, statusCode: StatusCodes.Status401Unauthorized);
         var session = Session(context);
         if (session is null) return Results.Json(new { message = "Local management session is required." }, statusCode: StatusCodes.Status401Unauthorized);
         if (!writeSession.CheckCsrf(session, context.Request.Headers["X-RelayLink-CSRF"].ToString()))
@@ -276,7 +271,7 @@ public sealed class AgentLocalDashboard : BackgroundService
 
     private static IResult? RejectInsecureTransport(AgentServerProfile server, string? confirmation)
     {
-        if (server.UseTls || string.Equals(confirmation, AgentLocalManagementToken.InsecureTransportConfirmation, StringComparison.Ordinal))
+        if (server.UseTls || string.Equals(confirmation, AgentLocalWritePolicy.InsecureTransportConfirmation, StringComparison.Ordinal))
             return null;
         return Results.BadRequest(new { message = "Connecting without TLS requires confirmInsecureTransport set to CONNECT_WITHOUT_TLS." });
     }
