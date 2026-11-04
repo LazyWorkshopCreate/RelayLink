@@ -74,24 +74,10 @@ jobs:
         run: dotnet restore RelayLink.slnx --configfile NuGet.Config
       - name: Run .NET unit tests
         shell: bash
-        run: |
-          run_tests() {
-            dotnet test tests/RelayLink.UnitTests/RelayLink.UnitTests.csproj --configuration Release --no-restore -p:SkipAdminWebBuild=true
-          }
-          set +e
-          run_tests; status=$?
-          if [ $status -ne 0 ]; then echo "::warning::Run .NET unit tests failed; retrying once"; run_tests; status=$?; fi
-          exit $status
+        run: bash .github/scripts/run-with-retry.sh 4 dotnet test tests/RelayLink.UnitTests/RelayLink.UnitTests.csproj --configuration Release --no-restore -p:SkipAdminWebBuild=true
       - name: Run .NET integration tests (including peer TLS tests)
         shell: bash
-        run: |
-          run_tests() {
-            dotnet test tests/RelayLink.IntegrationTests/RelayLink.IntegrationTests.csproj --configuration Release --no-restore -p:EnablePeerTlsTests=true -p:SkipAdminWebBuild=true
-          }
-          set +e
-          run_tests; status=$?
-          if [ $status -ne 0 ]; then echo "::warning::Run .NET integration tests (including peer TLS tests) failed; retrying once"; run_tests; status=$?; fi
-          exit $status
+        run: bash .github/scripts/run-with-retry.sh 2 dotnet test tests/RelayLink.IntegrationTests/RelayLink.IntegrationTests.csproj --configuration Release --no-restore -p:EnablePeerTlsTests=true -p:SkipAdminWebBuild=true
 
   verify-macos-agent:
     name: Verify macOS Agent (${{ matrix.architecture }})
@@ -135,13 +121,6 @@ jobs:
           pnpm --dir src/RelayLink.AgentWeb build
       - name: Run native integration tests (including peer TLS tests)
         shell: bash
-        run: |
-          run_tests() {
-            dotnet test tests/RelayLink.IntegrationTests/RelayLink.IntegrationTests.csproj --configuration Release --no-restore -p:EnablePeerTlsTests=true -p:SkipAdminWebBuild=true --filter "FullyQualifiedName!~PluginLifecycleTests.Client_half_close_drains_the_reverse_response_and_ends_completed&FullyQualifiedName!~PeerConnectionTests.Server_jump_relays_plaintext_over_target_leg_tls_and_blocks_unhandled_applications"
-          }
-          set +e
-          run_tests; status=$?
-          if [ $status -ne 0 ]; then echo "::warning::Run native integration tests (including peer TLS tests) failed; retrying once"; run_tests; status=$?; fi
-          exit $status
+        run: bash .github/scripts/run-with-retry.sh 2 dotnet test tests/RelayLink.IntegrationTests/RelayLink.IntegrationTests.csproj --configuration Release --no-restore -p:EnablePeerTlsTests=true -p:SkipAdminWebBuild=true --filter "FullyQualifiedName!~PluginLifecycleTests.Client_half_close_drains_the_reverse_response_and_ends_completed&FullyQualifiedName!~PeerConnectionTests.Server_jump_relays_plaintext_over_target_leg_tls_and_blocks_unhandled_applications"
       - name: Verify native Agent and launchd lifecycle
         run: ./scripts/test-macos-agent.sh '${{ matrix.runtime_identifier }}' '${{ matrix.architecture }}'
