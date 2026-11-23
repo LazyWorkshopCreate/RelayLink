@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Security.Cryptography;
 using RelayLink.Server.Configuration;
 
@@ -11,8 +12,7 @@ public sealed class ChannelConfigurationEditor(
     ProxyListenerService proxyListeners,
     PeerRelayRegistry peerRelays,
     SessionRegistry sessions,
-    ConfigurationWriteLock writeLock,
-    CredentialStore? credentials = null)
+    ConfigurationWriteLock writeLock)
 {
     private static readonly JsonSerializerOptions JsonOptions = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, WriteIndented = true };
     private readonly string configurationPath = Path.GetFullPath(serverConfigurationPath);
@@ -22,30 +22,20 @@ public sealed class ChannelConfigurationEditor(
         var (channel, push) = await ChangeAsync(clientId, (client, _) =>
         {
             var existing = client.Channels.SingleOrDefault(channel => channel.ChannelId == channelId) ?? throw new ChannelUpdateException("Channel was not found.");
-            if (request.TransportProtocol is not null && request.TransportProtocol != existing.TransportProtocol ||
-                request.AuthorizedClientsOnly is not null && request.AuthorizedClientsOnly != existing.AuthorizedClientsOnly ||
-                request.InspectionMode is not null && request.InspectionMode != existing.InspectionMode)
-                throw new ChannelUpdateException("Channel type cannot be changed.");
-            var application = ResolveApplication(request.Application, existing.Application);
             var updated = ToChannel(channelId, request) with
             {
                 ApplicationProtocol = existing.ApplicationProtocol,
                 Http = existing.Http,
-                TransportProtocol = existing.TransportProtocol,
+                TransportProtocol = request.TransportProtocol ?? existing.TransportProtocol,
                 UdpIdleTimeoutSeconds = request.UdpIdleTimeoutSeconds ?? existing.UdpIdleTimeoutSeconds,
-                AuthorizedClientsOnly = existing.AuthorizedClientsOnly,
+                AuthorizedClientsOnly = request.AuthorizedClientsOnly ?? existing.AuthorizedClientsOnly,
                 EndToEndEncryptionEnabled = request.EndToEndEncryptionEnabled ?? existing.EndToEndEncryptionEnabled,
-                InspectionMode = existing.InspectionMode,
-                Inspection = existing.Inspection,
-                ConfigurationDirectory = existing.ConfigurationDirectory,
                 AccessSecret = request.AccessSecret ?? existing.AccessSecret,
                 SecurityGroupId = request.SecurityGroupId is null ? existing.SecurityGroupId : string.IsNullOrWhiteSpace(request.SecurityGroupId) ? null : request.SecurityGroupId,
-                Tags = WithApplication(FreeTags(request.Tags), application)
+                Tags = NormalizeTags(request.Tags)
             };
-            if (updated.InspectionMode != "none" && updated.Application == "rdp" && (existing.Application != "rdp" || (updated.Enabled && !existing.Enabled)))
-                throw new ChannelUpdateException("RDP inspection is not implemented; this channel may only remain disabled or be deleted.");
             if (updated.AuthorizedClientsOnly) updated = updated with { SecurityGroupId = null };
-            else if (updated.InspectionMode == "none") updated = updated with { EndToEndEncryptionEnabled = true };
+            else updated = updated with { EndToEndEncryptionEnabled = true };
             if (updated.AuthorizedClientsOnly && string.IsNullOrWhiteSpace(updated.AccessSecret)) updated = updated with { AccessSecret = NewAccessSecret() };
             return (client with { Channels = client.Channels.Select(channel => channel.ChannelId == existing.ChannelId ? updated : channel).ToArray() }, updated);
         }, cancellationToken);
@@ -54,25 +44,18 @@ public sealed class ChannelConfigurationEditor(
 
     public async Task<(ChannelConfiguration Channel, AgentPushReport Push)> CreateAsync(string clientId, ChannelCreateRequest request, CancellationToken cancellationToken)
     {
-        var (channel, push) = await ChangeAsync(clientId, (client, current) =>
+        var (channel, push) = await ChangeAsync(clientId, (client, _) =>
         {
             if (client.Channels.Any(channel => channel.ChannelId == request.ChannelId)) throw new ChannelUpdateException("Channel ID already exists.");
-            var authorized = request.AuthorizedClientsOnly ?? false;
-            var inspection = string.IsNullOrWhiteSpace(request.InspectionMode) ? "none" : request.InspectionMode;
-            var application = ResolveApplication(request.Application, null);
-            if (inspection != "none" && application == "rdp") throw new ChannelUpdateException("RDP inspection is not implemented.");
-            if (inspection != "none" && application == "https") throw new ChannelUpdateException("HTTPS inspection requires certificate material in the client configuration file.");
             var created = new ChannelConfiguration(request.ChannelId, request.DisplayName, request.Enabled, request.ListenAddress, request.ListenPort, request.TargetHost, request.TargetPort, request.MaxConnections, request.TargetConnectTimeoutSeconds)
             {
                 TransportProtocol = request.TransportProtocol ?? "tcp",
                 UdpIdleTimeoutSeconds = request.UdpIdleTimeoutSeconds ?? 60,
-                AuthorizedClientsOnly = authorized,
-                EndToEndEncryptionEnabled = authorized ? request.EndToEndEncryptionEnabled ?? true : true,
-                InspectionMode = inspection,
-                ConfigurationDirectory = current.Server.ClientsDirectory,
-                AccessSecret = authorized && string.IsNullOrWhiteSpace(request.AccessSecret) ? NewAccessSecret() : request.AccessSecret,
-                SecurityGroupId = authorized || string.IsNullOrWhiteSpace(request.SecurityGroupId) ? null : request.SecurityGroupId,
-                Tags = WithApplication(FreeTags(request.Tags), application)
+                AuthorizedClientsOnly = request.AuthorizedClientsOnly ?? false,
+                EndToEndEncryptionEnabled = request.AuthorizedClientsOnly == true ? request.EndToEndEncryptionEnabled ?? true : true,
+                AccessSecret = (request.AuthorizedClientsOnly ?? false) && string.IsNullOrWhiteSpace(request.AccessSecret) ? NewAccessSecret() : request.AccessSecret,
+                SecurityGroupId = request.AuthorizedClientsOnly == true || string.IsNullOrWhiteSpace(request.SecurityGroupId) ? null : request.SecurityGroupId,
+                Tags = NormalizeTags(request.Tags)
             };
             return (client with { Channels = client.Channels.Append(created).ToArray() }, created);
         }, cancellationToken);
@@ -120,24 +103,6 @@ public sealed class ChannelConfigurationEditor(
             if (!current.Clients.TryGetValue(clientId, out var client)) throw new ChannelUpdateException("Client was not found.");
             var (updatedClient, result) = change(client, current);
             loader.ValidateChannelUpdate(current, updatedClient);
-            var removedChannels = client.Channels.Where(item => !updatedClient.Channels.Any(updated => updated.ChannelId == item.ChannelId)).ToArray();
-            if (credentials is not null)
-            {
-                foreach (var added in updatedClient.Channels.Where(item => !client.Channels.Any(previous => previous.ChannelId == item.ChannelId)))
-                {
-                    await credentials.EnsureChannelAvailableAsync(clientId, added.ChannelId, cancellationToken);
-                    // Historical orphaned material must not be inherited by an explicit recreation.
-                    await credentials.BeginDeletionAsync(clientId, added.ChannelId, cancellationToken);
-                    await credentials.CompleteDeletionAsync(clientId, added.ChannelId, cancellationToken);
-                }
-                foreach (var removed in removedChannels)
-                    await credentials.BeginDeletionAsync(clientId, removed.ChannelId, cancellationToken);
-                if (removedChannels.Length > 0)
-                {
-                    proxyListeners.RevokeChangedConnections(client, updatedClient);
-                    peerRelays.RevokeChangedConnections(client, updatedClient);
-                }
-            }
             var serialized = JsonSerializer.Serialize(updatedClient, JsonOptions);
             var updatedConfiguration = new LoadedConfiguration(current.Server, current.Clients.ToDictionary(pair => pair.Key, pair => pair.Key == clientId ? updatedClient : pair.Value, StringComparer.Ordinal));
             var clientPath = Path.Combine(current.Server.ClientsDirectory, $"{clientId}.json");
@@ -154,9 +119,6 @@ public sealed class ChannelConfigurationEditor(
             }
 
             runtime.ReplaceConfiguration(updatedConfiguration);
-            if (credentials is not null)
-                foreach (var removed in removedChannels)
-                    await credentials.TryCompleteDeletionAsync(clientId, removed.ChannelId);
             proxyListeners.RevokeChangedConnections(client, updatedClient);
             peerRelays.RevokeChangedConnections(client, updatedClient);
             var onlyTagsChanged = client.Channels.Count == updatedClient.Channels.Count &&
@@ -188,7 +150,6 @@ public sealed class ChannelConfigurationEditor(
             return (result, AgentPushReport.From(attempted, failures, primaryOnline && onlyTagsChanged));
         }
         catch (ConfigurationException exception) { throw new ChannelUpdateException(exception.Message); }
-        catch (CredentialStoreException exception) { throw new ChannelUpdateException(exception.Message); }
         finally { writeLock.Gate.Release(); }
     }
 
@@ -209,29 +170,6 @@ public sealed class ChannelConfigurationEditor(
     }
 
     private static string NewAccessSecret() => Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
-
-    private static string? ResolveApplication(string? requested, string? existing)
-    {
-        if (requested is null) return existing;
-        var normalized = string.IsNullOrWhiteSpace(requested) ? null : requested.Trim().ToLowerInvariant();
-        if (normalized is not (null or "ssh" or "rdp" or "http" or "https"))
-            throw new ChannelUpdateException("Unknown application.");
-        if (existing is not null && normalized != existing)
-            throw new ChannelUpdateException("Application cannot be changed.");
-        return normalized ?? existing;
-    }
-
-    private static string[] FreeTags(IReadOnlyList<string>? tags)
-    {
-        var normalized = NormalizeTags(tags);
-        if (normalized.Any(tag => tag.StartsWith("app:", StringComparison.OrdinalIgnoreCase)))
-            throw new ChannelUpdateException("Application tags must be chosen with the application field.");
-        return normalized;
-    }
-
-    private static string[] WithApplication(string[] tags, string? application) =>
-        application is null ? tags : tags.Append(ChannelApplication.Tag(application)).ToArray();
-
     private static string[] NormalizeTags(IReadOnlyList<string>? tags) => (tags ?? [])
         .Select(tag => tag.Trim())
         .Where(tag => tag.Length > 0)
@@ -239,6 +177,7 @@ public sealed class ChannelConfigurationEditor(
         .ToArray();
 }
 
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed record ChannelUpdateRequest(string DisplayName, bool Enabled, string ListenAddress, int ListenPort, string TargetHost, int TargetPort, int MaxConnections, int TargetConnectTimeoutSeconds)
 {
     public string? TransportProtocol { get; init; }
@@ -247,10 +186,9 @@ public sealed record ChannelUpdateRequest(string DisplayName, bool Enabled, stri
     public bool? EndToEndEncryptionEnabled { get; init; }
     public string? AccessSecret { get; init; }
     public string? SecurityGroupId { get; init; }
-    public string? InspectionMode { get; init; }
-    public string? Application { get; init; }
     public IReadOnlyList<string> Tags { get; init; } = [];
 }
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed record ChannelCreateRequest(string ChannelId, string DisplayName, bool Enabled, string ListenAddress, int ListenPort, string TargetHost, int TargetPort, int MaxConnections, int TargetConnectTimeoutSeconds)
 {
     public string? TransportProtocol { get; init; }
@@ -259,8 +197,6 @@ public sealed record ChannelCreateRequest(string ChannelId, string DisplayName, 
     public bool? EndToEndEncryptionEnabled { get; init; }
     public string? AccessSecret { get; init; }
     public string? SecurityGroupId { get; init; }
-    public string? InspectionMode { get; init; }
-    public string? Application { get; init; }
     public IReadOnlyList<string> Tags { get; init; } = [];
 }
 public sealed class ChannelUpdateException(string message) : Exception(message);

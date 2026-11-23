@@ -19,7 +19,7 @@ public static class JsonProtocolSerializer
     public static byte[] Serialize<T>(T value, byte protocolVersion)
     {
         if (protocolVersion == ProtocolConstants.Version) return Serialize(value);
-        if (!ProtocolConstants.IsSupported(protocolVersion)) throw new ProtocolException("Unsupported protocol version.");
+        if (protocolVersion is not (3 or 4)) throw new ProtocolException("Unsupported protocol version.");
         var node = JsonSerializer.SerializeToNode(value, Options);
         RemoveNewFields(node, protocolVersion);
         return JsonSerializer.SerializeToUtf8Bytes(node, Options);
@@ -29,9 +29,9 @@ public static class JsonProtocolSerializer
     {
         if (node is JsonObject obj)
         {
-            if (version < ProtocolConstants.InspectionVersion) { obj.Remove("inspectionWaitTimeoutMilliseconds"); obj.Remove("blockedWriteTimeoutSeconds"); }
-            if (version <= 5) { obj.Remove("inspectionMode"); obj.Remove("application"); obj.Remove("legTls"); }
-            if (version <= 4) { obj.Remove("applicationProtocol"); obj.Remove("http"); obj.Remove("httpIngress"); }
+            obj.Remove("applicationProtocol");
+            obj.Remove("http");
+            obj.Remove("httpIngress");
             if (version == 3) { obj.Remove("transportProtocol"); obj.Remove("udpIdleTimeoutSeconds"); }
             foreach (var property in obj) RemoveNewFields(property.Value, version);
         }

@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>RelayLink.Sdk</AssemblyName>
+    <RootNamespace>RelayLink.Sdk</RootNamespace>
+    <!-- 面向 netstandard2.0 的 SDK 不能引用 RelayLink.Protocol：仓库全局为 net10.0，Protocol 未多目标化。
+         数据面只需 socket 语义与入口发现，因此只依赖 BCL。 -->
+    <TargetFrameworks>netstandard2.0;net8.0;net10.0</TargetFrameworks>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+</Project>

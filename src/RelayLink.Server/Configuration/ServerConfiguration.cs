@@ -13,6 +13,7 @@ public sealed record ServerConfiguration(
 {
     public IReadOnlyList<SecurityGroupConfiguration> SecurityGroups { get; init; } = [];
     public AuditConfiguration? Audit { get; init; }
+    public AutomationConfiguration? Automation { get; init; }
 }
 
 public sealed record AuditConfiguration(string FilePath, int RetentionDays = 90);
@@ -110,12 +111,8 @@ public sealed record ChannelConfiguration(
     public IReadOnlyList<string> Tags { get; init; } = [];
     public bool AuthorizedClientsOnly { get; init; }
     public bool EndToEndEncryptionEnabled { get; init; } = true;
-    public string InspectionMode { get; init; } = "none";
     public string? SecurityGroupId { get; init; }
     public string? AccessSecret { get; init; }
-    [JsonIgnore]
-    public string? Application => ChannelApplication.FromTags(Tags);
-
     [JsonIgnore]
     public IPEndPoint ListenEndPoint => new(IPAddress.Parse(ListenAddress), ListenPort);
 
@@ -136,19 +133,8 @@ public sealed record ChannelConfiguration(
         TargetConnectTimeoutSeconds == other.TargetConnectTimeoutSeconds &&
         AuthorizedClientsOnly == other.AuthorizedClientsOnly &&
         EndToEndEncryptionEnabled == other.EndToEndEncryptionEnabled &&
-        InspectionMode == other.InspectionMode &&
-        Application == other.Application &&
-        InspectionPolicy.Same(Inspection, other.Inspection) &&
         SecurityGroupId == other.SecurityGroupId &&
         AccessSecret == other.AccessSecret;
-
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public InspectionPolicy? Inspection { get; init; }
-    // Runtime location is deliberately excluded from the persisted channel schema.
-    [JsonIgnore]
-    public string ConfigurationDirectory { get; init; } = Environment.CurrentDirectory;
-    [JsonIgnore]
-    public InspectionPolicy? ResolvedInspection => InspectionPolicy.ResolvePaths(Inspection, ConfigurationDirectory);
 }
 
 public sealed record LoadedConfiguration(ServerConfiguration Server, IReadOnlyDictionary<string, ClientConfiguration> Clients);

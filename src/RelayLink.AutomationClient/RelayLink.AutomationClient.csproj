@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>RelayLink.AutomationClient</AssemblyName>
+    <RootNamespace>RelayLink.AutomationClient</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="RelayLink.UnitTests" />
+  </ItemGroup>
+</Project>

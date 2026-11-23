@@ -2,12 +2,16 @@
 
 文档 ID：DEV-003\
 状态：Active\
-版本：v1.12.0\
-更新日期：2026-10-25
+版本：v1.16.0\
+更新日期：2026-11-23
 
 流水线分为[日常校验](../../.github/workflows/ci.yml)、[tag 发行](../../.github/workflows/release.yml)和 [GitHub Pages 站点部署](../../.github/workflows/pages.yml)三部分。公开仓库和 tag 发行使用 GitHub-hosted runner 执行同一组检查。推送到 `main` 或提交 Pull Request 时，在 Linux 与 Windows 上检查服务端前端的类型、组件测试和格式，以及 Agent 前端的构建和格式，再执行 .NET 单元和集成测试（包括 Agent 互访 TLS 测试）。同时在 GitHub 托管的 `macos-15-intel` 与 `macos-15` runner 上构建 Agent 前端，原生执行含互访 TLS 的集成测试，再发布并运行 `osx-x64`、`osx-arm64` Agent，检查 Mach-O 架构、配置、最小文件权限、launchd 启动与异常退出重启、只读状态页和端到端身份复用；测试脚本拒绝在非 GitHub-hosted runner 上操作系统目录。日常校验不创建 GitHub Release。.NET 测试自身仍会编译测试所需代码，但跳过前端的重复构建。
 
-只有推送 `v1.2.3` 或 `v1.2.3-rc.1` 形式的版本 tag 才触发发行流水线。每个 tag 必须同时提交非空的 `docs/releases/<tag>.md`；缺失说明时在打包前失败。发行先复用日常校验；全部通过后，生成 Linux/Windows `linux-x64`/`win-x64` 自包含服务端压缩包、Linux Agent 自包含压缩包、Windows Agent 自包含及框架依赖各一份程序压缩包和安装包，以及 macOS `osx-x64`（Intel）和 `osx-arm64`（Apple Silicon）Agent 自包含压缩包。最后校验九个产物齐全，以仓库内对应文件作为 GitHub Release 正文，同时附上 SHA-256 校验清单；带预发布后缀的 tag 标记为预发布版。重复运行同一 tag 时更新说明并覆盖旧资产，不再依赖 GitHub 自动生成说明。作业间的临时产物保留 7 天。安装包编译器在 Windows 作业中从 Inno Setup 发布地址取得，并在执行前检查 Authenticode 发布者签名。商业使用 Inno Setup 的许可要求见 [官方说明](https://jrsoftware.org/isorder.php)。
+只有推送 `v1.2.3` 或 `v1.2.3-rc.1` 形式的版本 tag 才会创建或更新 GitHub Release。工作流先检查同名的 `docs/releases/<tag>.md` 是否存在且非空，然后并行执行日常校验和各平台打包。发布需要两者全部成功。打包生成 Linux 和 Windows Server 自包含压缩包、Linux Agent 自包含压缩包、Windows Agent 自包含及框架依赖各一份程序压缩包和安装包，以及 macOS Intel 和 Apple Silicon Agent 自包含压缩包。
+
+汇总作业按打包作业返回的 artifact ID 下载产物，校验九个包的完整文件名、版本和非空状态，再生成 `SHA256SUMS`。发布作业重新下载汇总后的包集并复核校验和，以仓库内对应发布说明作为正文。带预发布后缀的 tag 标记为预发布版。重复运行同一 tag 时更新说明并覆盖旧资产。临时产物保留 7 天，上传失败时当场重试一次。
+
+手动运行 Release 并指定已有发布说明的版本号，可演练源码校验、打包和产物汇总。macOS 打包在 Apple Silicon runner 上生成两个架构的包，校验 Mach-O 架构、随包脚本、前端和配置预检。Intel 包的配置预检需要 Rosetta，Intel runner 的原生校验仍由日常校验负责。商业使用 Inno Setup 的许可要求见 [官方说明](https://jrsoftware.org/isorder.php)。
 
 校验和打包作业只有仓库读取权限，检出时不保留 Git 凭据；仅最后的 Release 作业获得 `contents: write`，使用作业内置 `GITHUB_TOKEN`，不需额外仓库密钥或证书。第三方 Action 钉到提交 SHA，并在注释中保留对应的版本标签；不要改回浮动的 `@v*` 标签。构建使用 .NET 10 正式版 SDK、Node.js 24 与项目声明的 pnpm 版本；前端依赖按锁文件安装。Windows 作业下载的 Inno Setup 6.7.3 安装包同时核对 SHA-256 和 Authenticode 发布者。流水线不部署服务、不安装 Agent。
 

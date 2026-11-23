@@ -6,28 +6,19 @@ public sealed record RegisterAcceptedMessage(Guid SessionId, string ConfigVersio
     // Delivered at registration. Older peers ignore these fields. 0 disables TCP idle timeout.
     public int HalfCloseDrainTimeoutSeconds { get; init; } = 300;
     public int TcpIdleTimeoutSeconds { get; init; }
-    public int BlockedWriteTimeoutSeconds { get; init; } = 120;
 }
 public sealed record ConfigAckMessage(Guid SessionId, string ConfigVersion);
 public sealed record ConfigUpdateMessage(Guid SessionId, string ConfigVersion, ClientConfigSnapshot Config);
 public sealed record ReadyMessage(Guid SessionId);
 public sealed record PingMessage(long Sequence);
 public sealed record PongMessage(long Sequence);
-public sealed record OpenMessage(Guid SessionId, Guid ConnectionId, string ChannelId, string ConfigVersion, string Token, int RemainingOpenTimeoutMs, HttpIngressContext? HttpIngress = null)
-{
-    public int InspectionWaitTimeoutMilliseconds { get; init; }
-}
-public sealed record InspectionActiveMessage(Guid SessionId, Guid ConnectionId);
-public sealed record InspectionTargetReadyMessage(Guid SessionId, Guid ConnectionId, int TargetConnectDurationMs);
+public sealed record OpenMessage(Guid SessionId, Guid ConnectionId, string ChannelId, string ConfigVersion, string Token, int RemainingOpenTimeoutMs, HttpIngressContext? HttpIngress = null);
 public sealed record OpenFailedMessage(Guid SessionId, Guid ConnectionId, ErrorCode ErrorCode);
 public sealed record CancelOpenMessage(Guid SessionId, Guid ConnectionId, ErrorCode Reason);
 public sealed record BindDataMessage(Guid SessionId, Guid ConnectionId, string ChannelId, string Token);
 public sealed record BindAcceptedMessage(Guid ConnectionId);
 public sealed record TargetReadyMessage(Guid ConnectionId, int TargetConnectDurationMs);
-public sealed record StartMessage(Guid ConnectionId)
-{
-    public bool LegTls { get; init; }
-}
+public sealed record StartMessage(Guid ConnectionId);
 public sealed record ErrorMessage(ErrorCode Code,
     [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
     ControlRejectionReason? Reason = null);
@@ -38,14 +29,10 @@ public sealed record PeerOpenGrantedMessage(Guid RequestId, Guid ConnectionId, G
     // Sum of the server open timeout and the target channel connect timeout.
     // 0 means an older peer omitted the field.
     public int SetupTimeoutMilliseconds { get; init; }
-    public int InspectionWaitTimeoutMilliseconds { get; init; }
-    public string InspectionMode { get; init; } = "none";
 }
 public sealed record PeerOpenMessage(Guid ConnectionId, Guid SessionId, string CallerClientId, string ChannelId, string Token, bool EndToEndEncryptionEnabled = true, string TransportProtocol = "tcp", HttpIngressContext? HttpIngress = null)
 {
     public int SetupTimeoutMilliseconds { get; init; }
-    public int InspectionWaitTimeoutMilliseconds { get; init; }
-    public string InspectionMode { get; init; } = "none";
 }
 public sealed record PeerBindDataMessage(Guid ConnectionId, Guid SessionId, string Token, string Role);
 public sealed record PeerBindAcceptedMessage(Guid ConnectionId);
@@ -67,8 +54,6 @@ public sealed record OutboundMappingSnapshot(string MappingId, bool Enabled, str
     public HttpPeerOptions? Http { get; init; }
     public string TransportProtocol { get; init; } = "tcp";
     public int UdpIdleTimeoutSeconds { get; init; } = 60;
-    public string InspectionMode { get; init; } = "none";
-    public string? Application { get; init; }
 }
 public sealed record PeerMappingAddress(string MappingId, string LocalAddress, int LocalPort);
 public sealed record PeerMappingStatusMessage(Guid SessionId, string ConfigVersion, IReadOnlyList<PeerMappingAddress> Addresses);
@@ -89,6 +74,4 @@ public sealed record ChannelSnapshot(
     public bool AuthorizedClientsOnly { get; init; }
     public bool EndToEndEncryptionEnabled { get; init; } = true;
     public string? AccessSecret { get; init; }
-    public string InspectionMode { get; init; } = "none";
-    public string? Application { get; init; }
 }

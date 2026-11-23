@@ -16,6 +16,24 @@ namespace RelayLink.UnitTests;
 
 public sealed class ConfigurationTests
 {
+    [Theory]
+    [InlineData(typeof(ChannelCreateRequest))]
+    [InlineData(typeof(ChannelUpdateRequest))]
+    public void Channel_api_rejects_unknown_fields(Type requestType)
+    {
+        var options = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+        const string request = """
+            {"displayName":"Example","enabled":true,"listenAddress":"127.0.0.1","listenPort":19000,
+             "targetHost":"127.0.0.1","targetPort":19001,"maxConnections":5,"targetConnectTimeoutSeconds":10}
+            """;
+        var json = JsonNode.Parse(request)!;
+        if (requestType == typeof(ChannelCreateRequest)) json["channelId"] = "example";
+        Assert.NotNull(json.Deserialize(requestType, options));
+
+        json["unknownField"] = true;
+        Assert.Throws<JsonException>(() => json.Deserialize(requestType, options));
+    }
+
     [Fact]
     public void Http_examples_match_strict_schema_and_validate_after_placeholder_replacement()
     {
@@ -111,98 +129,6 @@ public sealed class ConfigurationTests
         Assert.Equal(ConfigurationSnapshotFactory.Create(client).Version,
             ConfigurationSnapshotFactory.Create(taggedClient).Version);
     }
-
-    [Fact]
-    public void Inspection_channels_are_validated_and_hidden_from_older_snapshots()
-    {
-        var loader = new ConfigurationLoader();
-        var secret = Convert.ToBase64String(new byte[32]);
-        var peer = new ChannelConfiguration("ssh", "SSH", true, "127.0.0.1", 19000, "10.0.0.8", 22, 5, 5)
-        {
-            AuthorizedClientsOnly = true,
-            AccessSecret = secret,
-            InspectionMode = "server-peer",
-            Tags = ["app:ssh", "prod"]
-        };
-        var jump = peer with { ChannelId = "raw", ListenPort = 19001, AuthorizedClientsOnly = false, AccessSecret = null, InspectionMode = "server-jump", Tags = ["ops"] };
-        var plain = new ChannelConfiguration("echo", "Echo", true, "127.0.0.1", 19002, "127.0.0.1", 9, 5, 5);
-        var client = new ClientConfiguration(1, "agent", "Agent", true, Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)), 10, 5, [peer, jump, plain]);
-        loader.ValidateClientUpdate(TestConfiguration(client));
-        Assert.Equal("ssh", peer.Application);
-        Assert.False(peer.HasSameRuntimeSettings(peer with { Tags = ["prod"] }));
-        Assert.True(jump.HasSameRuntimeSettings(jump with { Tags = ["ops", "later"] }));
-
-        Assert.Throws<ConfigurationException>(() => loader.ValidateClientUpdate(TestConfiguration(client with { Channels = [peer with { Tags = ["prod"] }] })));
-        Assert.Throws<ConfigurationException>(() => loader.ValidateClientUpdate(TestConfiguration(client with { Channels = [peer with { Tags = ["app:ssh", "app:rdp"] }] })));
-        Assert.Throws<ConfigurationException>(() => loader.ValidateClientUpdate(TestConfiguration(client with { Channels = [jump with { AuthorizedClientsOnly = true, AccessSecret = secret }] })));
-        Assert.Throws<ConfigurationException>(() => loader.ValidateClientUpdate(TestConfiguration(client with { Channels = [plain with { TransportProtocol = "udp", Tags = ["app:ssh"] }] })));
-
-        var current = ConfigurationSnapshotFactory.Create(client, TestConfiguration(client));
-        Assert.Contains(current.Snapshot.Channels, channel => channel.ChannelId == "ssh" && channel.Application == "ssh" && channel.InspectionMode == "server-peer");
-        var v5 = ConfigurationSnapshotFactory.Create(client, TestConfiguration(client), 5);
-        Assert.DoesNotContain(v5.Snapshot.Channels, channel => channel.InspectionMode != "none");
-        Assert.Equal(["echo"], v5.Snapshot.Channels.Select(channel => channel.ChannelId).ToArray());
-        var v5Json = Encoding.UTF8.GetString(JsonProtocolSerializer.Serialize(v5.Snapshot, 5));
-        Assert.DoesNotContain("inspectionMode", v5Json);
-        Assert.DoesNotContain("\"application\":", v5Json);
-    }
-
-    [Theory]
-    [InlineData("ssh-with-https", "cannot carry HTTP policy fields")]
-    [InlineData("http-with-ssh", "cannot carry SSH policy fields")]
-    [InlineData("too-many-prefixes", "Invalid SSH command prefix rules")]
-    [InlineData("prefix-too-long", "Invalid SSH command prefix rules")]
-    [InlineData("prefix-control-character", "Invalid SSH command prefix rules")]
-    [InlineData("approval-zero", "Invalid inspection approval timeout")]
-    [InlineData("approval-301", "Invalid inspection approval timeout")]
-    public void Inspection_policy_boundaries_are_rejected_by_the_loader(string scenario, string expected)
-    {
-        var policy = scenario switch
-        {
-            "ssh-with-https" => new InspectionPolicy { Ssh = new(), Https = new() },
-            "http-with-ssh" => new InspectionPolicy { Ssh = new() },
-            "too-many-prefixes" => new InspectionPolicy
-            {
-                Ssh = new() { DeniedCommandPrefixes = Enumerable.Range(0, 65).Select(index => "cmd" + index).ToArray() }
-            },
-            "prefix-too-long" => new InspectionPolicy { Ssh = new() { DeniedCommandPrefixes = [new string('a', 1025)] } },
-            "prefix-control-character" => new InspectionPolicy { Ssh = new() { DeniedCommandPrefixes = ["rm\n-rf"] } },
-            "approval-zero" => new InspectionPolicy { ApprovalTimeoutSeconds = 0, Ssh = new() },
-            "approval-301" => new InspectionPolicy { ApprovalTimeoutSeconds = 301, Ssh = new() },
-            _ => throw new ArgumentOutOfRangeException(nameof(scenario))
-        };
-        var channel = InspectionChannel(scenario == "http-with-ssh" ? "http" : "ssh", policy);
-
-        var exception = Assert.Throws<ConfigurationException>(() =>
-            new ConfigurationLoader().ValidateClientUpdate(TestConfiguration(Client(channel))));
-
-        Assert.Contains(expected, exception.Message, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void Inspection_policy_limits_accept_exactly_the_boundary_values()
-    {
-        var loader = new ConfigurationLoader();
-        var prefixes = new InspectionPolicy
-        {
-            ApprovalTimeoutSeconds = 300,
-            Ssh = new() { DeniedCommandPrefixes = Enumerable.Range(0, 64).Select(index => "cmd" + index).ToArray() }
-        };
-        loader.ValidateClientUpdate(TestConfiguration(Client(InspectionChannel("ssh", prefixes))));
-        var single = new InspectionPolicy
-        {
-            ApprovalTimeoutSeconds = 1,
-            Ssh = new() { DeniedCommandPrefixes = [new string('a', 1024)] }
-        };
-        loader.ValidateClientUpdate(TestConfiguration(Client(InspectionChannel("ssh", single))));
-    }
-
-    private static ClientConfiguration Client(ChannelConfiguration channel) => new(1, "target", "Target", true,
-        Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)), 10, 5, [channel]);
-
-    private static ChannelConfiguration InspectionChannel(string application, InspectionPolicy policy) =>
-        new("inspect", "Inspect", true, "127.0.0.1", 19000, "127.0.0.1", 19001, 4, 5)
-        { InspectionMode = "server-jump", Tags = ["app:" + application], Inspection = policy };
 
     [Fact]
     public void Peer_encryption_defaults_on_and_is_included_in_agent_snapshot()

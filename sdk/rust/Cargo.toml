@@ -1,0 +1,11 @@
+[package]
+name = "relaylink-sdk"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "RelayLink SDK 数据面：只面向入口，不实现中继协议，不持有中继密钥。"
+license = "MIT"
+
+# 刻意不引入任何依赖：不引入 async 运行时，也不引入 HTTP 客户端。
+# 入口发现需要 HTTP 时由调用方传入，或用显式入口。
+[dependencies]

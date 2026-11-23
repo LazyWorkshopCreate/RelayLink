@@ -20,6 +20,7 @@ import {
     Settings2,
     ShieldCheck,
     Shield,
+    KeyRound,
     Trash2,
     X,
 } from 'lucide-react';
@@ -39,8 +40,6 @@ type Overview = {
     bytesToCaller: number;
     peerCiphertextToTarget: number;
     peerCiphertextToCaller: number;
-    applicationToTarget?: number;
-    applicationToCaller?: number;
     tcpIdleTimeoutSeconds?: number;
     halfCloseDrainTimeoutSeconds?: number;
 };
@@ -64,7 +63,6 @@ type Channel = {
     endToEndEncryptionEnabled?: boolean;
     securityGroupId?: string | null;
     available: boolean;
-    unavailableReason?: string | null;
     listenAddress: string;
     listenPort: number;
     targetHost: string;
@@ -77,16 +75,12 @@ type Channel = {
     accessUrl?: string | null;
     transportProtocol?: 'tcp' | 'udp';
     udpIdleTimeoutSeconds?: number;
-    inspectionMode?: string;
-    application?: string | null;
     pendingConnections: number;
     activeConnections: number;
     bytesToTarget: number;
     bytesToCaller: number;
     peerCiphertextToTarget: number;
     peerCiphertextToCaller: number;
-    applicationToTarget?: number;
-    applicationToCaller?: number;
     targetLastResult?: string;
 };
 type Mapping = {
@@ -95,13 +89,11 @@ type Mapping = {
     entryScheme?: 'http' | 'https' | null;
     accessUrl?: string | null;
     transportProtocol?: 'tcp' | 'udp';
-    application?: string | null;
     mappingId: string;
     enabled: boolean;
     localAddress: string | null;
     localPort: number | null;
     available: boolean;
-    unavailableReason?: string | null;
     targetClientId: string;
     targetChannelId: string;
 };
@@ -137,6 +129,44 @@ type AuditRow = {
     bytesToCaller: number;
 };
 type AuditPage = { total: number; events: AuditRow[] };
+
+// 自动化管理面：待批准配对、已签发授权、变更申请。
+// 这里展示的 scope 与设备指纹都是非秘密元数据。
+type AutomationPairing = {
+    requestId: string;
+    subject: string;
+    platform: string;
+    cliVersion: string;
+    scopes: string[];
+    deviceKeyThumbprint: string;
+    userCode: string;
+    state: string;
+    createdAtUtc: string;
+    expiresAtUtc: string;
+    decidedBy?: string | null;
+};
+type AutomationGrant = {
+    grantId: string;
+    subject: string;
+    platform: string;
+    deviceKeyThumbprint: string;
+    scopes: string[];
+    createdAtUtc: string;
+    expiresAtUtc: string;
+    revokedAtUtc?: string | null;
+};
+type AutomationChange = {
+    changeRequestId: string;
+    type: string;
+    targetKey: string;
+    payload: string;
+    reason?: string | null;
+    requestedBy: string;
+    state: string;
+    createdAtUtc: string;
+    expiresAtUtc: string;
+    failureReason?: string | null;
+};
 const auditLabels: Record<string, string> = {
     admin_login_success: '管理员登录成功',
     admin_login_failure: '管理员登录失败',
@@ -144,22 +174,12 @@ const auditLabels: Record<string, string> = {
     agent_session_ready: 'Agent 上线',
     agent_session_closed: 'Agent 离线',
     agent_session_rejected: 'Agent 认证拒绝',
-    proxy_connection_opened: '代理连接准备/建立',
-    proxy_connection_closed: '代理连接断开',
-    proxy_connection_rejected: '代理连接拒绝',
-    peer_connection_opened: '互访连接准备/建立',
-    peer_connection_closed: '互访连接断开',
-    peer_connection_rejected: '互访连接拒绝',
-    inspection_session_opened: '可审计业务已就绪',
-    inspection_decision: '应用放行决定',
-    inspection_response: 'HTTP 请求结果',
-    inspection_target_auth: 'SSH 目标认证',
-    inspection_action_result: 'SSH 动作响应',
-    inspection_session_closed: 'SSH channel 结束',
-    inspection_approval_expired: '应用审批超时',
-    credential_change_requested: '凭据变更请求',
-    credential_saved: '凭据保存结果',
-    credential_deleted: '凭据删除结果',
+    proxy_connection_opened: '普通连接建立',
+    proxy_connection_closed: '普通连接断开',
+    proxy_connection_rejected: '普通连接拒绝',
+    peer_connection_opened: '端到端连接建立',
+    peer_connection_closed: '端到端连接断开',
+    peer_connection_rejected: '端到端连接拒绝',
 };
 type ViewClient = Client & { channels: Channel[]; mappings: Mapping[] };
 type DashboardSnapshot = {
@@ -195,9 +215,6 @@ type ChannelForm = {
     authorizedClientsOnly: boolean;
     endToEndEncryptionEnabled: boolean;
     securityGroupId: string;
-    channelType: ChannelTypeId;
-    inspectionMode: string;
-    application: string;
 };
 type MappingForm = {
     targetClientId: string;
@@ -229,104 +246,7 @@ const emptyChannel: ChannelForm = {
     authorizedClientsOnly: false,
     endToEndEncryptionEnabled: true,
     securityGroupId: '',
-    channelType: 'standard',
-    inspectionMode: 'none',
-    application: '',
 };
-
-type ChannelTypeId =
-    'standard' | 'udp' | 'peer' | 'udp-peer' | 'http-public' | 'http-peer' | 'server-peer' | 'server-jump';
-
-const channelTypeLabels: Record<ChannelTypeId, string> = {
-    standard: '标准代理',
-    udp: 'UDP 代理',
-    peer: '端到端互访',
-    'udp-peer': 'UDP 互访',
-    'http-public': 'HTTP 公网反向代理',
-    'http-peer': 'HTTP 互访反向代理',
-    'server-peer': '服务端可视互访',
-    'server-jump': '服务端跳板代理',
-};
-
-function channelTypeOf(channel: {
-    transportProtocol?: string;
-    applicationProtocol?: string;
-    authorizedClientsOnly?: boolean;
-    inspectionMode?: string;
-}): ChannelTypeId {
-    if (channel.applicationProtocol === 'http')
-        return channel.authorizedClientsOnly ? 'http-peer' : 'http-public';
-    if (channel.inspectionMode === 'server-peer') return 'server-peer';
-    if (channel.inspectionMode === 'server-jump') return 'server-jump';
-    if ((channel.transportProtocol ?? 'tcp') === 'udp')
-        return channel.authorizedClientsOnly ? 'udp-peer' : 'udp';
-    return channel.authorizedClientsOnly ? 'peer' : 'standard';
-}
-
-function typeStorage(type: ChannelTypeId) {
-    if (type === 'udp')
-        return { transportProtocol: 'udp' as const, authorizedClientsOnly: false, inspectionMode: 'none' };
-    if (type === 'peer')
-        return { transportProtocol: 'tcp' as const, authorizedClientsOnly: true, inspectionMode: 'none' };
-    if (type === 'udp-peer')
-        return { transportProtocol: 'udp' as const, authorizedClientsOnly: true, inspectionMode: 'none' };
-    if (type === 'http-public')
-        return { transportProtocol: 'tcp' as const, authorizedClientsOnly: false, inspectionMode: 'none' };
-    if (type === 'http-peer')
-        return { transportProtocol: 'tcp' as const, authorizedClientsOnly: true, inspectionMode: 'none' };
-    if (type === 'server-peer')
-        return {
-            transportProtocol: 'tcp' as const,
-            authorizedClientsOnly: true,
-            inspectionMode: 'server-peer',
-        };
-    if (type === 'server-jump')
-        return {
-            transportProtocol: 'tcp' as const,
-            authorizedClientsOnly: false,
-            inspectionMode: 'server-jump',
-        };
-    return { transportProtocol: 'tcp' as const, authorizedClientsOnly: false, inspectionMode: 'none' };
-}
-
-const listensOnServer = (type: ChannelTypeId) =>
-    type === 'standard' || type === 'udp' || type === 'server-jump' || type === 'http-public';
-const showsEncryption = (type: ChannelTypeId) => type === 'peer' || type === 'udp-peer';
-const showsUdpIdle = (type: ChannelTypeId) => type === 'udp' || type === 'udp-peer';
-const showsApplication = (type: ChannelTypeId) => type !== 'udp' && type !== 'udp-peer';
-
-function unavailableLabel(reason?: string | null) {
-    if (reason === 'inspection_not_supported') return '该应用审计尚未支持';
-    if (reason === 'target_host_key_missing') return '尚未配置 SSH 目标主机指纹';
-    if (reason === 'inspection_certificate_missing') return '尚未配置 HTTPS 证书';
-    if (reason === 'channel_disabled' || reason === 'mapping_disabled') return '已禁用';
-    if (reason === 'peer_only') return '互访专用';
-    if (reason === 'agent_offline' || reason === 'caller_offline' || reason === 'target_offline')
-        return 'Agent 离线';
-    if (reason === 'agent_not_ready' || reason === 'caller_not_ready' || reason === 'target_not_ready')
-        return 'Agent 尚未就绪';
-    if (reason === 'agent_protocol_legacy' || reason === 'caller_protocol_legacy')
-        return '本端 Agent 协议过旧（需 v7）';
-    if (reason === 'target_protocol_legacy') return '目标 Agent 协议过旧（需 v7）';
-    if (reason === 'control_tls_disabled') return '未启用控制 TLS';
-    if (reason === 'transport_unsupported') return 'Agent 协议不支持该传输';
-    if (reason === 'http_not_ready') return 'HTTP 宿主未就绪';
-    if (reason === 'address_not_reported') return '等待 Agent 上报本机地址';
-    if (reason === 'target_channel_disabled') return '目标通道已停用';
-    if (reason === 'target_not_peer_mode') return '目标通道不是互访模式';
-    if (reason === 'target_inspection_mode_unsupported') return '目标通道审计模式不匹配';
-    if (reason === 'udp_unsupported') return 'UDP 需要双方协议 v4 及以上';
-    return '入口尚未就绪';
-}
-
-function applicationFromTags(tags?: string[]) {
-    const found = (tags ?? []).find((tag) => tag.toLowerCase().startsWith('app:'));
-    return found ? found.slice(4).toLowerCase() : '';
-}
-
-function editableTags(tags?: string[]) {
-    return (tags ?? []).filter((tag) => !tag.toLowerCase().startsWith('app:')).join(', ');
-}
 const emptyMapping: MappingForm = {
     targetClientId: '',
     targetChannelId: '',
@@ -500,6 +420,11 @@ export function App() {
     const [clients, setClients] = useState<ViewClient[]>([]);
     const [securityGroups, setSecurityGroups] = useState<SecurityGroup[]>([]);
     const [securityGroupsOpen, setSecurityGroupsOpen] = useState(false);
+    const [automationOpen, setAutomationOpen] = useState(false);
+    const [automationBusy, setAutomationBusy] = useState(false);
+    const [automationPairings, setAutomationPairings] = useState<AutomationPairing[]>([]);
+    const [automationGrants, setAutomationGrants] = useState<AutomationGrant[]>([]);
+    const [automationChanges, setAutomationChanges] = useState<AutomationChange[]>([]);
     const [auditOpen, setAuditOpen] = useState(false);
     const [auditPage, setAuditPage] = useState<AuditPage>({ total: 0, events: [] });
     const [auditPageNumber, setAuditPageNumber] = useState(1);
@@ -652,6 +577,74 @@ export function App() {
         setAuditPage({ total: 0, events: [] });
         setAuditOpen(true);
         void loadAudit();
+    }
+
+    // ---- 自动化授权与变更审批 ----
+    async function loadAutomation() {
+        setAutomationBusy(true);
+        setError('');
+        try {
+            const [pairings, grants, changes] = await Promise.all([
+                api<{ pairings: AutomationPairing[] }>('/api/v1/admin/automation/pairings?state=pending'),
+                api<{ grants: AutomationGrant[] }>('/api/v1/admin/automation/grants'),
+                api<{ changeRequests: AutomationChange[] }>('/api/v1/admin/automation/change-requests'),
+            ]);
+            setAutomationPairings(pairings.pairings);
+            setAutomationGrants(grants.grants);
+            setAutomationChanges(changes.changeRequests);
+        } catch (e) {
+            setError((e as Error).message);
+        } finally {
+            setAutomationBusy(false);
+        }
+    }
+
+    async function openAutomation() {
+        setAutomationOpen(true);
+        await loadAutomation();
+    }
+
+    async function decidePairing(id: string, approve: boolean) {
+        setError('');
+        try {
+            await write(
+                `/api/v1/admin/automation/pairings/${enc(id)}/${approve ? 'approve' : 'deny'}`,
+                'POST',
+                {},
+            );
+            setNotice(approve ? '已批准该自动化配对请求。' : '已拒绝该自动化配对请求。');
+            await loadAutomation();
+        } catch (e) {
+            setError((e as Error).message);
+        }
+    }
+
+    async function revokeGrant(id: string) {
+        setError('');
+        try {
+            await write(`/api/v1/admin/automation/grants/${enc(id)}`, 'DELETE');
+            setNotice('已撤销该自动化授权；下一次调用即失效。');
+            await loadAutomation();
+        } catch (e) {
+            setError((e as Error).message);
+        }
+    }
+
+    async function decideChange(id: string, action: 'approve' | 'reject' | 'execute') {
+        setError('');
+        try {
+            await write(`/api/v1/admin/automation/change-requests/${enc(id)}/${action}`, 'POST', {});
+            setNotice(
+                action === 'execute'
+                    ? '变更已执行。'
+                    : action === 'approve'
+                      ? '已批准，等待执行。'
+                      : '已拒绝该变更申请。',
+            );
+            await loadAutomation();
+        } catch (e) {
+            setError((e as Error).message);
+        }
     }
 
     async function saveSecurityGroup(e: FormEvent) {
@@ -807,30 +800,12 @@ export function App() {
         setError('');
         try {
             const { clientId, original, form } = channelDialog;
-            const storage = typeStorage(form.channelType);
-            const body = {
-                channelId: form.channelId,
-                displayName: form.displayName,
-                enabled: form.enabled,
-                listenAddress: form.listenAddress,
-                listenPort: form.listenPort,
-                targetHost: form.targetHost,
-                targetPort: form.targetPort,
-                maxConnections: form.maxConnections,
-                targetConnectTimeoutSeconds: form.targetConnectTimeoutSeconds,
-                udpIdleTimeoutSeconds: form.udpIdleTimeoutSeconds,
-                endToEndEncryptionEnabled: showsEncryption(form.channelType)
-                    ? form.endToEndEncryptionEnabled
-                    : true,
-                securityGroupId: listensOnServer(form.channelType) ? form.securityGroupId : '',
-                tags: parseTags(form.tags).filter((tag) => !tag.toLowerCase().startsWith('app:')),
-                application: showsApplication(form.channelType) ? form.application : '',
-                ...storage,
-            };
             const result = await write<{ message: string }>(
                 `/api/v1/admin/clients/${enc(clientId)}/channels${original ? `/${enc(original.channelId)}` : ''}`,
                 original ? 'PUT' : 'POST',
-                body,
+                original
+                    ? { ...form, tags: parseTags(form.tags), channelId: undefined }
+                    : { ...form, tags: parseTags(form.tags) },
             );
             setChannelDialog(null);
             setNotice(result.message);
@@ -1021,6 +996,11 @@ export function App() {
                             <Shield size={15} /> 安全组
                         </button>
                     )}
+                    {session.authenticated && (
+                        <button className="ghost" onClick={() => void openAutomation()}>
+                            <KeyRound size={15} /> 自动化授权
+                        </button>
+                    )}
                     {session.authenticated ? (
                         <>
                             <span className="auth-status">
@@ -1117,7 +1097,7 @@ export function App() {
                             <span>本次运行累计流量</span>
                             <strong>
                                 {overview
-                                    ? `${fmt(overview.bytesToTarget + (overview.peerCiphertextToTarget ?? 0) + (overview.applicationToTarget ?? 0))} / ${fmt(overview.bytesToCaller + (overview.peerCiphertextToCaller ?? 0) + (overview.applicationToCaller ?? 0))}`
+                                    ? `${fmt(overview.bytesToTarget + (overview.peerCiphertextToTarget ?? 0))} / ${fmt(overview.bytesToCaller + (overview.peerCiphertextToCaller ?? 0))}`
                                     : '—'}
                             </strong>
                             <small>
@@ -1334,7 +1314,9 @@ export function App() {
                                                             )}
                                                         </td>
                                                         <td className="mono">
-                                                            {`${channelTypeLabels[channelTypeOf(ch)]}${showsEncryption(channelTypeOf(ch)) ? ` · ${ch.endToEndEncryptionEnabled !== false ? '加密' : '明文'}` : ''}${listensOnServer(channelTypeOf(ch)) ? ` ${ch.listenAddress}:${ch.listenPort}` : ''}`}
+                                                            {ch.authorizedClientsOnly
+                                                                ? `${(ch.applicationProtocol === 'http' ? (ch.entryScheme ?? 'http') : (ch.transportProtocol ?? 'tcp')).toUpperCase()} · 仅客户端互访 · ${ch.endToEndEncryptionEnabled !== false ? '加密' : '明文'}`
+                                                                : `${(ch.applicationProtocol === 'http' ? (ch.entryScheme ?? 'http') : (ch.transportProtocol ?? 'tcp')).toUpperCase()} ${ch.listenAddress}:${ch.listenPort}`}
                                                             {ch.applicationProtocol === 'http' && (
                                                                 <small>
                                                                     {ch.httpState === 'ready'
@@ -1358,13 +1340,11 @@ export function App() {
                                                                 <span />
                                                                 {!ch.enabled
                                                                     ? '已禁用'
-                                                                    : ch.unavailableReason
-                                                                      ? unavailableLabel(ch.unavailableReason)
-                                                                      : ch.authorizedClientsOnly
-                                                                        ? '互访专用'
-                                                                        : ch.available
-                                                                          ? '可接入'
-                                                                          : '不可接入'}
+                                                                    : ch.authorizedClientsOnly
+                                                                      ? '互访专用'
+                                                                      : ch.available
+                                                                        ? '可接入'
+                                                                        : '不可接入'}
                                                             </span>
                                                         </td>
                                                         <td className="mono">
@@ -1382,24 +1362,12 @@ export function App() {
                                                                 <span
                                                                     title={
                                                                         ch.endToEndEncryptionEnabled !== false
-                                                                            ? ch.inspectionMode ===
-                                                                              'server-peer'
-                                                                                ? '服务端审计的应用字节，不含腿部 TLS 开销'
-                                                                                : '端到端 TLS 密文字节；服务端无法统计业务有效载荷'
+                                                                            ? '端到端 TLS 密文字节；服务端无法统计业务有效载荷'
                                                                             : '未加密的互访业务字节；服务端中继链路可读取内容'
                                                                     }
                                                                 >
-                                                                    {fmt(
-                                                                        ch.inspectionMode === 'server-peer'
-                                                                            ? (ch.applicationToTarget ?? 0)
-                                                                            : ch.peerCiphertextToTarget,
-                                                                    )}{' '}
-                                                                    /{' '}
-                                                                    {fmt(
-                                                                        ch.inspectionMode === 'server-peer'
-                                                                            ? (ch.applicationToCaller ?? 0)
-                                                                            : ch.peerCiphertextToCaller,
-                                                                    )}
+                                                                    {fmt(ch.peerCiphertextToTarget)} /{' '}
+                                                                    {fmt(ch.peerCiphertextToCaller)}
                                                                 </span>
                                                             ) : (
                                                                 <button
@@ -1416,17 +1384,13 @@ export function App() {
                                                                     {fmt(
                                                                         ch.authorizedClientsOnly
                                                                             ? (ch.peerCiphertextToTarget ?? 0)
-                                                                            : ch.bytesToTarget +
-                                                                                  (ch.applicationToTarget ??
-                                                                                      0),
+                                                                            : ch.bytesToTarget,
                                                                     )}{' '}
                                                                     /{' '}
                                                                     {fmt(
                                                                         ch.authorizedClientsOnly
                                                                             ? (ch.peerCiphertextToCaller ?? 0)
-                                                                            : ch.bytesToCaller +
-                                                                                  (ch.applicationToCaller ??
-                                                                                      0),
+                                                                            : ch.bytesToCaller,
                                                                     )}
                                                                 </button>
                                                             )}
@@ -1450,23 +1414,13 @@ export function App() {
                                                                                     channelId: ch.channelId,
                                                                                     displayName:
                                                                                         ch.displayName,
-                                                                                    tags: editableTags(
-                                                                                        ch.tags,
-                                                                                    ),
+                                                                                    tags: (
+                                                                                        ch.tags || []
+                                                                                    ).join(', '),
                                                                                     enabled: ch.enabled,
                                                                                     listenAddress:
                                                                                         ch.listenAddress,
                                                                                     listenPort: ch.listenPort,
-                                                                                    channelType:
-                                                                                        channelTypeOf(ch),
-                                                                                    inspectionMode:
-                                                                                        ch.inspectionMode ??
-                                                                                        'none',
-                                                                                    application:
-                                                                                        ch.application ||
-                                                                                        applicationFromTags(
-                                                                                            ch.tags,
-                                                                                        ),
                                                                                     transportProtocol:
                                                                                         ch.transportProtocol ??
                                                                                         'tcp',
@@ -1534,7 +1488,6 @@ export function App() {
                                                         <th>入口 ID</th>
                                                         <th>本机地址</th>
                                                         <th>访问目标</th>
-                                                        <th>应用</th>
                                                         <th>状态</th>
                                                         {session.authenticated && (
                                                             <th className="action-col">操作</th>
@@ -1578,11 +1531,6 @@ export function App() {
                                                                 {mapping.targetChannelId}
                                                             </td>
                                                             <td>
-                                                                {mapping.application
-                                                                    ? mapping.application.toUpperCase()
-                                                                    : '—'}
-                                                            </td>
-                                                            <td>
                                                                 <span
                                                                     className={`badge ${!mapping.enabled ? 'disabled' : mapping.available ? 'online' : 'offline'}`}
                                                                     title={
@@ -1590,11 +1538,7 @@ export function App() {
                                                                             ? '入口已禁用'
                                                                             : mapping.available
                                                                               ? '本机入口正在监听'
-                                                                              : mapping.unavailableReason
-                                                                                ? unavailableLabel(
-                                                                                      mapping.unavailableReason,
-                                                                                  )
-                                                                                : '入口尚未就绪'
+                                                                              : '等待 Agent 上报本机地址'
                                                                     }
                                                                 >
                                                                     <span />
@@ -1602,11 +1546,7 @@ export function App() {
                                                                         ? '已禁用'
                                                                         : mapping.available
                                                                           ? '在线'
-                                                                          : mapping.unavailableReason
-                                                                            ? unavailableLabel(
-                                                                                  mapping.unavailableReason,
-                                                                              )
-                                                                            : '离线'}
+                                                                          : '离线'}
                                                                 </span>
                                                             </td>
                                                             {session.authenticated && (
@@ -1768,6 +1708,166 @@ export function App() {
                     >
                         下一页
                     </button>
+                </div>
+            </Modal>
+
+            <Modal
+                title="自动化授权与变更审批"
+                description="核对用户码后再批准配对。用户码必须与操作员屏幕上显示的一致；批准时只能缩小 scope 与有效期。变更申请批准后才会执行一次。"
+                open={automationOpen}
+                onClose={() => setAutomationOpen(false)}
+                error={error}
+            >
+                <div className="automation-panel">
+                    <section>
+                        <h3>待批准的配对请求（{automationPairings.length}）</h3>
+                        {automationBusy && <p className="muted">加载中…</p>}
+                        {!automationBusy && automationPairings.length === 0 && (
+                            <p className="muted">没有待批准的请求。</p>
+                        )}
+                        {automationPairings.map((item) => (
+                            <article key={item.requestId} className="automation-card">
+                                <div>
+                                    <strong className="automation-usercode">{item.userCode}</strong>
+                                    <span className="muted"> ← 核对用户码后再批准</span>
+                                </div>
+                                <dl>
+                                    <dt>主体</dt>
+                                    <dd>{item.subject}</dd>
+                                    <dt>平台</dt>
+                                    <dd>
+                                        {item.platform} / CLI {item.cliVersion}
+                                    </dd>
+                                    <dt>申请 scope</dt>
+                                    <dd>{item.scopes.join(', ')}</dd>
+                                    <dt>设备指纹</dt>
+                                    <dd className="mono">{item.deviceKeyThumbprint}</dd>
+                                    <dt>过期</dt>
+                                    <dd>{time(item.expiresAtUtc)}</dd>
+                                </dl>
+                                <div className="automation-actions">
+                                    <button
+                                        className="primary"
+                                        onClick={() => void decidePairing(item.requestId, true)}
+                                    >
+                                        批准
+                                    </button>
+                                    <button
+                                        className="ghost"
+                                        onClick={() => void decidePairing(item.requestId, false)}
+                                    >
+                                        拒绝
+                                    </button>
+                                </div>
+                            </article>
+                        ))}
+                    </section>
+
+                    <section>
+                        <h3>已签发的授权（{automationGrants.length}）</h3>
+                        {automationGrants.length === 0 && <p className="muted">还没有已签发的授权。</p>}
+                        {automationGrants.map((grant) => (
+                            <article key={grant.grantId} className="automation-card">
+                                <dl>
+                                    <dt>主体</dt>
+                                    <dd>{grant.subject}</dd>
+                                    <dt>平台</dt>
+                                    <dd>{grant.platform}</dd>
+                                    <dt>scope</dt>
+                                    <dd>{grant.scopes.join(', ')}</dd>
+                                    <dt>到期</dt>
+                                    <dd>{time(grant.expiresAtUtc)}</dd>
+                                    <dt>状态</dt>
+                                    <dd>
+                                        {grant.revokedAtUtc
+                                            ? `已撤销（${time(grant.revokedAtUtc)}）`
+                                            : '有效'}
+                                    </dd>
+                                </dl>
+                                {!grant.revokedAtUtc && (
+                                    <div className="automation-actions">
+                                        <button
+                                            className="ghost danger"
+                                            onClick={() => void revokeGrant(grant.grantId)}
+                                        >
+                                            撤销授权
+                                        </button>
+                                    </div>
+                                )}
+                            </article>
+                        ))}
+                    </section>
+
+                    <section>
+                        <h3>变更申请（{automationChanges.length}）</h3>
+                        {automationChanges.length === 0 && <p className="muted">没有变更申请。</p>}
+                        {automationChanges.map((change) => (
+                            <article key={change.changeRequestId} className="automation-card">
+                                <dl>
+                                    <dt>类型</dt>
+                                    <dd className="mono">{change.type}</dd>
+                                    <dt>目标</dt>
+                                    <dd className="mono">{change.targetKey}</dd>
+                                    <dt>状态</dt>
+                                    <dd>{change.state}</dd>
+                                    <dt>申请方</dt>
+                                    <dd>{change.requestedBy}</dd>
+                                    <dt>载荷</dt>
+                                    <dd>
+                                        <code>{change.payload}</code>
+                                    </dd>
+                                    {change.failureReason && (
+                                        <>
+                                            <dt>失败原因</dt>
+                                            <dd>{change.failureReason}</dd>
+                                        </>
+                                    )}
+                                </dl>
+                                <div className="automation-actions">
+                                    {change.state === 'pending' && (
+                                        <>
+                                            <button
+                                                className="primary"
+                                                onClick={() =>
+                                                    void decideChange(change.changeRequestId, 'approve')
+                                                }
+                                            >
+                                                批准
+                                            </button>
+                                            <button
+                                                className="ghost"
+                                                onClick={() =>
+                                                    void decideChange(change.changeRequestId, 'reject')
+                                                }
+                                            >
+                                                拒绝
+                                            </button>
+                                        </>
+                                    )}
+                                    {change.state === 'approved' && (
+                                        <>
+                                            <button
+                                                className="primary"
+                                                onClick={() =>
+                                                    void decideChange(change.changeRequestId, 'execute')
+                                                }
+                                            >
+                                                执行
+                                            </button>
+                                            <button
+                                                className="ghost"
+                                                onClick={() =>
+                                                    void decideChange(change.changeRequestId, 'reject')
+                                                }
+                                            >
+                                                拒绝
+                                            </button>
+                                        </>
+                                    )}
+                                </div>
+                            </article>
+                        ))}
+                    </section>
                 </div>
             </Modal>
 
@@ -2129,35 +2229,23 @@ export function App() {
                 {channelDialog && (
                     <form className="form" onSubmit={saveChannel}>
                         <label>
-                            通道类型
+                            传输协议
                             <select
-                                aria-label="通道类型"
-                                disabled={!!channelDialog.original}
-                                value={channelDialog.form.channelType}
+                                value={channelDialog.form.transportProtocol ?? 'tcp'}
                                 onChange={async (e) => {
-                                    const channelType = e.target.value as ChannelTypeId;
-                                    const storage = typeStorage(channelType);
+                                    const transportProtocol = e.target.value as 'tcp' | 'udp';
                                     setChannelDialog({
                                         ...channelDialog,
-                                        form: {
-                                            ...channelDialog.form,
-                                            channelType,
-                                            ...storage,
-                                            application: showsApplication(channelType)
-                                                ? channelDialog.form.application
-                                                : '',
-                                            securityGroupId: listensOnServer(channelType)
-                                                ? channelDialog.form.securityGroupId
-                                                : '',
-                                        },
+                                        form: { ...channelDialog.form, transportProtocol },
                                     });
-                                    if (!channelDialog.original && listensOnServer(channelType)) {
+                                    if (!channelDialog.original) {
                                         try {
                                             const suggestion = await api<{ listenPort: number }>(
-                                                `/api/v1/admin/next-channel-port?transportProtocol=${storage.transportProtocol}`,
+                                                `/api/v1/admin/next-channel-port?transportProtocol=${transportProtocol}`,
                                             );
                                             setChannelDialog((current) =>
-                                                current && current.form.channelType === channelType
+                                                current &&
+                                                current.form.transportProtocol === transportProtocol
                                                     ? {
                                                           ...current,
                                                           form: {
@@ -2167,84 +2255,17 @@ export function App() {
                                                       }
                                                     : current,
                                             );
-                                        } catch (err) {
-                                            setError(err instanceof Error ? err.message : String(err));
+                                        } catch (e) {
+                                            setError(e instanceof Error ? e.message : String(e));
                                         }
                                     }
                                 }}
                             >
-                                {(Object.keys(channelTypeLabels) as ChannelTypeId[]).map((type) => (
-                                    <option
-                                        key={type}
-                                        value={type}
-                                        disabled={
-                                            !channelDialog.original &&
-                                            (type === 'http-public' || type === 'http-peer')
-                                        }
-                                    >
-                                        {channelTypeLabels[type]}
-                                    </option>
-                                ))}
+                                <option value="tcp">TCP</option>
+                                <option value="udp">UDP</option>
                             </select>
                         </label>
-                        {showsApplication(channelDialog.form.channelType) && (
-                            <label>
-                                应用
-                                <select
-                                    aria-label="应用"
-                                    required={channelDialog.form.channelType === 'server-peer'}
-                                    disabled={
-                                        !!channelDialog.original &&
-                                        !!(
-                                            channelDialog.original.application ||
-                                            applicationFromTags(channelDialog.original.tags)
-                                        )
-                                    }
-                                    value={channelDialog.form.application}
-                                    onChange={(e) =>
-                                        setChannelDialog({
-                                            ...channelDialog,
-                                            form: { ...channelDialog.form, application: e.target.value },
-                                        })
-                                    }
-                                >
-                                    {channelDialog.form.channelType !== 'server-peer' && (
-                                        <option value="">未指定</option>
-                                    )}
-                                    {['ssh', 'rdp', 'http', 'https']
-                                        .filter(
-                                            (id) =>
-                                                (channelDialog.form.channelType !== 'http-public' &&
-                                                    channelDialog.form.channelType !== 'http-peer') ||
-                                                id === 'http' ||
-                                                id === 'https' ||
-                                                channelDialog.form.application === id,
-                                        )
-                                        .map((id) => (
-                                            <option
-                                                key={id}
-                                                value={id}
-                                                disabled={
-                                                    (channelDialog.form.channelType === 'server-peer' ||
-                                                        channelDialog.form.channelType === 'server-jump') &&
-                                                    (id === 'rdp' || id === 'https') &&
-                                                    channelDialog.original?.application !== id
-                                                }
-                                            >
-                                                {id.toUpperCase()}
-                                            </option>
-                                        ))}
-                                </select>
-                                {(channelDialog.form.channelType === 'server-peer' ||
-                                    channelDialog.form.channelType === 'server-jump') && (
-                                    <small>
-                                        RDP 审计尚未支持；HTTPS 证书和 SSH
-                                        目标主机指纹需由管理员在配置文件中提供。
-                                    </small>
-                                )}
-                            </label>
-                        )}
-                        {showsUdpIdle(channelDialog.form.channelType) && (
+                        {channelDialog.form.transportProtocol === 'udp' && (
                             <NumberField
                                 label="UDP 会话空闲超时（秒）"
                                 value={channelDialog.form.udpIdleTimeoutSeconds ?? 60}
@@ -2401,7 +2422,26 @@ export function App() {
                                 max={3600}
                             />
                         </div>
-                        {showsEncryption(channelDialog.form.channelType) && (
+                        <label className="check">
+                            <input
+                                type="checkbox"
+                                checked={channelDialog.form.authorizedClientsOnly}
+                                onChange={(e) =>
+                                    setChannelDialog({
+                                        ...channelDialog,
+                                        form: {
+                                            ...channelDialog.form,
+                                            authorizedClientsOnly: e.target.checked,
+                                            securityGroupId: e.target.checked
+                                                ? ''
+                                                : channelDialog.form.securityGroupId,
+                                        },
+                                    })
+                                }
+                            />{' '}
+                            仅允许授权客户端互访（停止云端代理监听；服务端自动生成 32 字节访问密钥）
+                        </label>
+                        {channelDialog.form.authorizedClientsOnly && (
                             <label className="check">
                                 <input
                                     type="checkbox"
@@ -2615,19 +2655,14 @@ export function App() {
                                             <td>
                                                 {connection.state === 'relaying' ? '转发中' : '建连中'}
                                                 {connection.kind === 'end-to-end' ? ' · 端到端' : ''}
-                                                {connection.kind === 'server-peer' ? ' · 服务端可视互访' : ''}
-                                                {connection.kind === 'server-jump' ? ' · 服务端跳板' : ''}
                                             </td>
                                             <td>{time(connection.startedAtUtc)}</td>
                                             <td
                                                 className="mono"
                                                 title={
-                                                    connection.kind === 'server-peer' ||
-                                                    connection.kind === 'server-jump'
-                                                        ? '应用传输字节（不含 TLS/SSH 传输开销）'
-                                                        : connection.kind === 'end-to-end'
-                                                          ? '互访传输字节（按通道加密设置解释）'
-                                                          : '普通代理传输字节'
+                                                    connection.kind === 'end-to-end'
+                                                        ? '端到端密文传输字节'
+                                                        : '普通代理传输字节'
                                                 }
                                             >
                                                 {fmt(connection.bytesToTarget)} /{' '}

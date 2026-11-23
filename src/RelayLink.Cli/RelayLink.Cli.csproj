@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>relaylink</AssemblyName>
+    <RootNamespace>RelayLink.Cli</RootNamespace>
+    <PublishSingleFile>true</PublishSingleFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\RelayLink.AutomationClient\RelayLink.AutomationClient.csproj" />
+  </ItemGroup>
+</Project>

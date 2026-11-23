@@ -35,3 +35,12 @@ src/RelayLink.Server/wwwroot/
 src/RelayLink.Agent/wwwroot/
 
 website/node_modules/
+
+sdk/typescript/node_modules/
+sdk/typescript/dist/
+sdk/rust/target/
+sdk/go/bin/
+__pycache__/
+*.pyc
+sdk/java/build/
+sdk/rust/Cargo.lock

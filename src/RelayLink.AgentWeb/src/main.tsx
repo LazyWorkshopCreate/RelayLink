@@ -18,6 +18,7 @@ import {
     Upload,
     X,
 } from "lucide-react";
+import { mappingTools } from "./mapping-tools";
 import "./styles.css";
 
 type Channel = {
@@ -93,14 +94,20 @@ function mappingStatusLabel(presence: "online" | "offline" | "disabled") {
     return "● 已禁用";
 }
 
-function CopyEndpointButton({ value }: { value: string }) {
+function CopyEndpointButton({
+    value,
+    label,
+}: {
+    value: string;
+    label?: string;
+}) {
     const [copied, setCopied] = useState(false);
     return (
         <button
             type="button"
-            className={`copy-button${copied ? " copied" : ""}`}
-            aria-label={copied ? `已复制 ${value}` : `复制 ${value}`}
-            title={copied ? "已复制" : "复制地址和端口"}
+            className={`copy-button${copied ? " copied" : ""}${label ? " with-label" : ""}`}
+            aria-label={copied ? `已复制 ${value}` : (label ?? `复制 ${value}`)}
+            title={copied ? "已复制" : (label ?? "复制访问地址")}
             onClick={() => {
                 const write = navigator.clipboard?.writeText(value);
                 if (!write) return;
@@ -114,7 +121,98 @@ function CopyEndpointButton({ value }: { value: string }) {
             }}
         >
             {copied ? <Check size={13} /> : <Copy size={13} />}
+            {label && (copied ? "已复制" : label)}
         </button>
+    );
+}
+
+function downloadRdpFile(contents: string) {
+    const url = URL.createObjectURL(
+        new Blob([contents], { type: "application/x-rdp" }),
+    );
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "RelayLink.rdp";
+    document.body.append(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function MappingAddress({
+    mapping,
+    serverOnline,
+    supportsRdp,
+}: {
+    mapping: Mapping;
+    serverOnline: boolean;
+    supportsRdp: boolean;
+}) {
+    const { localAddress } = mapping;
+    if (!localAddress) return <span className="agent-unavailable">—</span>;
+
+    const tools = serverOnline ? mappingTools(mapping, supportsRdp) : null;
+    const webUrl = tools?.kind === "web" ? tools.url : null;
+    const rdpFile = tools?.kind === "raw" ? tools.rdpFile : null;
+    return (
+        <div className="address-line">
+            <code>
+                {webUrl ? (
+                    <a
+                        className="agent-tool-link"
+                        href={webUrl}
+                        rel="noopener noreferrer"
+                        target="_blank"
+                    >
+                        {webUrl}
+                    </a>
+                ) : (
+                    `${(mapping.transportProtocol ?? "tcp").toUpperCase()} ${localAddress}`
+                )}
+            </code>
+            <CopyEndpointButton value={webUrl ?? localAddress} />
+            {tools?.kind === "raw" && (
+                <details className="agent-tool-actions">
+                    <summary aria-label={`${mapping.mappingId} 的连接方式`}>
+                        连接方式
+                    </summary>
+                    <div className="agent-tool-links">
+                        <a className="agent-tool-link" href={tools.sshUrl}>
+                            SSH
+                        </a>
+                        <CopyEndpointButton
+                            value={tools.sshCommand}
+                            label="复制 SSH 命令"
+                        />
+                        <a
+                            className="agent-tool-link"
+                            href={`http://${tools.address}`}
+                            rel="noopener noreferrer"
+                            target="_blank"
+                        >
+                            HTTP
+                        </a>
+                        <a
+                            className="agent-tool-link"
+                            href={`https://${tools.address}`}
+                            rel="noopener noreferrer"
+                            target="_blank"
+                        >
+                            HTTPS
+                        </a>
+                        {rdpFile && (
+                            <button
+                                type="button"
+                                className="agent-tool-link"
+                                onClick={() => downloadRdpFile(rdpFile)}
+                            >
+                                下载 .rdp
+                            </button>
+                        )}
+                    </div>
+                </details>
+            )}
+        </div>
     );
 }
 
@@ -137,6 +235,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 function App() {
     const [servers, setServers] = useState<AgentServer[]>([]);
+    const [supportsRdp, setSupportsRdp] = useState(false);
     const [session, setSession] = useState<Session | null>(null);
     const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
     const [error, setError] = useState("");
@@ -161,10 +260,12 @@ function App() {
 
     const refresh = useCallback(async () => {
         try {
-            const status = await request<{ servers: AgentServer[] }>(
-                "/api/v2/status",
-            );
+            const status = await request<{
+                servers: AgentServer[];
+                supportsRdpLaunch?: boolean;
+            }>("/api/v2/status");
             setServers(status.servers);
+            setSupportsRdp(status.supportsRdpLaunch === true);
             setLastRefresh(new Date());
         } catch (cause) {
             setError(
@@ -749,23 +850,18 @@ function App() {
                                                                         }
                                                                     </td>
                                                                     <td>
-                                                                        {mapping.localAddress ? (
-                                                                            <span className="address-line">
-                                                                                <code>
-                                                                                    {mapping.accessUrl ??
-                                                                                        `${(mapping.transportProtocol ?? "tcp").toUpperCase()} ${mapping.localAddress}`}
-                                                                                </code>
-                                                                                <CopyEndpointButton
-                                                                                    value={
-                                                                                        mapping.localAddress
-                                                                                    }
-                                                                                />
-                                                                            </span>
-                                                                        ) : (
-                                                                            <span className="agent-unavailable">
-                                                                                —
-                                                                            </span>
-                                                                        )}
+                                                                        <MappingAddress
+                                                                            mapping={
+                                                                                mapping
+                                                                            }
+                                                                            serverOnline={
+                                                                                server.enabled &&
+                                                                                server.online
+                                                                            }
+                                                                            supportsRdp={
+                                                                                supportsRdp
+                                                                            }
+                                                                        />
                                                                     </td>
                                                                     <td>
                                                                         <span

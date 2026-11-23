@@ -16,6 +16,7 @@ concurrency:
 jobs:
   verify:
     name: Verify before Pages
+    if: github.repository == 'LazyWorkshopCreate/RelayLink' && !github.event.repository.private
     uses: ./.github/workflows/ci.yml
     permissions:
       contents: read
@@ -47,7 +48,7 @@ jobs:
           node-version: "24"
           package-manager-cache: false
       - name: Install website dependencies
-        run: npm --prefix website ci
+        run: npm --prefix website ci --prefer-offline
       - name: Generate static website
         run: node scripts/build-website.mjs
       - name: Verify static pages

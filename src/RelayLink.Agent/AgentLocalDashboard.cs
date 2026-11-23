@@ -131,7 +131,7 @@ public sealed class AgentLocalDashboard : BackgroundService
             Single(snapshot => new AgentChannelsResponse(snapshot.ClientId, snapshot.Online, snapshot.UpdatedAtUtc, snapshot.Channels)));
         app.MapGet("/api/v1/mappings", () =>
             Single(snapshot => new AgentMappingsResponse(snapshot.ClientId, snapshot.Online, snapshot.UpdatedAtUtc, snapshot.OutboundMappings)));
-        app.MapGet("/api/v2/status", () => Results.Ok(new { servers = snapshots().Select(group => new
+        app.MapGet("/api/v2/status", () => Results.Ok(new { supportsRdpLaunch = OperatingSystem.IsWindows(), servers = snapshots().Select(group => new
         {
             group.ProfileId, group.ServerHost, group.UseTls, group.Enabled, group.Status.ClientId, group.Status.Online, group.Status.UpdatedAtUtc,
             group.PendingConnections, group.ActiveConnections, group.CapacityRejected,

@@ -13,18 +13,6 @@ namespace RelayLink.UnitTests;
 public sealed class PeerRelayReliabilityTests
 {
     [Fact]
-    public async Task Completed_target_readiness_is_not_replaced_by_late_transport_failure()
-    {
-        var caller = new Session(Guid.NewGuid(), "caller", DateTimeOffset.UtcNow);
-        var target = new Session(Guid.NewGuid(), "target", DateTimeOffset.UtcNow);
-        var relay = new PeerRelay(caller, target, "channel", TimeSpan.FromSeconds(5));
-        Assert.True(relay.TrySetTargetReady());
-        Assert.False(relay.FailTarget(new IOException("late transport failure")));
-        await relay.WaitForTargetReadyAsync(CancellationToken.None);
-        relay.Complete();
-    }
-
-    [Fact]
     public async Task Termination_waits_for_inflight_successful_write_before_releasing_capacity_and_recording_bytes()
     {
         using var directory = new TestDirectory("relaylink-peer-final-bytes-");

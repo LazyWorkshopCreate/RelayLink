@@ -2,8 +2,8 @@
 
 文档 ID：OPS-001\
 状态：Active\
-版本：v2.9.0\
-更新日期：2026-10-31
+版本：v2.11.0\
+更新日期：2026-11-18
 
 RelayLink 转发 TCP 字节流与单播 UDP 报文，不替代目标服务自身的账号、权限、TLS 和网络访问控制。
 
@@ -13,7 +13,7 @@ RelayLink 转发 TCP 字节流与单播 UDP 报文，不替代目标服务自身
 
 只需在 Server 业务入口放行所选 UDP 端口，Agent 控制/数据端口仍为 TCP；TCP 和 UDP 可使用相同数值端口。Docker host 网络沿用现有配置；自定义 bridge 网络需发布 UDP 端口，例如 `19000:19000/udp`。普通 UDP 隧道没有链路加密，敏感业务使用自身保护或默认加密的授权互访。
 
-当前源码的 Server 支持线协议 v3/v4，可先升级 Server 并保留旧 v3 Agent 的 TCP 能力；使用 UDP 的相关 Agent 必须升级到 v4。本次 rc.9 重建版包含兼容修复；此前同名包不包含，须重新下载并核对最新 SHA256SUMS。旧通道 JSON 未指定 `transportProtocol` 时仍为 TCP。UDP 空闲后下一包建立新会话，之前的报文不会重放；目标 socket 初始化成功不代表目标服务可达。报文上限 65507 字节，队列满会丢弃；不提供广播/组播或 SQL Browser 动态端口改写。详见 [UDP 设计](../design/udp-forwarding.md)。
+当前源码的 Server 支持线协议 v3–v5，可先升级 Server 并保留旧 v3 Agent 的 TCP 能力。使用 UDP 的相关 Agent 需支持 v4 或更新的受支持版本。rc.9 重建版包含兼容修复；此前同名包不包含，须重新下载并核对最新 SHA256SUMS。旧通道 JSON 未指定 `transportProtocol` 时仍为 TCP。UDP 空闲后下一包建立新会话，之前的报文不会重放；目标 socket 初始化成功不代表目标服务可达。报文上限 65507 字节，队列满会丢弃；不提供广播/组播或 SQL Browser 动态端口改写。详见 [UDP 设计](../design/udp-forwarding.md)。
 
 ## 1. 选择部署方式
 
@@ -134,16 +134,6 @@ RelayLink.Server --config <server.json> --check-config
 - WAL 模式会产生 `-wal` 和 `-shm` 文件。运行中备份时不能只复制主 `.db` 文件。
 - 旧 `.jsonl` 历史路径会在首次启动时迁移到同名 `.db`；确认迁移结果前不要删除旧文件。
 
-### 4.5 可审计通道升级与秘密库恢复
-
-本节只适用于已实现的 `server-peer` / `server-jump` HTTP/HTTPS、SSH。先升级 Server，再升级使用这些通道的 Agent 到协议 v7；旧 v3–v6 Agent 继续使用原有 `none` 能力，可审计通道不向旧端下发。Server 控制 TLS 为前提。参照 [插件配置示例](../../config/examples/inspection-client.example.json)，替换占位密钥和目标 SSH 指纹后再启用；SSH 必须通过可信渠道取得真实主机公钥指纹，不能直接信任首次连接结果。
-
-HTTPS 证书、私钥及上游 CA 路径相对所属 client JSON 目录解析，管理页编辑其他字段会保留原路径。RDP 审计仍不支持，管理员批准页面、桥应用及凭据发放也尚未实现；审批配置当前会等待后拒绝。普通 RDP/HTTPS 标签不受这些限制。
-
-管理员可用 `GET /api/v1/admin/credentials/status` 检查 `available`、`pendingAudits`、`pendingDeletions`。秘密库不可用时可审计入口拒绝，管理诊断与 `none` 通道仍运行。不要删除故障 key/store 来尝试恢复。成套备份并离线恢复配置、`credentials/key` 和 `credentials/store`（其中包含操作回执/删除标记），保持私有文件权限后重启；不匹配的文件组合会失败关闭。旧版本 key-only 情况如何处理见 [ADR-0031](../adr/0031-credential-mutation-and-deletion-recovery.md#恢复与迁移)。
-
-凭据 PUT/DELETE 的调用者应生成并保存 UUID `Idempotency-Key`，响应丢失时在至少 24 小时保证期内重用同键。已应用但结果审计待补记时返回成功及 `X-RelayLink-Audit-Status: pending`，PUT 还返回 `applied/auditStatus`；后台每 10 秒对账，不能把 pending 当成未保存再次改写。删除配置成功后，清理可能仍在恢复中，待清理标记会禁止同 ID 重建。详见 ADR-0031 的容量与错误响应契约。
-
 ## 5. 创建并安装 Agent
 
 ### 5.1 下载专属配置
@@ -223,6 +213,17 @@ Windows 已有安装时：
 互访通道不会开放云端业务代理端口。只有链路已受信隔离，或业务协议自身提供端到端加密和认证时，才考虑关闭 Agent 间加密；关闭后服务端及链路观察者可以读取或篡改业务内容。
 
 证书重装或轮换不会自动覆盖已固定的身份。入口 ID 由目标客户端 ID 和通道 ID 生成，不可修改；需要调整时删除并重建。升级旧配置前应移除 `channels[].e2eCertificateSha256`，客户端级身份规则详见[安全互访设计](../design/agent-to-agent.md)。
+
+### 7.1 从 Agent 本机页连接互访入口
+
+在 Agent 本机页找到在线、已启用且已有本机地址的互访入口，按目标服务选择连接方式。
+
+- HTTP/HTTPS 反向代理入口使用页面列出的完整 URL，包含协议、主机名和端口。HTTPS 继续遵循[证书和名称要求](http-reverse-proxy.md)。
+- 普通 TCP 入口可用 `ssh://` 打开系统已登记的 SSH 工具。系统没有相应处理器时，复制页面给出的 SSH 命令，在终端执行。按目标主机要求指定登录用户名。
+- Windows 访问 RDP 目标时，从普通 TCP 入口下载 `.rdp` 连接文件，再用系统远程桌面打开。文件只包含下载时的本机入口地址。入口端口变化后重新下载。[远程桌面连接说明](https://learn.microsoft.com/zh-cn/windows-server/administration/windows-commands/mstsc)
+- UDP 入口可复制本机地址，在对应的 UDP 应用中使用。
+
+登录和证书确认由操作系统或所选工具处理。
 
 ## 8. 通过互访访问 Server 管理页
 

@@ -44,7 +44,7 @@ public sealed class TrafficHistoryService(ServerRuntime runtime, MetricsRegistry
                 return (item.ClientId, item.ChannelId, Value: new Counters(
                     value.BytesToTarget, value.BytesToCaller, value.PeerCiphertextToTarget, value.PeerCiphertextToCaller,
                     value.AcceptedTotal + value.PeerAcceptedTotal, value.OpenedTotal + value.PeerOpenedTotal,
-                    value.OpenFailedTotal + value.PeerOpenFailedTotal, value.ApplicationToTarget, value.ApplicationToCaller));
+                    value.OpenFailedTotal + value.PeerOpenFailedTotal));
             }).ToArray();
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
             foreach (var item in captured)
@@ -79,8 +79,8 @@ public sealed class TrafficHistoryService(ServerRuntime runtime, MetricsRegistry
         var bucketSeconds = hours <= 24 ? 60 : hours <= 168 ? 900 : 3600;
         command.CommandText = """
             SELECT (minute_utc / $bucket) * $bucket, client_id, channel_id,
-                   SUM(direct_to_target + peer_to_target + application_to_target), SUM(direct_to_caller + peer_to_caller + application_to_caller),
-                   SUM(accepted), SUM(opened), SUM(failed), SUM(peer_to_target), SUM(peer_to_caller), SUM(application_to_target), SUM(application_to_caller)
+                   SUM(direct_to_target + peer_to_target), SUM(direct_to_caller + peer_to_caller),
+                   SUM(accepted), SUM(opened), SUM(failed), SUM(peer_to_target), SUM(peer_to_caller)
             FROM traffic_minute
             WHERE minute_utc >= $since AND ($client IS NULL OR client_id = $client)
               AND ($channel IS NULL OR channel_id = $channel)
@@ -96,7 +96,7 @@ public sealed class TrafficHistoryService(ServerRuntime runtime, MetricsRegistry
         while (await reader.ReadAsync(cancellationToken))
             samples.Add(new TrafficHistorySample(DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(0)), reader.GetString(1), reader.GetString(2),
                 reader.GetInt64(3), reader.GetInt64(4), reader.GetInt64(5), reader.GetInt64(6), reader.GetInt64(7))
-            { PeerCiphertextToTarget = reader.GetInt64(8), PeerCiphertextToCaller = reader.GetInt64(9), ApplicationToTarget = reader.GetInt64(10), ApplicationToCaller = reader.GetInt64(11) });
+            { PeerCiphertextToTarget = reader.GetInt64(8), PeerCiphertextToCaller = reader.GetInt64(9) });
         return samples;
     }
 
@@ -129,18 +129,6 @@ public sealed class TrafficHistoryService(ServerRuntime runtime, MetricsRegistry
             CREATE TABLE IF NOT EXISTS history_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
             """;
         await schema.ExecuteNonQueryAsync(cancellationToken);
-        foreach (var column in new[] { "application_to_target", "application_to_caller" })
-        {
-            await using var columns = connection.CreateCommand();
-            columns.CommandText = "SELECT COUNT(*) FROM pragma_table_info('traffic_minute') WHERE name = $name";
-            columns.Parameters.AddWithValue("$name", column);
-            if (Convert.ToInt64(await columns.ExecuteScalarAsync(cancellationToken)) == 0)
-            {
-                await using var add = connection.CreateCommand();
-                add.CommandText = $"ALTER TABLE traffic_minute ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0";
-                await add.ExecuteNonQueryAsync(cancellationToken);
-            }
-        }
         if (Path.GetExtension(settings.FilePath).Equals(".jsonl", StringComparison.OrdinalIgnoreCase) && File.Exists(settings.FilePath))
             await ImportLegacyAsync(connection, settings.FilePath, settings.RetentionDays, cancellationToken);
         initialized = true;
@@ -185,18 +173,17 @@ public sealed class TrafficHistoryService(ServerRuntime runtime, MetricsRegistry
         await using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = """
-            INSERT INTO traffic_minute (minute_utc,client_id,channel_id,direct_to_target,direct_to_caller,peer_to_target,peer_to_caller,accepted,opened,failed,application_to_target,application_to_caller)
+            INSERT INTO traffic_minute (minute_utc, client_id, channel_id, direct_to_target, direct_to_caller,
+                peer_to_target, peer_to_caller, accepted, opened, failed)
             VALUES ($minute, $client, $channel, $directTarget, $directCaller,
-                $peerTarget, $peerCaller, $accepted, $opened, $failed, $applicationTarget, $applicationCaller)
+                $peerTarget, $peerCaller, $accepted, $opened, $failed)
             ON CONFLICT(minute_utc, client_id, channel_id) DO UPDATE SET
                 direct_to_target = direct_to_target + excluded.direct_to_target,
                 direct_to_caller = direct_to_caller + excluded.direct_to_caller,
                 peer_to_target = peer_to_target + excluded.peer_to_target,
                 peer_to_caller = peer_to_caller + excluded.peer_to_caller,
                 accepted = accepted + excluded.accepted, opened = opened + excluded.opened,
-                failed = failed + excluded.failed,
-                application_to_target = application_to_target + excluded.application_to_target,
-                application_to_caller = application_to_caller + excluded.application_to_caller
+                failed = failed + excluded.failed
             """;
         command.Parameters.AddWithValue("$minute", minute);
         command.Parameters.AddWithValue("$client", clientId);
@@ -208,8 +195,6 @@ public sealed class TrafficHistoryService(ServerRuntime runtime, MetricsRegistry
         command.Parameters.AddWithValue("$accepted", delta.Accepted);
         command.Parameters.AddWithValue("$opened", delta.Opened);
         command.Parameters.AddWithValue("$failed", delta.Failed);
-        command.Parameters.AddWithValue("$applicationTarget", delta.ApplicationToTarget);
-        command.Parameters.AddWithValue("$applicationCaller", delta.ApplicationToCaller);
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
@@ -241,14 +226,13 @@ public sealed class TrafficHistoryService(ServerRuntime runtime, MetricsRegistry
     private static string Key(string clientId, string channelId) => $"{clientId}\0{channelId}";
 
     private readonly record struct Counters(long DirectToTarget, long DirectToCaller, long PeerToTarget,
-        long PeerToCaller, long Accepted, long Opened, long Failed, long ApplicationToTarget = 0, long ApplicationToCaller = 0)
+        long PeerToCaller, long Accepted, long Opened, long Failed)
     {
         public bool IsZero => this == default;
         public Counters Difference(Counters previous) => new(
             Delta(DirectToTarget, previous.DirectToTarget), Delta(DirectToCaller, previous.DirectToCaller),
             Delta(PeerToTarget, previous.PeerToTarget), Delta(PeerToCaller, previous.PeerToCaller),
-            Delta(Accepted, previous.Accepted), Delta(Opened, previous.Opened), Delta(Failed, previous.Failed),
-            Delta(ApplicationToTarget, previous.ApplicationToTarget), Delta(ApplicationToCaller, previous.ApplicationToCaller));
+            Delta(Accepted, previous.Accepted), Delta(Opened, previous.Opened), Delta(Failed, previous.Failed));
         private static long Delta(long current, long baseline) => current >= baseline ? current - baseline : current;
     }
 }
@@ -258,6 +242,4 @@ public sealed record TrafficHistorySample(DateTimeOffset TimestampUtc, string Cl
 {
     public long PeerCiphertextToTarget { get; init; }
     public long PeerCiphertextToCaller { get; init; }
-    public long ApplicationToTarget { get; init; }
-    public long ApplicationToCaller { get; init; }
 }

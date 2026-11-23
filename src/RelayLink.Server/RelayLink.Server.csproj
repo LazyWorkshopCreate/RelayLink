@@ -11,9 +11,6 @@
     <!-- Local test outputs must never become Web SDK publish content. -->
     <Content Remove="artifacts/**" />
     <None Remove="artifacts/**" />
-    <PackageReference Include="Microsoft.DevTunnels.Ssh" Version="3.12.42" />
-    <PackageReference Include="Microsoft.DevTunnels.Ssh.Keys" Version="3.12.42" />
-    <PackageReference Include="Yarp.ReverseProxy" Version="2.3.0" />
     <ProjectReference Include="../RelayLink.Protocol/RelayLink.Protocol.csproj" />
     <ProjectReference Include="../RelayLink.Transport/RelayLink.Transport.csproj" />
     <ProjectReference Include="../RelayLink.Logging/RelayLink.Logging.csproj" />
@@ -23,7 +20,9 @@
     <PackageReference Include="SQLitePCLRaw.provider.sqlite3" Version="2.1.12" />
     <PackageReference Include="SQLitePCLRaw.lib.e_sqlite3" Version="2.1.12" Condition="'$(RuntimeIdentifier)' != 'linux-x64'" />
   </ItemGroup>
-  <Target Name="RemoveBundledSqliteNativeLibraryForLinux" AfterTargets="Publish" Condition="'$(RuntimeIdentifier)' == 'linux-x64'">
+  <Target Name="RemoveBundledSqliteNativeLibraryForLinux"
+          AfterTargets="Publish"
+          Condition="'$(RuntimeIdentifier)' == 'linux-x64'">
     <Delete Files="$(PublishDir)libe_sqlite3.so" />
   </Target>
   <Target Name="BuildAdminWeb" BeforeTargets="Build;Publish">

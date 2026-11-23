@@ -11,39 +11,28 @@ namespace RelayLink.UnitTests;
 public sealed class TrafficHistoryTests
 {
     [Fact]
-    public async Task Existing_database_gains_application_columns_without_rewriting_old_traffic()
+    public async Task Sqlite_history_writes_when_the_table_has_an_additional_column()
     {
-        using var directory = new TestDirectory("relaylink-history-migration-");
+        using var directory = new TestDirectory("relaylink-history-");
+        var path = Path.Combine(directory.Path, "traffic.db");
+        var configuration = Configuration(path);
+        var metrics = new MetricsRegistry(configuration);
+        using var service = new TrafficHistoryService(new ServerRuntime(configuration, new SessionRegistry()), metrics,
+            NullLogger<TrafficHistoryService>.Instance);
         try
         {
-            var path = Path.Combine(directory.Path, "traffic.db");
-            await using (var database = await TrafficHistoryService.OpenAsync(new HistoryConfiguration(true, path), CancellationToken.None))
-            {
-                await using var schema = database.CreateCommand();
-                schema.CommandText = """
-                    CREATE TABLE traffic_minute (
-                        minute_utc INTEGER NOT NULL, client_id TEXT NOT NULL, channel_id TEXT NOT NULL,
-                        direct_to_target INTEGER NOT NULL, direct_to_caller INTEGER NOT NULL,
-                        peer_to_target INTEGER NOT NULL, peer_to_caller INTEGER NOT NULL,
-                        accepted INTEGER NOT NULL, opened INTEGER NOT NULL, failed INTEGER NOT NULL,
-                        PRIMARY KEY(minute_utc,client_id,channel_id));
-                    INSERT INTO traffic_minute VALUES ($minute,'agent','channel',11,12,13,14,1,1,0);
-                    """;
-                schema.Parameters.AddWithValue("$minute", DateTimeOffset.UtcNow.AddMinutes(-2).ToUnixTimeSeconds() / 60 * 60);
-                await schema.ExecuteNonQueryAsync();
-            }
-            var configuration = Configuration(path);
-            var metrics = new MetricsRegistry(configuration);
-            using var service = new TrafficHistoryService(new ServerRuntime(configuration, new SessionRegistry()), metrics, NullLogger<TrafficHistoryService>.Instance);
-            var old = Assert.Single(await service.ReadAsync("agent", "channel", 24, CancellationToken.None));
-            Assert.Equal(24, old.BytesToTarget);
-            Assert.Equal(13, old.PeerCiphertextToTarget);
-            Assert.Equal(0, old.ApplicationToTarget);
-            metrics.For("agent", "channel").AddApplicationToTarget(17);
             await service.RecordAsync(CancellationToken.None);
-            var all = await service.ReadAsync("agent", "channel", 24, CancellationToken.None);
-            Assert.Equal(41, all.Sum(item => item.BytesToTarget));
-            Assert.Equal(17, all.Sum(item => item.ApplicationToTarget));
+            await using var database = new SqliteConnection($"Data Source={path}");
+            await database.OpenAsync();
+            await using var addColumn = database.CreateCommand();
+            addColumn.CommandText = "ALTER TABLE traffic_minute ADD COLUMN extra_counter INTEGER NOT NULL DEFAULT 0";
+            await addColumn.ExecuteNonQueryAsync();
+
+            metrics.For("agent", "channel").AddToCaller(42);
+            await service.RecordAsync(CancellationToken.None);
+
+            var samples = await service.ReadAsync("agent", "channel", 24, CancellationToken.None);
+            Assert.Equal(42, Assert.Single(samples).BytesToCaller);
         }
         finally { SqliteConnection.ClearAllPools(); }
     }
@@ -62,8 +51,6 @@ public sealed class TrafficHistoryTests
             counter.AddToCaller(200);
             counter.AddPeerCiphertextToTarget(30);
             counter.AddPeerCiphertextToCaller(40);
-            counter.AddApplicationToTarget(5);
-            counter.AddApplicationToCaller(6);
             counter.PeerAccepted();
             counter.PeerOpened();
             var runtime = new ServerRuntime(configuration, new SessionRegistry());
@@ -78,10 +65,8 @@ public sealed class TrafficHistoryTests
 
             var samples = await service.ReadAsync("agent", "channel", 24, CancellationToken.None);
             var sample = Assert.Single(samples);
-            Assert.Equal(142, sample.BytesToTarget);
-            Assert.Equal(246, sample.BytesToCaller);
-            Assert.Equal(5, sample.ApplicationToTarget);
-            Assert.Equal(6, sample.ApplicationToCaller);
+            Assert.Equal(137, sample.BytesToTarget);
+            Assert.Equal(240, sample.BytesToCaller);
             Assert.Equal(37, sample.PeerCiphertextToTarget);
             Assert.Equal(40, sample.PeerCiphertextToCaller);
             Assert.Equal(1, sample.AcceptedTotal);
@@ -93,8 +78,7 @@ public sealed class TrafficHistoryTests
             await database.OpenAsync();
             await using var insert = database.CreateCommand();
             insert.CommandText = """
-                INSERT INTO traffic_minute (minute_utc,client_id,channel_id,direct_to_target,direct_to_caller,peer_to_target,peer_to_caller,accepted,opened,failed)
-                VALUES ($minute, 'agent', 'channel', 1, 1, 0, 0, 0, 0, 0)
+                INSERT INTO traffic_minute VALUES ($minute, 'agent', 'channel', 1, 1, 0, 0, 0, 0, 0)
                 """;
             insert.Parameters.AddWithValue("$minute", DateTimeOffset.UtcNow.AddDays(-91).ToUnixTimeSeconds() / 60 * 60);
             await insert.ExecuteNonQueryAsync();

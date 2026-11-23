@@ -19,7 +19,7 @@ using Serilog;
 
 namespace RelayLink.IntegrationTests;
 
-public sealed partial class ServerTunnelTests
+public sealed class ServerTunnelTests
 {
     [Fact]
     public void Fixture_ports_stay_distinct_and_bound_until_the_server_starts()
@@ -39,8 +39,8 @@ public sealed partial class ServerTunnelTests
     {
         var legacy = Environment.GetEnvironmentVariable("RELAYLINK_LEGACY_AGENT_ASSEMBLY")
             ?? throw new InvalidOperationException("Set RELAYLINK_LEGACY_AGENT_ASSEMBLY to an unmodified v0.1.0-rc.8 Agent DLL.");
-        using var fixture = new TunnelFixture();
-        await fixture.StartAsync(transportProtocol: udp ? "udp" : "tcp");
+        using var fixture = new TunnelFixture(useUdp: udp);
+        await fixture.StartAsync();
         await fixture.StartAgentAsync(legacy);
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         if (udp)
@@ -84,18 +84,17 @@ public sealed partial class ServerTunnelTests
             new { username = "admin", password = "test-password" }, token);
         login.EnsureSuccessStatusCode();
         var csrf = (await login.Content.ReadFromJsonAsync<JsonElement>(cancellationToken: token)).GetProperty("csrfToken").GetString();
-        using (var rejected = new HttpRequestMessage(HttpMethod.Put,
-            $"http://127.0.0.1:{fixture.DashboardPort}/api/v1/admin/clients/test-agent/channels/echo")
-        { Content = JsonContent.Create(new { displayName = "Echo", enabled = true, listenAddress = "127.0.0.1", listenPort = fixture.ProxyPort,
-            targetHost = "127.0.0.1", targetPort = fixture.TargetPort, maxConnections = 5, targetConnectTimeoutSeconds = 5, transportProtocol = "udp" }) })
+        foreach (var protocol in new[] { "udp", "tcp" })
         {
-            rejected.Headers.Add("X-RelayLink-CSRF", csrf);
-            using var rejectedResponse = await http.SendAsync(rejected, token);
-            Assert.Equal(HttpStatusCode.BadRequest, rejectedResponse.StatusCode);
-            Assert.Contains("Channel type cannot be changed.", await rejectedResponse.Content.ReadAsStringAsync(token));
-        }
-        async Task<ConfigUpdateMessage> ExpectLegacyUpdateAsync()
-        {
+            using var update = new HttpRequestMessage(HttpMethod.Put,
+                $"http://127.0.0.1:{fixture.DashboardPort}/api/v1/admin/clients/test-agent/channels/echo")
+            {
+                Content = JsonContent.Create(new { displayName = "Echo", enabled = true, listenAddress = "127.0.0.1", listenPort = fixture.ProxyPort,
+                    targetHost = "127.0.0.1", targetPort = fixture.TargetPort, maxConnections = 5, targetConnectTimeoutSeconds = 5, transportProtocol = protocol })
+            };
+            update.Headers.Add("X-RelayLink-CSRF", csrf);
+            using var saved = await http.SendAsync(update, token);
+            saved.EnsureSuccessStatusCode();
             var frame = await reader.ReadAsync(ProtocolConstants.MaxControlPayloadLength, token);
             Assert.Equal(FrameType.ConfigUpdate, frame?.Type);
             var message = JsonProtocolSerializer.Deserialize<ConfigUpdateMessage>(frame!.Payload.Span);
@@ -103,36 +102,10 @@ public sealed partial class ServerTunnelTests
             var rawConfig = document.RootElement.GetProperty("config").GetRawText();
             Assert.DoesNotContain("transportProtocol", rawConfig);
             Assert.DoesNotContain("udpIdleTimeoutSeconds", rawConfig);
-            Assert.DoesNotContain("inspectionMode", rawConfig);
-            Assert.DoesNotContain("\"application\":", rawConfig);
             Assert.Equal(Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(rawConfig))), message.ConfigVersion);
-            Assert.Equal(["echo"], message.Config.Channels.Select(channel => channel.ChannelId).ToArray());
+            Assert.Equal(protocol == "tcp" ? 1 : 0, message.Config.Channels.Count);
             await writer.WriteAsync(new Frame(FrameType.ConfigAck, JsonProtocolSerializer.Serialize(new ConfigAckMessage(message.SessionId, message.ConfigVersion))), token);
-            return message;
         }
-        using (var update = new HttpRequestMessage(HttpMethod.Put,
-            $"http://127.0.0.1:{fixture.DashboardPort}/api/v1/admin/clients/test-agent/channels/echo")
-        { Content = JsonContent.Create(new { displayName = "Echo renamed", enabled = true, listenAddress = "127.0.0.1", listenPort = fixture.ProxyPort,
-            targetHost = "127.0.0.1", targetPort = fixture.TargetPort, maxConnections = 5, targetConnectTimeoutSeconds = 5, transportProtocol = "tcp" }) })
-        {
-            update.Headers.Add("X-RelayLink-CSRF", csrf);
-            using var saved = await http.SendAsync(update, token);
-            saved.EnsureSuccessStatusCode();
-        }
-        await ExpectLegacyUpdateAsync();
-        using var listenHolder = new TcpListener(IPAddress.Loopback, 0);
-        listenHolder.Start();
-        var udpListenPort = ((IPEndPoint)listenHolder.LocalEndpoint).Port;
-        listenHolder.Stop();
-        using (var create = new HttpRequestMessage(HttpMethod.Post, $"http://127.0.0.1:{fixture.DashboardPort}/api/v1/admin/clients/test-agent/channels")
-        { Content = JsonContent.Create(new { channelId = "datagram", displayName = "Datagram", enabled = true, listenAddress = "127.0.0.1", listenPort = udpListenPort,
-            targetHost = "127.0.0.1", targetPort = fixture.TargetPort, maxConnections = 5, targetConnectTimeoutSeconds = 5, transportProtocol = "udp" }) })
-        {
-            create.Headers.Add("X-RelayLink-CSRF", csrf);
-            using var created = await http.SendAsync(create, token);
-            Assert.True(created.IsSuccessStatusCode, await created.Content.ReadAsStringAsync(token));
-        }
-        await ExpectLegacyUpdateAsync();
         var ping = await reader.ReadAsync(ProtocolConstants.MaxControlPayloadLength, token);
         Assert.Equal(FrameType.Ping, ping?.Type);
         var sequence = JsonProtocolSerializer.Deserialize<PingMessage>(ping!.Payload.Span).Sequence;
@@ -142,8 +115,8 @@ public sealed partial class ServerTunnelTests
     [Fact]
     public async Task Udp_proxy_preserves_datagrams_isolates_sources_and_reclaims_idle_sessions()
     {
-        using var fixture = new TunnelFixture();
-        await fixture.StartAsync(transportProtocol: "udp");
+        using var fixture = new TunnelFixture(useUdp: true);
+        await fixture.StartAsync();
         await fixture.StartAgentAsync();
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(25));
         using var first = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
@@ -177,8 +150,8 @@ public sealed partial class ServerTunnelTests
     [Fact]
     public async Task Udp_security_group_denies_unlisted_source_without_opening_a_session()
     {
-        using var fixture = new TunnelFixture();
-        await fixture.StartAsync(transportProtocol: "udp", restrictSource: true);
+        using var fixture = new TunnelFixture(useUdp: true);
+        await fixture.StartAsync(restrictSource: true);
         await fixture.StartAgentAsync();
         using var denied = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
         denied.Connect(IPAddress.Loopback, fixture.ProxyPort);
@@ -1149,18 +1122,21 @@ public sealed partial class ServerTunnelTests
         private readonly StringBuilder serverError = new();
         private readonly HashSet<int> reservedPorts = [];
         private readonly List<TcpListener> heldPorts = [];
+        private readonly bool useUdp;
+        private UdpClient? heldUdpPort;
         private Task? echoTask;
         public int TunnelPort { get; }
         public int DataPort { get; }
         public int ProxyPort { get; }
         public int DashboardPort { get; }
 
-        public TunnelFixture()
+        public TunnelFixture(bool useUdp = false)
         {
+            this.useUdp = useUdp;
             TunnelPort = ReservePort();
             DataPort = ReservePort();
-            ProxyPort = ReservePort();
             DashboardPort = ReservePort();
+            ProxyPort = useUdp ? ReserveUdpPort() : ReservePort();
         }
         public int TargetPort => udpTarget is not null ? ((IPEndPoint)udpTarget.Client.LocalEndPoint!).Port : ((IPEndPoint)targetListener.LocalEndpoint).Port;
         public string Secret { get; } = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
@@ -1170,11 +1146,11 @@ public sealed partial class ServerTunnelTests
 
         public string ReadLogs() => string.Concat(Directory.GetFiles(Path.Combine(directory, "logs"), "*.jsonl").Select(ReadActiveLog));
 
-        public async Task StartAsync(string? pinnedIdentity = null, bool enabled = true, string transportProtocol = "tcp", bool restrictSource = false, string dashboardListenAddress = "127.0.0.1", Action<string>? configureBeforeStart = null)
+        public async Task StartAsync(string? pinnedIdentity = null, bool enabled = true, bool restrictSource = false, string dashboardListenAddress = "127.0.0.1")
         {
             Directory.CreateDirectory(Path.Combine(directory, "clients"));
             targetListener.Start();
-            if (transportProtocol == "udp")
+            if (useUdp)
             {
                 udpTarget = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
                 udpTarget.Client.SendBufferSize = 128 * 1024;
@@ -1184,7 +1160,7 @@ public sealed partial class ServerTunnelTests
             await File.WriteAllTextAsync(Path.Combine(directory, "clients", "test-agent.json"), JsonSerializer.Serialize(new
             {
                 schemaVersion = 1, clientId = "test-agent", displayName = "Test Agent", enabled, secret = Secret, e2eCertificateSha256 = pinnedIdentity, maxConnections = 10, maxPendingConnections = 5,
-                channels = new[] { new { channelId = "echo", displayName = "Echo", enabled = true, listenAddress = "127.0.0.1", listenPort = ProxyPort, targetHost = "127.0.0.1", targetPort = TargetPort, maxConnections = 5, targetConnectTimeoutSeconds = 5, transportProtocol, udpIdleTimeoutSeconds = 1, securityGroupId = restrictSource ? "local" : null } }
+                channels = new[] { new { channelId = "echo", displayName = "Echo", enabled = true, listenAddress = "127.0.0.1", listenPort = ProxyPort, targetHost = "127.0.0.1", targetPort = TargetPort, maxConnections = 5, targetConnectTimeoutSeconds = 5, transportProtocol = useUdp ? "udp" : "tcp", udpIdleTimeoutSeconds = 1, securityGroupId = restrictSource ? "local" : null } }
             }, new JsonSerializerOptions { DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull }));
             var configPath = Path.Combine(directory, "server.json");
             await File.WriteAllTextAsync(configPath, JsonSerializer.Serialize(new
@@ -1196,7 +1172,6 @@ public sealed partial class ServerTunnelTests
                 clientsDirectory = Path.Combine(directory, "clients"),
                 limits = new { maxConnections = 20, maxPendingConnections = 10, maxUnauthenticatedConnections = 10, maxChannelsPerClient = 10, openTimeoutSeconds = 10, blockedWriteTimeoutSeconds = 120, halfCloseDrainTimeoutSeconds = 300 }
             }));
-            configureBeforeStart?.Invoke(configPath);
             ReleaseHeldPorts();
             var assembly = typeof(RelayLink.Server.Configuration.ConfigurationLoader).Assembly.Location;
             server = Process.Start(new ProcessStartInfo("dotnet", $"\"{assembly}\" --config \"{configPath}\"") { UseShellExecute = false, RedirectStandardError = true, RedirectStandardOutput = true })!;
@@ -1292,10 +1267,12 @@ public sealed partial class ServerTunnelTests
         public string DiagnosticOutput()
         {
             if (server is null) return "Server process was not created.";
+            var logDirectory = Path.Combine(directory, "logs");
+            var logs = Directory.Exists(logDirectory) ? ReadLogs() : string.Empty;
             lock (serverOutput)
             lock (serverError)
             {
-                return $"Server running: {!server.HasExited}; exit code: {(server.HasExited ? server.ExitCode : -1)}; stdout: {serverOutput}; stderr: {serverError}";
+                return $"Server running: {!server.HasExited}; exit code: {(server.HasExited ? server.ExitCode : -1)}; stdout: {serverOutput}; stderr: {serverError}; logs: {logs}";
             }
         }
 
@@ -1317,8 +1294,26 @@ public sealed partial class ServerTunnelTests
             }
         }
 
+        private int ReserveUdpPort()
+        {
+            while (true)
+            {
+                var socket = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
+                var port = ((IPEndPoint)socket.Client.LocalEndPoint!).Port;
+                if (reservedPorts.Add(port))
+                {
+                    heldUdpPort = socket;
+                    return port;
+                }
+
+                socket.Dispose();
+            }
+        }
+
         private void ReleaseHeldPorts()
         {
+            heldUdpPort?.Dispose();
+            heldUdpPort = null;
             foreach (var listener in heldPorts)
             {
                 listener.Stop();

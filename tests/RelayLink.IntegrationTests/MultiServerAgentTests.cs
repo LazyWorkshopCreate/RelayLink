@@ -20,6 +20,40 @@ namespace RelayLink.IntegrationTests;
 public sealed class MultiServerAgentTests
 {
     [Fact]
+    public async Task Dashboard_reports_ready_mapping_addresses_and_platform_support()
+    {
+        using var server = new ServerFixture(0x45);
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(35));
+        var token = deadline.Token;
+        using var directory = new TestDirectory("relaylink-native-tools-");
+        using var targetIdentity = AgentIdentity.LoadOrCreate(Path.Combine(directory.Path, "target.pfx"), "target");
+        await server.StartAsync(token, targetIdentity.Fingerprint);
+        var config = new AgentProcessConfiguration { DashboardPort = FreePort(), Servers = [server.Profile("primary")] };
+        var configPath = Path.Combine(directory.Path, "agent.json");
+        await File.WriteAllTextAsync(configPath, JsonSerializer.Serialize(config, new JsonSerializerOptions(JsonSerializerDefaults.Web)), token);
+        var runtime = new AgentProcessRuntime(config, new AgentConfigurationPath(configPath), NullLoggerFactory.Instance);
+        using var dashboard = new AgentLocalDashboard(config, runtime);
+        try
+        {
+            await runtime.StartAsync(token);
+            await dashboard.StartAsync(token);
+            await WaitUntilAsync(() => runtime.Snapshot.Single().Status.OutboundMappings.Any(mapping => mapping.LocalAddress is not null), token);
+            using var http = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{config.DashboardPort}") };
+            var status = await http.GetFromJsonAsync<JsonElement>("/api/v2/status", token);
+            Assert.Equal(OperatingSystem.IsWindows(), status.GetProperty("supportsRdpLaunch").GetBoolean());
+            var group = Assert.Single(status.GetProperty("servers").EnumerateArray());
+            var mapping = Assert.Single(group.GetProperty("mappings").EnumerateArray());
+            Assert.Equal("tcp", mapping.GetProperty("transportProtocol").GetString());
+            Assert.Equal(runtime.Snapshot.Single().Status.OutboundMappings.Single().LocalAddress, mapping.GetProperty("localAddress").GetString());
+        }
+        finally
+        {
+            await dashboard.StopAsync(CancellationToken.None);
+            await runtime.StopAsync(CancellationToken.None);
+        }
+    }
+
+    [Fact]
     public async Task Local_configuration_save_failure_uses_shared_error_file_without_credentials()
     {
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(20));
@@ -142,11 +176,12 @@ public sealed class MultiServerAgentTests
         {
             using var client = await fake.AcceptTcpClientAsync(token);
             var reader = new FrameReader(client.GetStream());
-            var writer = new FrameWriter(client.GetStream());
             Assert.Equal(FrameType.Register, (await reader.ReadAsync(ProtocolConstants.MaxControlPayloadLength, token))?.Type);
+            var protocolVersion = reader.ProtocolVersion!.Value;
+            var writer = new FrameWriter(client.GetStream(), protocolVersion: protocolVersion);
             var session = Guid.NewGuid();
             var snapshot = new ClientConfigSnapshot("same-agent", "Faulty", 10, 5, []);
-            var version = ConfigurationSnapshotHasher.Compute(snapshot);
+            var version = ConfigurationSnapshotHasher.Compute(snapshot, protocolVersion);
             await writer.WriteAsync(new Frame(FrameType.RegisterAccepted, JsonProtocolSerializer.Serialize(
                 new RegisterAcceptedMessage(session, version, snapshot, 1, 8))), token);
             Assert.Equal(FrameType.ConfigAck, (await reader.ReadAsync(ProtocolConstants.MaxControlPayloadLength, token))?.Type);
@@ -654,19 +689,20 @@ public sealed class MultiServerAgentTests
         private readonly TestDirectory storage = new("relaylink-multi-server-");
         private string directory => storage.Path;
         private readonly TcpListener target = new(IPAddress.Loopback, 0);
+        private readonly List<TcpListener> heldPorts = [];
         private Process? process;
         private Task? targetLoop;
-        public int TunnelPort { get; } = FreePort();
-        public int DataPort { get; } = FreePort();
-        public int ProxyPort { get; } = FreePort();
-        public int DashboardPort { get; } = FreePort();
+        public int TunnelPort { get; private set; }
+        public int DataPort { get; private set; }
+        public int ProxyPort { get; private set; }
+        public int DashboardPort { get; private set; }
         public int TargetPort => ((IPEndPoint)target.LocalEndpoint).Port;
         public string Secret { get; } = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
         public string ClientPath => Path.Combine(directory, "clients", "same-agent.json");
         public string TargetSecret { get; } = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
         public string AccessSecret { get; } = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
         public string TokenProbeSecret { get; } = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
-        public int TokenProbePort { get; } = FreePort();
+        public int TokenProbePort { get; private set; }
         public string CaPemBase64 { get; private set; } = string.Empty;
 
         public AgentServerProfile Profile(string id) => new()
@@ -681,6 +717,11 @@ public sealed class MultiServerAgentTests
 
         public async Task StartAsync(CancellationToken token, string? targetFingerprint = null)
         {
+            TunnelPort = ReservePort(heldPorts);
+            DataPort = ReservePort(heldPorts);
+            ProxyPort = ReservePort(heldPorts);
+            DashboardPort = ReservePort(heldPorts);
+            TokenProbePort = ReservePort(heldPorts);
             Directory.CreateDirectory(Path.Combine(directory, "clients"));
             target.Start();
             targetLoop = AcceptTargetsAsync();
@@ -723,6 +764,7 @@ public sealed class MultiServerAgentTests
                     maxChannelsPerClient = 10, openTimeoutSeconds = 10, blockedWriteTimeoutSeconds = 120,
                     halfCloseDrainTimeoutSeconds = 300 }
             }), token);
+            ReleaseHeldPorts();
             process = Process.Start(new ProcessStartInfo("dotnet")
             {
                 ArgumentList = { typeof(RelayLink.Server.Configuration.ConfigurationLoader).Assembly.Location, "--config", configPath },
@@ -731,7 +773,15 @@ public sealed class MultiServerAgentTests
             using var http = new HttpClient();
             while (true)
             {
-                if (process.HasExited) throw new InvalidOperationException($"Server exited: {await process.StandardError.ReadToEndAsync(token)}");
+                if (process.HasExited)
+                {
+                    var stderr = await process.StandardError.ReadToEndAsync(token);
+                    var logs = Path.Combine(directory, "logs");
+                    var errors = Directory.Exists(logs)
+                        ? string.Join(Environment.NewLine, Directory.EnumerateFiles(logs, "server-error-*.jsonl").Select(File.ReadAllText))
+                        : string.Empty;
+                    throw new InvalidOperationException($"Server exited with code {process.ExitCode}: {stderr}\n{errors}");
+                }
                 try
                 {
                     using var response = await http.GetAsync($"http://127.0.0.1:{DashboardPort}/health/ready", token);
@@ -776,10 +826,17 @@ public sealed class MultiServerAgentTests
 
         public void Dispose()
         {
+            ReleaseHeldPorts();
             Stop();
             process?.Dispose();
             target.Stop();
             storage.Dispose();
+        }
+
+        private void ReleaseHeldPorts()
+        {
+            foreach (var listener in heldPorts) listener.Dispose();
+            heldPorts.Clear();
         }
 
         private static string PasswordHash()
@@ -811,16 +868,24 @@ public sealed class MultiServerAgentTests
         }
     }
 
-    private static int FreePort()
+    private static int FreePort() => ReservePort(null);
+
+    private static int ReservePort(List<TcpListener>? heldPorts)
     {
         lock (PortGate)
         {
             for (var attempt = 0; attempt < 100; attempt++)
             {
-                using var listener = new TcpListener(IPAddress.Loopback, 0);
+                var listener = new TcpListener(IPAddress.Loopback, 0);
                 listener.Start();
                 var port = ((IPEndPoint)listener.LocalEndpoint).Port;
-                if (AssignedPorts.Add(port)) return port;
+                if (AssignedPorts.Add(port))
+                {
+                    if (heldPorts is null) listener.Dispose();
+                    else heldPorts.Add(listener);
+                    return port;
+                }
+                listener.Dispose();
             }
             throw new InvalidOperationException("Unable to allocate a distinct integration-test port.");
         }

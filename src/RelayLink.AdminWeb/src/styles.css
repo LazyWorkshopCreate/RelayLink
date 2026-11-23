@@ -987,3 +987,42 @@ footer {
         display: none;
     }
 }
+
+/* ---- 自动化授权与变更审批面板 ---- */
+.automation-panel section {
+    margin-bottom: 24px;
+}
+.automation-panel h3 {
+    margin: 0 0 10px;
+    font-size: 0.95rem;
+}
+.automation-card {
+    border: 1px solid rgba(127, 127, 127, 0.28);
+    border-radius: 8px;
+    padding: 12px;
+    margin-bottom: 10px;
+}
+.automation-card dl {
+    display: grid;
+    grid-template-columns: 6em 1fr;
+    gap: 4px 10px;
+    margin: 8px 0;
+    font-size: 0.86rem;
+}
+.automation-card dt {
+    color: #888;
+}
+.automation-card dd {
+    margin: 0;
+    word-break: break-all;
+}
+.automation-usercode {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 1.25rem;
+    letter-spacing: 0.08em;
+}
+.automation-actions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+}

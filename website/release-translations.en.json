@@ -38,7 +38,7 @@
         "items": [
           "Since v0.1.0-rc.11 (45bd296), main has merged #13 (93599919), #14 (a037d3ce), #15 (4a522679), and #16 (f756c386), plus the earlier #9, #10, #11, and #12.",
           "Verify on main at f756c386 passed, covering Ubuntu, Windows, the macOS Agent (arm64 and x86_64), and the website.",
-          "#9 moves test-fixture temporary directories off the shared ACL. #12 added a self-hosted review workflow in the private source repository; that private infrastructure configuration is excluded from the public repository.",
+          "#9 moves test-fixture temporary directories off the shared ACL. #12 adds a DeepSeek Claude Code review workflow on a private runner. Both affect only tests and CI.",
           "This candidate has no new TestClient-01 Docker smoke record. Windows installers are unsigned, and macOS archives are unsigned and not notarized, the same as v0.1.0-rc.11."
         ]
       },
@@ -564,6 +564,51 @@
           "On the local Windows machine, backend unit tests passed 358/358 and integration tests 156/156, including real v3/v4/v5 legacy agents; frontend checks and the website build passed. Cross-platform CI and release assets are authoritative for the tagged commit.",
           "This candidate did not rerun the full integration suite on native Linux or macOS and did not run capacity or cross-host disaster-recovery tests; a local pass does not remove those limits. Native macOS integration also currently excludes two inspection half-close cases (PluginLifecycleTests.Client_half_close_drains_the_reverse_response_and_ends_completed and PeerConnectionTests.Server_jump_relays_plaintext_over_target_leg_tls_and_blocks_unhandled_applications) because the reverse response is still lost on macOS; that is a known unfixed issue, while Windows and Linux continue to run both cases.",
           "Plugin-system requirement REQ-001O and design DES-009 remain Draft, and ADR-0028/0029 remain Proposed; this release does not claim their acceptance is complete."
+        ]
+      },
+      {
+        "title": "Release assets",
+        "items": [
+          "Self-contained server archives for Linux x64 and Windows x64",
+          "Self-contained Linux x64 agent archive",
+          "Windows x64 agent archives and installer for self-contained and framework-dependent builds",
+          "Self-contained macOS Intel and Apple Silicon agent archives",
+          "SHA256SUMS checksum list"
+        ]
+      }
+    ]
+  },
+  "v0.1.0-rc.14": {
+    "title": "RelayLink v0.1.0-rc.14",
+    "intro": "This release candidate formally abandons the plugin system (server-side application inspection channels and the client Bridge), reverts all related code and documentation, and returns RelayLink to a pure proxy focus. It also includes native OS tool links in the Agent local page (ADR-0042), the source baseline for the AI automation management plane and multi-language SDKs, and improvements to CI and releases.",
+    "sections": [
+      {
+        "title": "Highlights",
+        "items": [
+          "Abandoned plugin system and returned to pure proxy positioning: formally discontinued the server-side application plugins and auditable inspection channels explored in v0.1.0-rc.13, along with the experimental client Bridge and internal self-signed code-signing effort. Reverted server inspection channels (server-peer, server-jump, per-request/action HTTP/HTTPS and SSH inspection, credential store, approvals, protocol v6-v7), RelayLink.Bridge, Bridge installers/packaging/signing scripts, and their requirements, design, and ADR documents, keeping only the historical v0.1.0-rc.13 release notes. RelayLink refocuses on ordinary TCP/UDP forwarding, authorized end-to-end peer access, target-agent HTTP/HTTPS reverse proxying, application-layer security groups, and connection lifecycle auditing.",
+          "Wire protocol and configuration returned to v3-v5: the server wire protocol is stabilized on v3-v5, maintaining compatibility with v3-v5 agents (v3 TCP, v4 UDP, v5 target-agent HTTP/HTTPS reverse proxy). Configuration loading and channel management APIs (ChannelCreateRequest and ChannelUpdateRequest) strictly reject unknown fields including retired plugin/inspection fields, and minute traffic history writes use explicit column lists so existing SQLite databases with extra columns continue working.",
+          "Agent local page native OS tool links (ADR-0042): replacing the standalone client Bridge, the Agent local status page directly exposes browser HTTP/HTTPS links, ssh:// links and copyable SSH commands for ready raw TCP peer entries, credential-free .rdp file downloads on Windows, and address copy for UDP entries. Authentication and certificate verification stay with the operating system and target tools.",
+          "AI automation management plane, CLI, skill, and multi-language SDKs (source baseline): merged the optional automation management plane (REQ-001P / DES-010 / ADR-0035 / ADR-0036), disabled by default, bound strictly to 127.0.0.1 over TLS, and reachable only through an authorized end-to-end encrypted peer channel. It uses one-time pairing codes, manual admin-UI approval, short-lived device-bound EC P-256 tokens (no refresh tokens), A/B/C risk tiers, change-request approvals, and full auditing. The repository also includes the relaylink CLI (src/RelayLink.Cli), the relaylink-admin agent skill (skills/relaylink-admin/), shared contracts (contract/), and entry-facing data-plane SDK sources in six languages (.NET, Python, TypeScript, Go, Java, Rust).",
+          "Admin UI and Agent local page updates: the server Admin UI adds panels for automation authorization and change-request approval while keeping peer entry online status and address copy; the Agent local page retains ADR-0034 same-origin write sessions and CSRF (without a local management token file) and adds unit tests for native tool links.",
+          "CI, release, and reliability fixes: the open-source repository uses GitHub-hosted runners and now validates all nine release assets and SHA256SUMS, checks macOS Agent packages before publishing, and retries artifact uploads and tests. Fixed the PeerRelayRegistry close-audit race, SecretFilePermissions macOS temporary-directory symlink resolution, and concurrent DatagramListener.Stop disposal. Updated the website dependency sanitize-html to 2.18.2."
+        ]
+      },
+      {
+        "title": "Upgrade and compatibility",
+        "items": [
+          "Remove retired plugin fields before upgrading from v0.1.0-rc.13: if server.json or clients/*.json used auditable inspection fields (such as inspectionMode or application) or the credentials/ store from v0.1.0-rc.13, remove them before upgrading to v0.1.0-rc.14 because the server strictly rejects unknown fields on startup. Ordinary TCP/UDP and target-agent HTTP/HTTPS reverse-proxy configurations continue working unchanged.",
+          "Protocol and agent compatibility: the server accepts wire protocol v3-v5 and no longer accepts v6/v7 frames. Nodes that installed a v0.1.0-rc.13 agent should upgrade to v0.1.0-rc.14 together with the server; older v3-v5 agents keep working for ordinary forwarding and peer access.",
+          "SQLite history and audit compatibility: traffic_minute now inserts with explicit column names so existing databases created by v0.1.0-rc.13 with extra columns keep working without rebuilds; audit_event adds automation correlation columns (automation_grant_id, device_key_thumbprint) in place on startup.",
+          "Automation management plane is disabled by default: automation.enabled defaults to false and exposes no listener or routes until explicitly enabled with local TLS certificates and an authorized end-to-end encrypted peer channel.",
+          "Existing security boundaries are unchanged: the Admin UI and Agent local page remain loopback-only plain HTTP, and under ADR-0034 the Agent local write API is intended only for single-user or administrator-operated hosts rather than LocalSystem or root on multi-user hosts."
+        ]
+      },
+      {
+        "title": "Verification and limitations",
+        "items": [
+          "Local Linux (WSL) full verification passed: AdminWeb typecheck, formatting, and component tests (10/10); AgentWeb build, formatting, and tool-link tests (4/4); static website build (14 releases, 74 bilingual pages) and site tests (5/5); .NET unit tests (256/256) and full integration tests with Peer TLS enabled (103/103). Native Windows and macOS verification and packaged assets are authoritative from the tagged CI and release workflows.",
+          "AI automation and multi-language SDKs (REQ-001P / DES-010) remain a Draft source baseline and are not yet included in the nine automated release assets (build CLI and SDKs from source). Cross-platform (Linux/macOS/arm64/musl) SDK verification, a second named AI host verification, and .NET SDK management-plane acceptance remain pending.",
+          "Windows Agent installers remain unsigned and macOS Agent archives are not Developer ID signed or notarized; this candidate did not run capacity stress tests or cross-host disaster-recovery drills."
         ]
       },
       {

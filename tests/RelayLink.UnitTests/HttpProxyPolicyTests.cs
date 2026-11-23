@@ -112,7 +112,6 @@ public sealed class HttpProxyPolicyTests
     [InlineData(3)]
     [InlineData(4)]
     [InlineData(5)]
-    [InlineData(6)]
     public async Task Known_versions_round_trip_without_switching(byte version)
     {
         using var stream = new MemoryStream();

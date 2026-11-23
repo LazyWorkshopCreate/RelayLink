@@ -28,7 +28,7 @@ public sealed class TunnelAcceptorService(
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         if (runtime.Configuration.Server.Tunnel.TlsEnabled)
-            certificate = ServerCertificateLoader.Load(runtime.Configuration.Server.Tunnel.CertificatePemPath, runtime.Configuration.Server.Tunnel.PrivateKeyPemPath);
+            certificate = LoadServerCertificate(runtime.Configuration.Server.Tunnel.CertificatePemPath, runtime.Configuration.Server.Tunnel.PrivateKeyPemPath);
         listener = new TcpListener(IPAddress.Parse(runtime.Configuration.Server.Tunnel.ListenAddress), runtime.Configuration.Server.Tunnel.Port);
         listener.Start();
         logger.LogInformation("Tunnel listener started on {Address}:{Port}.", runtime.Configuration.Server.Tunnel.ListenAddress, runtime.Configuration.Server.Tunnel.Port);
@@ -153,8 +153,7 @@ public sealed class TunnelAcceptorService(
                     await writer.WriteAsync(new Frame(FrameType.RegisterAccepted, JsonProtocolSerializer.Serialize(new RegisterAcceptedMessage(session.SessionId, configVersion, snapshot, runtime.Configuration.Server.Tunnel.HeartbeatIntervalSeconds, runtime.Configuration.Server.Tunnel.HeartbeatTimeoutSeconds)
                     {
                         HalfCloseDrainTimeoutSeconds = runtime.Configuration.Server.Limits.HalfCloseDrainTimeoutSeconds,
-                        TcpIdleTimeoutSeconds = runtime.Configuration.Server.Limits.TcpIdleTimeoutSeconds,
-                        BlockedWriteTimeoutSeconds = runtime.Configuration.Server.Limits.BlockedWriteTimeoutSeconds
+                        TcpIdleTimeoutSeconds = runtime.Configuration.Server.Limits.TcpIdleTimeoutSeconds
                     }, session.ProtocolVersion)), serverStoppingToken);
                     var acknowledgement = await reader.ReadAsync(ProtocolConstants.MaxControlPayloadLength, handshakeTimeout.Token);
                     if (acknowledgement?.Type != FrameType.ConfigAck)
@@ -294,7 +293,6 @@ public sealed class TunnelAcceptorService(
             {
                 var failed = JsonProtocolSerializer.Deserialize<OpenFailedMessage>(frame.Payload.Span);
                 if (failed.SessionId != session.SessionId) throw new ProtocolException("OpenFailed session mismatch.");
-                if (peerRelays.ReportTargetFailure(session, failed)) continue;
                 if (pendingConnections.TryGet(failed.ConnectionId, out var pending) && pending is not null)
                 {
                     metrics.For(session.ClientId, pending.Channel.ChannelId).MarkTargetFailure(failed.ErrorCode.ToString());
@@ -321,10 +319,7 @@ public sealed class TunnelAcceptorService(
                 var ready = JsonProtocolSerializer.Deserialize<HttpIngressReadyMessage>(frame.Payload.Span);
                 if (session.ProtocolVersion < 5 || !pendingConnections.TryGet(ready.ConnectionId, out var pending) || pending is null ||
                     pending.SessionId != session.SessionId || pending.Channel.ApplicationProtocol != "http" || !session.IsHttpReady(pending.Channel) || !pending.TrySetTargetReady(0))
-                {
-                    if (session.ProtocolVersion >= 5 && pendingConnections.IsRecentlyCompleted(session.SessionId, ready.ConnectionId)) continue;
                     throw new ProtocolException("HTTP readiness did not match a bound connection.");
-                }
                 metrics.For(session.ClientId, pending.Channel.ChannelId).MarkHttpIngressReady();
                 continue;
             }
@@ -333,16 +328,8 @@ public sealed class TunnelAcceptorService(
                 var ready = JsonProtocolSerializer.Deserialize<TargetReadyMessage>(frame.Payload.Span);
                 if (!pendingConnections.TryGet(ready.ConnectionId, out var pending) || pending is null ||
                     pending.SessionId != session.SessionId || pending.Channel.ApplicationProtocol == "http" || !pending.TrySetTargetReady(ready.TargetConnectDurationMs))
-                {
-                    if (pendingConnections.IsRecentlyCompleted(session.SessionId, ready.ConnectionId)) continue;
                     throw new ProtocolException("TargetReady did not match a bound connection in this control session.");
-                }
                 metrics.For(session.ClientId, pending.Channel.ChannelId).MarkTargetSuccess();
-                continue;
-            }
-            if (frame.Type == FrameType.InspectionTargetReady)
-            {
-                peerRelays.ReportInspectionTargetReady(session, JsonProtocolSerializer.Deserialize<InspectionTargetReadyMessage>(frame.Payload.Span));
                 continue;
             }
 
@@ -393,4 +380,14 @@ public sealed class TunnelAcceptorService(
         return stream;
     }
 
+    private static X509Certificate2 LoadServerCertificate(string certificatePath, string privateKeyPath)
+    {
+        // Deployment remains PEM on every platform. Schannel cannot use the ephemeral
+        // private key produced by CreateFromPemFile, so import an in-memory PFX into
+        // the current user's key provider; no certificate-store installation is needed.
+        var certificate = X509Certificate2.CreateFromPemFile(certificatePath, privateKeyPath);
+        if (!OperatingSystem.IsWindows()) return certificate;
+        using (certificate)
+            return X509CertificateLoader.LoadPkcs12(certificate.Export(X509ContentType.Pkcs12), null, X509KeyStorageFlags.UserKeySet);
+    }
 }

@@ -1,0 +1,296 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "RelayLink 自动化管理 API",
+    "version": "1.0.0",
+    "description": "供 relaylink CLI 与 SDK 管理面调用的自动化 API。入口只绑定 127.0.0.1 且只提供 TLS；可达性复用既有授权互访通道。每次调用需携带 Bearer 令牌与 X-RelayLink-Proof 设备签名证明。"
+  },
+  "servers": [
+    {
+      "url": "https://127.0.0.1:18082",
+      "description": "自动化监听。实际地址由 automation.listenAddress 与 automation.port 决定，且只允许 loopback。"
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "deviceToken": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "配对后签发的短时令牌。服务端只保存其 SHA-256 摘要。"
+      },
+      "deviceProof": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-RelayLink-Proof",
+        "description": "ES256 设备签名证明。载荷含 htm/htu/ath/iat/exp/jti/instanceId；配对阶段另含 requestId/userCodeDigest。"
+      }
+    },
+    "parameters": {
+      "IdempotencyKey": {
+        "name": "Idempotency-Key",
+        "in": "header",
+        "required": true,
+        "schema": { "type": "string", "format": "uuid" },
+        "description": "写操作的幂等键。同键不同载荷返回 conflict；同键重放返回首次结果。"
+      },
+      "ApiVersion": {
+        "name": "X-RelayLink-Api-Version",
+        "in": "header",
+        "required": false,
+        "schema": { "type": "integer", "enum": [1] },
+        "description": "缺省按 1 处理。不支持时返回 unsupported_api_version，CLI 以退出码 9 结束。"
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "required": ["error"],
+        "properties": {
+          "error": {
+            "type": "object",
+            "required": ["code", "message", "retryable", "requestId"],
+            "properties": {
+              "code": {
+                "type": "string",
+                "description": "稳定错误码。完整集合见 contract/errors.json。",
+                "examples": ["scope_insufficient"]
+              },
+              "message": { "type": "string" },
+              "retryable": { "type": "boolean" },
+              "requestId": { "type": "string" },
+              "details": { "type": "object", "additionalProperties": true }
+            }
+          }
+        }
+      },
+      "Info": {
+        "type": "object",
+        "properties": {
+          "apiVersions": { "type": "array", "items": { "type": "integer" } },
+          "minCliVersion": { "type": "string" },
+          "requiresPairing": { "type": "boolean" },
+          "enabled": { "type": "boolean" },
+          "automationInstanceId": {
+            "type": ["string", "null"],
+            "format": "uuid",
+            "description": "持久化实例标识，首次启用生成后不变。不复用每进程新生成的 ServerRuntime.InstanceId。"
+          }
+        }
+      },
+      "PairingRequest": {
+        "type": "object",
+        "required": ["subject", "devicePublicKey"],
+        "properties": {
+          "subject": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "platform": { "type": "string" },
+          "cliVersion": { "type": "string" },
+          "scopes": { "type": "array", "items": { "type": "string" } },
+          "devicePublicKey": { "type": "string", "description": "P-256 EC 公钥的 JWK（JSON 字符串）。" }
+        }
+      },
+      "PairingCreated": {
+        "type": "object",
+        "properties": {
+          "requestId": { "type": "string", "format": "uuid" },
+          "userCode": { "type": "string", "description": "形如 XXXX-XXXX。必须在服务端控制台核对后批准。" },
+          "expiresAtUtc": { "type": "string", "format": "date-time" },
+          "automationInstanceId": { "type": "string", "format": "uuid" },
+          "scopes": { "type": "array", "items": { "type": "string" } }
+        }
+      },
+      "ChannelPatch": {
+        "type": "object",
+        "description": "B 类通道受控写入。字段白名单，未列出的一律 unknown_field。",
+        "additionalProperties": false,
+        "properties": {
+          "displayName": { "type": "string" },
+          "enabled": { "type": "boolean" },
+          "maxConnections": { "type": "integer", "minimum": 1 },
+          "targetConnectTimeoutSeconds": { "type": "integer", "minimum": 1, "maximum": 300 },
+          "udpIdleTimeoutSeconds": { "type": "integer", "minimum": 1, "maximum": 3600 },
+          "tags": { "type": "array", "items": { "type": "string" } }
+        }
+      },
+      "ChangeRequest": {
+        "type": "object",
+        "required": ["type", "target", "payload"],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["client.create", "client.delete", "channel.create", "channel.delete", "mapping.create", "channel.security"], "description": "credential.delete 已移除：凭据写入与删除始终由管理员在管理页面完成，自动化接口不接受其申请。"
+          },
+          "target": {
+            "type": "object",
+            "properties": {
+              "clientId": { "type": "string" },
+              "channelId": { "type": "string" },
+              "mappingId": { "type": "string" }
+            }
+          },
+          "payload": { "type": "object", "additionalProperties": true },
+          "reason": { "type": "string" }
+        }
+      }
+    }
+  },
+  "paths": {
+    "/api/v1/automation/info": {
+      "get": {
+        "summary": "匿名能力探测",
+        "description": "不要求证明。返回接口版本与服务端实例标识。版本信息只用于选择行为，不用于任何安全决策——配对前的证书无法固定校验。",
+        "responses": {
+          "200": { "description": "能力信息", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Info" } } } }
+        }
+      }
+    },
+    "/api/v1/automation/pairing/requests": {
+      "post": {
+        "summary": "发起一次性配对",
+        "description": "匿名但严格限流。限流键为设备公钥指纹 + 主体名，不用来源地址（经互访到达的来源恒为 loopback 临时端口）。",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PairingRequest" } } }
+        },
+        "responses": {
+          "200": { "description": "已创建，返回用户码", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PairingCreated" } } } },
+          "400": { "description": "字段不合法", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "429": { "description": "限流或待批准容量已满", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      }
+    },
+    "/api/v1/automation/pairing/requests/{id}/status": {
+      "post": {
+        "summary": "查询配对状态",
+        "description": "需要设备签名证明与正确用户码（body 或 proof.userCodeDigest）。注意：本次证明的 jti 会被消耗，不能用同一证明再换取令牌。",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
+        "responses": {
+          "200": { "description": "当前状态" },
+          "401": { "description": "证明无效", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      }
+    },
+    "/api/v1/automation/pairing/requests/{id}/token": {
+      "post": {
+        "summary": "换取令牌",
+        "description": "需要设备签名证明与正确用户码。在单事务内完成「查状态 → 作废 → 签发」，避免并发双签发。成功后该 requestId 立即作废。",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
+        "responses": {
+          "200": { "description": "令牌与授权范围" },
+          "401": { "description": "证明无效", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "403": { "description": "被拒绝、被锁定或尚未批准", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "409": { "description": "已换取过", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      }
+    },
+    "/api/v1/automation/pairing/requests/{id}": {
+      "delete": {
+        "summary": "取消自己的配对请求",
+        "description": "需要设备签名证明。只有待批准的请求可以取消。",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
+        "responses": { "200": { "description": "已取消" } }
+      }
+    },
+    "/api/v1/automation/whoami": {
+      "get": {
+        "summary": "令牌自检",
+        "description": "不要求 scope，只回显当前令牌的主体、scope 与到期时间。",
+        "security": [{ "deviceToken": [] }, { "deviceProof": [] }],
+        "responses": { "200": { "description": "令牌信息" }, "401": { "description": "未授权" } }
+      }
+    },
+    "/api/v1/automation/version": {
+      "get": {
+        "summary": "服务端版本（新增端点，既有服务端没有）",
+        "security": [{ "deviceToken": [] }],
+        "responses": { "200": { "description": "版本与实例标识" }, "401": { "description": "未授权" } }
+      }
+    },
+    "/api/v1/automation/overview": {
+      "get": {
+        "summary": "聚合总览",
+        "security": [{ "deviceToken": [] }],
+        "responses": { "200": { "description": "总览" }, "403": { "description": "scope 不足" } }
+      }
+    },
+    "/api/v1/automation/clients": {
+      "get": {
+        "summary": "客户端列表",
+        "security": [{ "deviceToken": [] }],
+        "responses": { "200": { "description": "客户端数组" }, "403": { "description": "缺少 clients.read" } }
+      }
+    },
+    "/api/v1/automation/clients/{clientId}/channels": {
+      "get": {
+        "summary": "通道列表",
+        "security": [{ "deviceToken": [] }],
+        "parameters": [{ "name": "clientId", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "通道数组" }, "404": { "description": "客户端不存在" } }
+      }
+    },
+    "/api/v1/automation/clients/{clientId}/channels/{channelId}": {
+      "patch": {
+        "summary": "B 类通道受控写入",
+        "description": "字段白名单写入，逐次审计。目标是当前自动化接入通道时返回 conflict，避免自断管理面。",
+        "security": [{ "deviceToken": [] }],
+        "parameters": [
+          { "name": "clientId", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "channelId", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ChannelPatch" } } }
+        },
+        "responses": {
+          "200": { "description": "已保存并下发" },
+          "400": { "description": "未知字段或缺少幂等键", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "409": { "description": "目标是自动化接入通道", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      }
+    },
+    "/api/v1/automation/clients/{clientId}/mappings": {
+      "get": {
+        "summary": "访问映射列表",
+        "security": [{ "deviceToken": [] }],
+        "parameters": [{ "name": "clientId", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "映射数组" } }
+      }
+    },
+    "/api/v1/automation/change-requests": {
+      "post": {
+        "summary": "C 类结构性变更申请",
+        "description": "只生成申请，不产生配置变更。批准与执行只在管理页面进行。",
+        "security": [{ "deviceToken": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/IdempotencyKey" }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ChangeRequest" } } }
+        },
+        "responses": {
+          "200": { "description": "已提交，状态为 pending" },
+          "400": { "description": "字段不合法", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "409": { "description": "同一目标已有未完成申请", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      },
+      "get": {
+        "summary": "变更申请列表",
+        "security": [{ "deviceToken": [] }],
+        "responses": { "200": { "description": "申请数组" } }
+      }
+    },
+    "/api/v1/automation/change-requests/{id}": {
+      "get": {
+        "summary": "单条变更申请",
+        "security": [{ "deviceToken": [] }],
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
+        "responses": { "200": { "description": "申请详情" }, "404": { "description": "不存在" } }
+      },
+      "delete": {
+        "summary": "撤销自己提交的待批准申请",
+        "security": [{ "deviceToken": [] }],
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
+        "responses": { "200": { "description": "已撤销" }, "409": { "description": "已不在待批准状态" } }
+      }
+    }
+  }
+}

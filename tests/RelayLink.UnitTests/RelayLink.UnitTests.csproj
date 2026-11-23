@@ -15,5 +15,8 @@
     <ProjectReference Include="../../src/RelayLink.Transport/RelayLink.Transport.csproj" />
     <ProjectReference Include="../../src/RelayLink.Server/RelayLink.Server.csproj" />
     <ProjectReference Include="../../src/RelayLink.Agent/RelayLink.Agent.csproj" />
+    <ProjectReference Include="../../src/RelayLink.AutomationClient/RelayLink.AutomationClient.csproj" />
+    <ProjectReference Include="../../src/RelayLink.Sdk/RelayLink.Sdk.csproj" />
+    <ProjectReference Include="../../src/RelayLink.Cli/RelayLink.Cli.csproj" />
   </ItemGroup>
 </Project>

@@ -6,16 +6,7 @@ import { App } from './main';
 const ok = (body: unknown, status = 200) =>
     new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 
-function fakeApi(
-    withMapping = false,
-    options: {
-        mappingAvailable?: boolean;
-        mappingReason?: string;
-        mappingAccessUrl?: string;
-        channelAvailable?: boolean;
-        channelReason?: string;
-    } = {},
-) {
+function fakeApi(withMapping = false, mappingAccessUrl?: string) {
     let authenticated = false;
     const clients: Record<string, unknown>[] = [
         {
@@ -79,16 +70,12 @@ function fakeApi(
             enabled: true,
             localAddress: '127.0.0.1',
             localPort: 23456,
-            available: options.mappingAvailable ?? true,
-            unavailableReason: options.mappingReason,
-            accessUrl: options.mappingAccessUrl,
+            available: true,
+            accessUrl: mappingAccessUrl,
             targetClientId: 'node-a',
             targetChannelId: 'echo',
         });
     }
-    if (options.channelAvailable !== undefined) channelSets['node-a'][0].available = options.channelAvailable;
-    if (options.channelReason !== undefined)
-        channelSets['node-a'][0].unavailableReason = options.channelReason;
     const calls: { path: string; method: string; csrf: string | null; body?: unknown }[] = [];
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const path = String(input);
@@ -277,7 +264,7 @@ describe('管理控制台', () => {
         await user.click(await screen.findByRole('button', { name: '添加通道' }));
         await user.type(screen.getByRole('textbox', { name: '通道 ID' }), 'udp-test');
         await user.type(screen.getByRole('textbox', { name: '显示名称' }), 'UDP 测试');
-        await user.selectOptions(screen.getByRole('combobox', { name: '通道类型' }), 'udp');
+        await user.selectOptions(screen.getByRole('combobox', { name: '传输协议' }), 'udp');
         const timeout = screen.getByRole('spinbutton', { name: 'UDP 会话空闲超时（秒）' });
         expect(timeout).toHaveProperty('value', '60');
         await user.clear(timeout);
@@ -291,8 +278,7 @@ describe('管理控制台', () => {
         await user.click(
             within(screen.getByText('UDP 测试').closest('tr')!).getByRole('button', { name: '编辑' }),
         );
-        expect(screen.getByRole('combobox', { name: '通道类型' })).toHaveProperty('value', 'udp');
-        expect(screen.getByRole('combobox', { name: '通道类型' })).toHaveProperty('disabled', true);
+        expect(screen.getByRole('combobox', { name: '传输协议' })).toHaveProperty('value', 'udp');
         expect(screen.getByRole('spinbutton', { name: 'UDP 会话空闲超时（秒）' })).toHaveProperty(
             'value',
             '15',
@@ -425,42 +411,23 @@ describe('管理控制台', () => {
         expect(screen.getByText('最近 24 小时')).toBeTruthy();
     });
 
-    it('不可用入口显示具体原因而不是笼统离线', async () => {
-        fakeApi(true, {
-            mappingAvailable: false,
-            mappingReason: 'target_channel_disabled',
-            channelAvailable: false,
-            channelReason: 'agent_offline',
-        });
-        render(<App />);
-        expect(await screen.findByText('测试节点')).toBeTruthy();
-        const mappingTable = within(screen.getByText('访问节点').closest('article')!).getByRole('region', {
-            name: '端到端访问入口',
-        });
-        expect(within(mappingTable).getByText('目标通道已停用')).toBeTruthy();
-        expect(within(mappingTable).queryByText('TCP 127.0.0.1:23456')).toBeNull();
-        expect(within(mappingTable).queryByRole('button', { name: /复制/ })).toBeNull();
-        expect(screen.getByText('Agent 离线')).toBeTruthy();
-    });
-
     it('HTTP 映射显示并复制完整入口地址', async () => {
-        fakeApi(true, { mappingAccessUrl: 'http://relaylink-peer.test:23456' });
+        const address = 'http://relaylink-peer.test:23456';
+        fakeApi(true, address);
         const user = userEvent.setup();
         render(<App />);
-        expect(await screen.findByText('访问节点')).toBeTruthy();
-        const mappingTable = within(screen.getByText('访问节点').closest('article')!).getByRole('region', {
+        const caller = await screen.findByText('访问节点');
+        const mappingTable = within(caller.closest('article')!).getByRole('region', {
             name: '端到端访问入口',
         });
-        expect(within(mappingTable).getByText('http://relaylink-peer.test:23456')).toBeTruthy();
+        expect(within(mappingTable).getByText(address)).toBeTruthy();
         const writeText = vi.fn().mockResolvedValue(undefined);
         Object.defineProperty(navigator, 'clipboard', {
             configurable: true,
             value: { writeText },
         });
-        await user.click(
-            within(mappingTable).getByRole('button', { name: '复制 http://relaylink-peer.test:23456' }),
-        );
-        await waitFor(() => expect(writeText).toHaveBeenCalledWith('http://relaylink-peer.test:23456'));
+        await user.click(within(mappingTable).getByRole('button', { name: `复制 ${address}` }));
+        await waitFor(() => expect(writeText).toHaveBeenCalledWith(address));
     });
 
     it('安全组仅登录可管理，普通通道可选择并提交安全组', async () => {
@@ -620,17 +587,17 @@ describe('管理控制台', () => {
         await user.type(screen.getByRole('textbox', { name: '显示名称' }), '私有通道');
         expect(screen.getByRole('textbox', { name: '云端监听地址' })).toHaveProperty('value', '0.0.0.0');
         expect(screen.getByRole('spinbutton', { name: '云端监听端口' })).toHaveProperty('value', '19001');
-        await user.selectOptions(screen.getByRole('combobox', { name: '通道类型' }), 'peer');
+        await user.click(screen.getByRole('checkbox', { name: /仅允许授权客户端互访/ }));
         expect(screen.queryByRole('textbox', { name: '云端监听地址' })).toBeNull();
         expect(screen.queryByRole('spinbutton', { name: '云端监听端口' })).toBeNull();
         expect(screen.getByRole('checkbox', { name: /启用 Agent 间端到端加密/ })).toHaveProperty(
             'checked',
             true,
         );
-        await user.selectOptions(screen.getByRole('combobox', { name: '通道类型' }), 'standard');
+        await user.click(screen.getByRole('checkbox', { name: /仅允许授权客户端互访/ }));
         expect(screen.getByRole('textbox', { name: '云端监听地址' })).toHaveProperty('value', '0.0.0.0');
         expect(screen.getByRole('spinbutton', { name: '云端监听端口' })).toHaveProperty('value', '19001');
-        await user.selectOptions(screen.getByRole('combobox', { name: '通道类型' }), 'peer');
+        await user.click(screen.getByRole('checkbox', { name: /仅允许授权客户端互访/ }));
         expect(screen.queryByRole('textbox', { name: /端到端证书 SHA-256 指纹/ })).toBeNull();
         await user.click(screen.getByRole('checkbox', { name: /启用 Agent 间端到端加密/ }));
         await user.click(screen.getByRole('button', { name: '保存并下发' }));
@@ -672,25 +639,5 @@ describe('管理控制台', () => {
             targetClientId: 'node-a',
             targetChannelId: 'private',
         });
-    });
-
-    it('审计通道不提供尚未支持或缺少证书表单的应用，普通标签仍可选', async () => {
-        fakeApi();
-        const user = userEvent.setup();
-        render(<App />);
-        await screen.findByText('测试节点');
-        await user.click(screen.getByRole('button', { name: /未登录/ }));
-        await user.type(screen.getByRole('textbox', { name: '用户名' }), 'admin');
-        await user.type(screen.getByLabelText('密码'), 'test-password');
-        await user.click(screen.getByRole('button', { name: '登录' }));
-        await user.click((await screen.findAllByRole('button', { name: '添加通道' }))[0]);
-        const type = screen.getByRole('combobox', { name: '通道类型' });
-        await user.selectOptions(type, 'server-peer');
-        expect(screen.getByRole('option', { name: 'RDP' })).toHaveProperty('disabled', true);
-        expect(screen.getByRole('option', { name: 'HTTPS' })).toHaveProperty('disabled', true);
-        expect(screen.getByRole('option', { name: 'HTTP' })).toHaveProperty('disabled', false);
-        await user.selectOptions(type, 'standard');
-        expect(screen.getByRole('option', { name: 'RDP' })).toHaveProperty('disabled', false);
-        expect(screen.getByRole('option', { name: 'HTTPS' })).toHaveProperty('disabled', false);
     });
 });

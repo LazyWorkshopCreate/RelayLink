@@ -5,7 +5,6 @@ namespace RelayLink.Server.Runtime;
 
 public sealed record AuditEvent(string EventType, string Outcome)
 {
-    public Guid? EventId { get; init; }
     public string? ReasonCode { get; init; }
     public Guid? ConnectionId { get; init; }
     public Guid? SessionId { get; init; }
@@ -19,12 +18,19 @@ public sealed record AuditEvent(string EventType, string Outcome)
     public long? DurationMs { get; init; }
     public long BytesToTarget { get; init; }
     public long BytesToCaller { get; init; }
+    // 自动化管理面：授权标识与设备公钥指纹，均为非秘密元数据。
+    public Guid? AutomationGrantId { get; init; }
+    public string? DeviceKeyThumbprint { get; init; }
 }
 
 public sealed record AuditEventRow(Guid EventId, DateTimeOffset OccurredAtUtc, string EventType, string Outcome,
     string? ReasonCode, Guid? ConnectionId, Guid? SessionId, string? ClientId, string? ChannelId,
     string? MappingId, string? CallerClientId, string? TargetClientId, string? Actor, string? RemoteIp,
-    long? DurationMs, long BytesToTarget, long BytesToCaller, Guid ServerInstanceId);
+    long? DurationMs, long BytesToTarget, long BytesToCaller, Guid ServerInstanceId)
+{
+    public Guid? AutomationGrantId { get; init; }
+    public string? DeviceKeyThumbprint { get; init; }
+}
 
 public sealed record AuditPage(long Total, IReadOnlyList<AuditEventRow> Events);
 
@@ -62,6 +68,9 @@ public sealed class AuditService(ServerRuntime runtime, ILogger<AuditService> lo
                 CREATE INDEX IF NOT EXISTS ix_audit_event_client_time ON audit_event (client_id, occurred_at_utc DESC);
                 """;
             await schema.ExecuteNonQueryAsync(cancellationToken);
+            // 自动化管理面新增两列。既有部署的审计库就地增量迁移，无需重建。
+            await AddColumnIfMissingAsync(connection, "automation_grant_id", cancellationToken);
+            await AddColumnIfMissingAsync(connection, "device_key_thumbprint", cancellationToken);
             // A previous process can die after the opening event was committed. Close only
             // unmatched openings, once, and retain their original correlation ID.
             await using var recover = connection.CreateCommand();
@@ -106,13 +115,14 @@ public sealed class AuditService(ServerRuntime runtime, ILogger<AuditService> lo
                 command.CommandText = """
                     INSERT INTO audit_event (event_id, occurred_at_utc, event_type, outcome, reason_code,
                         connection_id, session_id, client_id, channel_id, mapping_id, caller_client_id,
-                        target_client_id, actor, remote_ip, duration_ms, bytes_to_target, bytes_to_caller, server_instance_id)
+                        target_client_id, actor, remote_ip, duration_ms, bytes_to_target, bytes_to_caller,
+                        server_instance_id, automation_grant_id, device_key_thumbprint)
                     VALUES ($id, $at, $type, $outcome, $reason, $connection, $session, $client,
                         $channel, $mapping, $caller, $target, $actor, $remote, $duration,
-                        $toTarget, $toCaller, $instance)
+                        $toTarget, $toCaller, $instance, $grant, $thumb)
                     ON CONFLICT(event_id) DO NOTHING
                     """;
-                command.Parameters.AddWithValue("$id", (value.EventId ?? Guid.NewGuid()).ToString());
+                command.Parameters.AddWithValue("$id", Guid.NewGuid().ToString());
                 command.Parameters.AddWithValue("$at", DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
                 command.Parameters.AddWithValue("$type", value.EventType);
                 command.Parameters.AddWithValue("$outcome", value.Outcome);
@@ -130,6 +140,8 @@ public sealed class AuditService(ServerRuntime runtime, ILogger<AuditService> lo
                 command.Parameters.AddWithValue("$toTarget", value.BytesToTarget);
                 command.Parameters.AddWithValue("$toCaller", value.BytesToCaller);
                 command.Parameters.AddWithValue("$instance", runtime.InstanceId.ToString());
+                command.Parameters.AddWithValue("$grant", Db(value.AutomationGrantId?.ToString()));
+                command.Parameters.AddWithValue("$thumb", Db(value.DeviceKeyThumbprint));
                 await command.ExecuteNonQueryAsync(cancellationToken);
                 var today = DateOnly.FromDateTime(DateTime.UtcNow);
                 if (today != lastTrimDate)
@@ -164,7 +176,8 @@ public sealed class AuditService(ServerRuntime runtime, ILogger<AuditService> lo
         command.CommandText = $"""
             SELECT event_id, occurred_at_utc, event_type, outcome, reason_code, connection_id,
                    session_id, client_id, channel_id, mapping_id, caller_client_id, target_client_id,
-                   actor, remote_ip, duration_ms, bytes_to_target, bytes_to_caller, server_instance_id
+                   actor, remote_ip, duration_ms, bytes_to_target, bytes_to_caller, server_instance_id,
+                   automation_grant_id, device_key_thumbprint
             FROM audit_event WHERE {predicate}
             ORDER BY occurred_at_utc DESC, event_id DESC LIMIT $limit OFFSET $offset
             """;
@@ -178,7 +191,11 @@ public sealed class AuditService(ServerRuntime runtime, ILogger<AuditService> lo
                 reader.GetString(2), reader.GetString(3), OptionalString(reader, 4), OptionalGuid(reader, 5), OptionalGuid(reader, 6),
                 OptionalString(reader, 7), OptionalString(reader, 8), OptionalString(reader, 9), OptionalString(reader, 10),
                 OptionalString(reader, 11), OptionalString(reader, 12), OptionalString(reader, 13), reader.IsDBNull(14) ? null : reader.GetInt64(14),
-                reader.GetInt64(15), reader.GetInt64(16), Guid.Parse(reader.GetString(17))));
+                reader.GetInt64(15), reader.GetInt64(16), Guid.Parse(reader.GetString(17)))
+            {
+                AutomationGrantId = OptionalGuid(reader, 18),
+                DeviceKeyThumbprint = OptionalString(reader, 19)
+            });
         return new AuditPage(total, items);
     }
 
@@ -222,6 +239,26 @@ public sealed class AuditService(ServerRuntime runtime, ILogger<AuditService> lo
 
     private static object Db(string? value) => (object?)value ?? DBNull.Value;
     private static object Db(long? value) => (object?)value ?? DBNull.Value;
+
+    /// <summary>
+    /// 增量加列。用 PRAGMA 查既有列，避免 ALTER TABLE 重复执行报错；
+    /// 旧审计库因此无需重建，符合兼容性内增补的要求。
+    /// </summary>
+    private static async Task AddColumnIfMissingAsync(SqliteConnection connection, string column, CancellationToken cancellationToken)
+    {
+        await using (var probe = connection.CreateCommand())
+        {
+            probe.CommandText = "SELECT COUNT(*) FROM pragma_table_info('audit_event') WHERE name = $name;";
+            probe.Parameters.AddWithValue("$name", column);
+            var exists = Convert.ToInt64(await probe.ExecuteScalarAsync(cancellationToken) ?? 0L);
+            if (exists > 0) return;
+        }
+
+        await using var alter = connection.CreateCommand();
+        // 列名来自本类内部的固定字面量，不来自外部输入。
+        alter.CommandText = $"ALTER TABLE audit_event ADD COLUMN {column} TEXT;";
+        await alter.ExecuteNonQueryAsync(cancellationToken);
+    }
     private static string? OptionalString(SqliteDataReader reader, int ordinal) => reader.IsDBNull(ordinal) ? null : reader.GetString(ordinal);
     private static Guid? OptionalGuid(SqliteDataReader reader, int ordinal) => reader.IsDBNull(ordinal) ? null : Guid.Parse(reader.GetString(ordinal));
 }

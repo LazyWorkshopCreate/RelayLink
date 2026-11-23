@@ -50,8 +50,11 @@ public sealed class ProxyListenerTests
 
         await service.ApplyConfigurationAsync(Configuration("0.0.0.0", port), CancellationToken.None);
 
+        var listener = Assert.IsType<TcpListener>(service.ActiveTcpListener("agent", "test"));
+        Assert.Equal(new IPEndPoint(IPAddress.Any, port), listener.LocalEndpoint);
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
         using var caller = new TcpClient();
-        await caller.ConnectAsync(IPAddress.Parse("127.0.0.2"), port);
+        await caller.ConnectAsync(IPAddress.Loopback, port, deadline.Token);
         await service.StopAsync(CancellationToken.None);
     }
 

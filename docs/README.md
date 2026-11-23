@@ -3,21 +3,13 @@
 | 文档 | ID | 状态 | 用途 |
 |---|---|---|---|
 | [公开仓库同步](development/public-repository-sync.md) | DEV-007 | Active | 版本来源、脱敏和公开适配 |
-| [插件系统需求](requirements/2026-10-28-plugin-system.md) | REQ-001O | Draft | 服务端可视互访、跳板代理、应用标签、内置插件与桥应用，A92–A107；已实现部分与未来能力分别见 §6 和验证记录 |
-| [插件系统设计](design/plugin-system.md) | DES-009 | Draft | 两类可审计通道的数据路径、四种应用能力、凭据与本机唤起 |
-| [插件系统审查改进方案](development/plugin-system-improvement-plan.md) | DEV-006 | Active | 合并审查问题追踪、分批修复、依赖与验收记录 |
-| [服务端可审计通道](adr/0028-server-inspection-channels.md) | ADR-0028 | Proposed | 服务端分别终结两侧加密；不改既有端到端和 HTTP 反向代理 |
-| [应用插件与桥应用](adr/0029-application-plugins-and-bridge.md) | ADR-0029 | Proposed | 保留应用 tag、内置插件、秘密库和 `relaylink:` 唤起 |
-| [可审计连接生命周期](adr/0030-inspection-lifecycle-protocol.md) | ADR-0030 | Accepted | 协议 v7、阶段期限、pending/active 与兼容 |
-| [凭据变更与删除恢复](adr/0031-credential-mutation-and-deletion-recovery.md) | ADR-0031 | Accepted | 幂等回执、结果审计、故障范围与删除标记 |
-| [SSH 目标信任与动作门槛](adr/0032-ssh-target-trust-and-action-gates.md) | ADR-0032 | Accepted | 固定主机键、动作前审计与 channel 隔离 |
-| [HTTP 逐请求检查](adr/0033-http-inspection-request-boundaries.md) | ADR-0033 | Accepted | Kestrel/YARP、消息边界、升级与单次目标流 |
-| [插件改进验证](testing/plugin-system-remediation-verification.md) | TST-009 | Active | W01–W17 的批次、结果和平台边界 |
-| [HTTP 改进验证](testing/plugin-http-remediation.md) | TST-010 | Active | 逐请求策略、HTTP/HTTPS 双模式与计量 |
-| [SSH 改进验证](testing/plugin-ssh-remediation.md) | TST-011 | Active | 身份、审计门槛、channel 和资源限制 |
-| [生命周期改进验证](testing/plugin-lifecycle-remediation.md) | TST-012 | Active | 阶段期限、旧端兼容、流量和连接回收 |
-| [配置与凭据改进验证](testing/plugin-configuration-remediation.md) | TST-013 | Active | 路径往返、可用性、变更结果和故障恢复 |
-| [需求文档索引](requirements/README.md) | REQ-001A–REQ-001O | Draft / Accepted / Done | 按日期与主题拆分的需求范围、功能与验收；实现进度见验证状态 |
+| [Agent 本机页的系统工具入口](adr/0042-agent-native-tool-links.md) | ADR-0042 | Accepted | 使用浏览器链接、系统 SSH 和 RDP 连接文件 |
+| [AI 自动化与服务端管理 SDK 需求](requirements/2026-11-05-ai-automation-and-sdk.md) | REQ-001P | Draft | 供 AI agent 的 skill/CLI/API 经加密互访通道管理服务端并强制控制台授权，供第三方应用的六语言 SDK，A108–A119 |
+| [AI 自动化与第三方 SDK 设计](design/ai-automation-and-sdk.md) | DES-010 | Draft | 自动化监听与配对、设备绑定令牌、scope 与风险分级、变更申请、CLI/skill 合约、SDK 分层与语言基线 |
+| [AI 自动化经加密互访通道](adr/0035-ai-automation-over-peer-channel.md) | ADR-0035 | Proposed | 不新增公网管理入口；一次性配对 + 管理页面批准 + 短时设备绑定令牌 |
+| [AI 自动化与 SDK 验证](testing/ai-automation-verification.md) | TST-014 | Active | 自动化管理面、CLI、skill 与六语言 SDK 验证记录；明确列出未验证项 |
+| [第三方 SDK 面向入口](adr/0036-third-party-sdk-over-entries.md) | ADR-0036 | Proposed | 不开放 `NTP1` 协议；SDK 只连入口，管理面复用自动化 API（首期仅 .NET） |
+| [需求文档索引](requirements/README.md) | REQ-001A–REQ-001P | Draft / Accepted / Done | 按日期与主题拆分的需求范围、功能与验收；实现进度见验证状态 |
 | [HTTP/HTTPS 反向代理需求](requirements/2026-10-12-http-reverse-proxy.md) | REQ-001N | Accepted | 公网与加密互访 HTTP/HTTPS、目标 Agent Host/Origin 策略，A85–A91；证据与目标环境缺口见验证记录 |
 | [HTTP 反向代理设计与 YARP 评估](design/http-reverse-proxy.md) | DES-008 | Draft | 主线已实现的目标 Agent YARP 与虚拟入口；文首说明哪些章节仍是草案 |
 | [目标 Agent HTTP 与隧道复用](adr/0026-http-proxy-over-tcp-tunnels.md) | ADR-0026 | Accepted | 目标端统一处理 HTTP，公网 TLS 透传、互访保持加密；用户明确采用，实际证据见 HTTP 验证 |
@@ -71,8 +63,6 @@
 | [UDP 转发使用指南](operations/udp-forwarding.md) | OPS-002 | Active | UDP 版本要求、普通与授权入口、网络放行、报文和排障 |
 | [验证状态](testing/verification-status.md) | TST-001 | Active | 已执行检查与未完成验收证据 |
 | [2026-10-23 代码审查](testing/code-review-2026-10-23.md) | TST-006 | Active | 静态审查发现、严重级别与修改建议；本次未修改产品代码 |
-| [2026-10-31 插件系统审查](testing/code-review-2026-10-31.md) | TST-007 | Active | 插件系统与可审计通道实现的静态审查发现、严重级别与修改建议；本次未修改产品代码 |
-| [2026-10-31 插件系统独立审查](testing/plugin-system-independent-review-2026-10-31.md) | TST-008 | Active | 独立复现与代码核查发现、优先级、回归结果和未完成范围 |
 | [本地多场景验收方案](testing/local-acceptance-plan.md) | TST-002 | Active | 隔离启动、场景判定、运行记录与安全停止 |
 | [Agent 多服务端验收记录](testing/multi-server-agent-verification.md) | TST-003 | Active | REQ-001J 的自动化测试与 Windows Sandbox 安装验收证据 |
 | [对外介绍材料](intro/README.md) | DOC-001 | Active | 演示文稿与公众号文章的源文件、插图及重建脚本 |

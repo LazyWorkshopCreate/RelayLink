@@ -1,0 +1,21 @@
+{
+  "name": "@relaylink/sdk",
+  "version": "0.1.0",
+  "description": "RelayLink SDK 数据面：只面向入口，不实现中继协议，不持有中继密钥。",
+  "type": "module",
+  "main": "./dist/dataPlane.js",
+  "types": "./dist/dataPlane.d.ts",
+  "files": ["dist", "README.md"],
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "@types/node": "^22.0.0"
+  },
+  "dependencies": {},
+  "keywords": ["relaylink", "sdk", "tunnel"],
+  "license": "MIT"
+}

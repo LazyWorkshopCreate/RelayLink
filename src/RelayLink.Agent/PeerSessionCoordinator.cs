@@ -6,7 +6,6 @@ using System.Net.Security;
 using System.Net.Sockets;
 using System.Security.Authentication;
 using System.Security.Cryptography;
-using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using RelayLink.Protocol;
 using RelayLink.Transport;
@@ -23,18 +22,9 @@ internal sealed class PeerSessionCoordinator(
     CancellationToken sessionToken,
     HttpProxyRuntime? httpProxy = null,
     TimeSpan? halfCloseDrainTimeout = null,
-    TimeSpan? tcpIdleTimeout = null,
-    X509Certificate2Collection? trustedRoots = null,
-    TimeSpan? blockedWriteTimeout = null) : IAsyncDisposable
+    TimeSpan? tcpIdleTimeout = null) : IAsyncDisposable
 {
     private readonly ConcurrentDictionary<Guid, TaskCompletionSource<PeerOpenGrantedMessage>> requests = new();
-    private readonly ConcurrentDictionary<Guid, InspectionConnectionState> inspections = new();
-    public bool ActivateInspection(Guid connectionId)
-    {
-        if (!inspections.TryGetValue(connectionId, out var state)) return false;
-        state.Activate();
-        return true;
-    }
     private readonly Dictionary<string, LocalBinding> listeners = new(StringComparer.Ordinal);
     private readonly AgentPortAllocator ports = new(agent.PortStatePath, agent.OutboundPortRangeStart, agent.OutboundPortRangeEnd);
     private readonly ConcurrentDictionary<long, Task> active = new();
@@ -81,10 +71,6 @@ internal sealed class PeerSessionCoordinator(
                 return "application protocol must be raw or http";
             if (mapping.ApplicationProtocol == "http" && (mapping.TransportProtocol != "tcp" || mapping.Http is null))
                 return "http mappings require tcp and http options";
-            if (mapping.InspectionMode is not ("none" or "server-peer" or "server-jump") || mapping.Application is not (null or "ssh" or "rdp" or "http" or "https"))
-                return "inspection mode or application is invalid";
-            if (mapping.InspectionMode == "server-peer" && (mapping.TransportProtocol != "tcp" || mapping.Application is not ("ssh" or "rdp" or "http" or "https")))
-                return "server-peer mappings require tcp and an application";
         }
 
         return null;
@@ -100,7 +86,7 @@ internal sealed class PeerSessionCoordinator(
         }
 
         Volatile.Write(ref snapshot, configuration);
-        var wanted = configuration.OutboundMappings.Where(mapping => mapping.Enabled && (mapping.InspectionMode == "none" || mapping.InspectionMode == "server-peer" && mapping.TransportProtocol == "tcp")).ToDictionary(mapping => mapping.MappingId, StringComparer.Ordinal);
+        var wanted = configuration.OutboundMappings.Where(mapping => mapping.Enabled).ToDictionary(mapping => mapping.MappingId, StringComparer.Ordinal);
         foreach (var existing in listeners.Values.ToArray())
         {
             if (wanted.TryGetValue(existing.Mapping.MappingId, out var updated) && updated == existing.Mapping) continue;
@@ -145,7 +131,7 @@ internal sealed class PeerSessionCoordinator(
     {
         if (open.SessionId != sessionId) throw new ProtocolException("Peer open has wrong session ID.");
         var current = Volatile.Read(ref snapshot);
-        var channel = current.Channels.SingleOrDefault(candidate => candidate.ChannelId == open.ChannelId && candidate.Enabled && candidate.AuthorizedClientsOnly && candidate.InspectionMode is "none" or "server-peer");
+        var channel = current.Channels.SingleOrDefault(candidate => candidate.ChannelId == open.ChannelId && candidate.Enabled && candidate.AuthorizedClientsOnly);
         if (channel is null) return;
         var lease = quota.TryAcquirePending();
         if (lease is null)
@@ -239,21 +225,6 @@ internal sealed class PeerSessionCoordinator(
                 deadline.CancelAfter(PeerSetupDeadline(grant.SetupTimeoutMilliseconds, 0));
                 if (grant.TransportProtocol != mapping.TransportProtocol) throw new ProtocolException("Peer transport changed; wait for updated configuration.");
                 await using var connection = await ConnectDataAsync(grant.ConnectionId, grant.SessionId, grant.Token, "caller", deadline.Token);
-                if (mapping.InspectionMode == "server-peer" || grant.InspectionMode == "server-peer")
-                {
-                    if (mapping.InspectionMode != "server-peer" || grant.InspectionMode != "server-peer" || mapping.TransportProtocol != "tcp" ||
-                        mapping.Application is not ("ssh" or "rdp" or "http" or "https"))
-                        throw new ProtocolException("Inspection peer mode mismatch.");
-                    using var state = new InspectionConnectionState(lease, sessionToken, grant.InspectionWaitTimeoutMilliseconds);
-                    inspections[grant.ConnectionId] = state;
-                    try
-                    {
-                        await using var inspectionTls = await ProveInspectionCallerAsync(connection.Framed, mapping, grant, deadline.Token);
-                        await RelayInspectionAsync(caller!, inspectionTls, state.Token, state.Touch);
-                    }
-                    finally { inspections.TryRemove(grant.ConnectionId, out _); }
-                    return;
-                }
                 using var tls = grant.EndToEndEncryptionEnabled ? new SslStream(connection.Framed, leaveInnerStreamOpen: true) : null;
                 Stream peerStream = connection.Framed;
                 if (tls is not null)
@@ -299,41 +270,17 @@ internal sealed class PeerSessionCoordinator(
     private async Task HandleTargetAsync(PeerOpenMessage open, AgentConnectionQuota.Lease lease)
     {
         var current = Volatile.Read(ref snapshot);
-        var channel = current.Channels.SingleOrDefault(candidate => candidate.ChannelId == open.ChannelId && candidate.Enabled && candidate.AuthorizedClientsOnly && candidate.InspectionMode is "none" or "server-peer");
-        if (channel is null || channel.InspectionMode != open.InspectionMode || string.IsNullOrWhiteSpace(channel.AccessSecret) || channel.EndToEndEncryptionEnabled != open.EndToEndEncryptionEnabled || channel.TransportProtocol != open.TransportProtocol) return;
+        var channel = current.Channels.SingleOrDefault(candidate => candidate.ChannelId == open.ChannelId && candidate.Enabled && candidate.AuthorizedClientsOnly);
+        if (channel is null || string.IsNullOrWhiteSpace(channel.AccessSecret) || channel.EndToEndEncryptionEnabled != open.EndToEndEncryptionEnabled || channel.TransportProtocol != open.TransportProtocol) return;
         if (channel.ApplicationProtocol == "http" && (!agent.UseTls || !open.EndToEndEncryptionEnabled || httpProxy is null || !httpProxy.IsReady(channel) ||
             open.HttpIngress is null || open.HttpIngress.AccessKind != "peer" || open.HttpIngress.CallerClientId != open.CallerClientId ||
             open.HttpIngress.PolicyHash != HttpProxyPolicy.Hash(channel) || open.HttpIngress.Scheme != channel.Http!.PeerEntryScheme)) return;
         if (channel.ApplicationProtocol != "http" && open.HttpIngress is not null) return;
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(sessionToken);
         deadline.CancelAfter(PeerSetupDeadline(open.SetupTimeoutMilliseconds, channel.TargetConnectTimeoutSeconds));
-        var inspectionTargetConnected = false;
         try
         {
             await using var connection = await ConnectDataAsync(open.ConnectionId, open.SessionId, open.Token, "target", deadline.Token);
-            if (channel.InspectionMode == "server-peer")
-            {
-                if (channel.TransportProtocol != "tcp" || channel.Application is not ("ssh" or "rdp" or "http" or "https"))
-                    throw new ProtocolException("Inspection target channel is invalid.");
-                using var state = new InspectionConnectionState(lease, sessionToken, open.InspectionWaitTimeoutMilliseconds);
-                inspections[open.ConnectionId] = state;
-                try
-                {
-                    await using var inspectionTls = await ProveInspectionTargetAsync(connection.Framed, channel, open, deadline.Token, state.Token);
-                    using var business = new TcpClient();
-                    using var businessDeadline = CancellationTokenSource.CreateLinkedTokenSource(state.Token);
-                    businessDeadline.CancelAfter(TimeSpan.FromSeconds(channel.TargetConnectTimeoutSeconds));
-                    var connecting = Stopwatch.GetTimestamp();
-                    await business.ConnectAsync(channel.TargetHost, channel.TargetPort, businessDeadline.Token);
-                    inspectionTargetConnected = true;
-                    await controlWriter.WriteAsync(new Frame(FrameType.InspectionTargetReady, JsonProtocolSerializer.Serialize(
-                        new InspectionTargetReadyMessage(sessionId, open.ConnectionId, (int)Stopwatch.GetElapsedTime(connecting).TotalMilliseconds))), state.Token);
-                    // The leg must carry upstream authentication before the final active notification.
-                    await RelayInspectionAsync(business.Client, inspectionTls, state.Token, state.Touch);
-                }
-                finally { inspections.TryRemove(open.ConnectionId, out _); }
-                return;
-            }
             using var tls = open.EndToEndEncryptionEnabled ? new SslStream(connection.Framed, leaveInnerStreamOpen: true) : null;
             Stream peerStream = connection.Framed;
             if (tls is not null)
@@ -387,12 +334,6 @@ internal sealed class PeerSessionCoordinator(
         catch (Exception exception) when (exception is IOException or SocketException or OperationCanceledException or AuthenticationException or ProtocolException)
         {
             logger.LogWarning(exception, "Peer target connection for {ChannelId} ended.", open.ChannelId);
-            if (channel.InspectionMode == "server-peer" && !inspectionTargetConnected && !sessionToken.IsCancellationRequested)
-            {
-                try { await controlWriter.WriteAsync(new Frame(FrameType.OpenFailed, JsonProtocolSerializer.Serialize(new OpenFailedMessage(sessionId, open.ConnectionId,
-                    exception is OperationCanceledException ? ErrorCode.TargetConnectTimeout : ErrorCode.TargetConnectFailed))), sessionToken); }
-                catch (Exception failure) when (failure is IOException or OperationCanceledException or ObjectDisposedException) { }
-            }
         }
     }
 
@@ -413,74 +354,6 @@ internal sealed class PeerSessionCoordinator(
             return new PeerDataConnection(client, transport, new FramedDuplexStream(reader, writer));
         }
         catch { client.Dispose(); throw; }
-    }
-
-    private async Task<SslStream> ProveInspectionCallerAsync(FramedDuplexStream framed, OutboundMappingSnapshot mapping, PeerOpenGrantedMessage grant, CancellationToken cancellationToken)
-    {
-        var tls = new SslStream(framed, leaveInnerStreamOpen: true);
-        try
-        {
-            await tls.AuthenticateAsClientAsync(InspectionClientOptions(), cancellationToken);
-            if (!tls.IsEncrypted) throw new AuthenticationException("Inspection TLS is not encrypted.");
-            var challenge = new byte[32];
-            await tls.ReadExactlyAsync(challenge, cancellationToken);
-            await tls.WriteAsync(InspectionProof.Compute(mapping.AccessSecret, "caller", agent.ClientId, mapping.TargetChannelId, grant.ConnectionId, challenge), cancellationToken);
-            var status = new byte[1];
-            await tls.ReadExactlyAsync(status, cancellationToken);
-            if (status[0] != 1) throw new IOException("Inspection peer was not allowed.");
-            return tls;
-        }
-        catch { tls.Dispose(); throw; }
-    }
-
-    private async Task<SslStream> ProveInspectionTargetAsync(FramedDuplexStream framed, ChannelSnapshot channel, PeerOpenMessage open, CancellationToken cancellationToken, CancellationToken waitToken)
-    {
-        var tls = new SslStream(framed, leaveInnerStreamOpen: true);
-        try
-        {
-            await tls.AuthenticateAsClientAsync(InspectionClientOptions(), cancellationToken);
-            if (!tls.IsEncrypted) throw new AuthenticationException("Inspection TLS is not encrypted.");
-            var challenge = RandomNumberGenerator.GetBytes(32);
-            await tls.WriteAsync(challenge, cancellationToken);
-            var provided = new byte[32];
-            await tls.ReadExactlyAsync(provided, cancellationToken);
-            var expected = InspectionProof.Compute(channel.AccessSecret!, "target", open.CallerClientId, channel.ChannelId, open.ConnectionId, challenge);
-            if (!CryptographicOperations.FixedTimeEquals(provided, expected)) throw new AuthenticationException("Server inspection proof was invalid.");
-            var status = new byte[1];
-            await tls.ReadExactlyAsync(status, waitToken);
-            if (status[0] != 1) throw new IOException("Inspection peer was not allowed.");
-            return tls;
-        }
-        catch { tls.Dispose(); throw; }
-    }
-
-    private async Task RelayInspectionAsync(Socket socket, SslStream tls, CancellationToken cancellationToken, Action activity)
-    {
-        using var relayCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        using var termination = relayCancellation.Token.Register(() => socket.Dispose());
-        TcpKeepAlive.Enable(socket);
-        var toServer = RelayPump.CopySocketToStreamAsync(socket, tls, relayCancellation.Token, _ => activity(), blockedWriteTimeout);
-        var toSocket = RelayPump.CopyStreamToSocketAsync(tls, socket, relayCancellation.Token, _ => activity(), blockedWriteTimeout);
-        await RelayPump.CompleteBidirectionalAsync(toServer, toSocket, () => { relayCancellation.Cancel(); socket.Dispose(); }, halfCloseDrainTimeout ?? TimeSpan.FromSeconds(300));
-    }
-
-    private SslClientAuthenticationOptions InspectionClientOptions() => new()
-    {
-        TargetHost = agent.ServerHost,
-        EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
-        CertificateRevocationCheckMode = X509RevocationMode.Online,
-        RemoteCertificateValidationCallback = ValidateInspectionServerCertificate
-    };
-
-    private bool ValidateInspectionServerCertificate(object? sender, X509Certificate? certificate, X509Chain? chain, SslPolicyErrors errors)
-    {
-        if (trustedRoots is null || certificate is null || (errors & SslPolicyErrors.RemoteCertificateNameMismatch) != 0) return false;
-        using var leaf = new X509Certificate2(certificate);
-        using var customChain = new X509Chain();
-        customChain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
-        customChain.ChainPolicy.CustomTrustStore.AddRange(trustedRoots);
-        customChain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
-        return customChain.Build(leaf);
     }
 
     internal static byte[] ComputeProof(string base64Secret, string callerId, string channelId, Guid connectionId, bool encryptionEnabled, byte[] challenge, HttpIngressContext? httpIngress = null)

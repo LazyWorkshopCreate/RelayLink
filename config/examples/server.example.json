@@ -50,5 +50,15 @@
     "blockedWriteTimeoutSeconds": 120,
     "halfCloseDrainTimeoutSeconds": 300,
     "tcpIdleTimeoutSeconds": 900
+  },
+  "automation": {
+    "enabled": false,
+    "listenAddress": "127.0.0.1",
+    "port": 18082,
+    "certificatePemPath": "/etc/relaylink/tls/automation-fullchain.pem",
+    "privateKeyPemPath": "/etc/relaylink/tls/automation-privkey.pem",
+    "sessionLifetimeMinutes": 120,
+    "maxPendingPairings": 8,
+    "maxAuthorizations": 16
   }
 }

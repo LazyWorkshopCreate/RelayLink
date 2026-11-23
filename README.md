@@ -19,6 +19,7 @@ Server 兼容 v3 Agent 的 TCP 连接，可先升级服务端；UDP 需要相关
 - 控制连接与按业务连接建立的数据隧道使用独立服务端端口。控制连接默认使用 TLS；普通代理数据通道完成绑定后直接复制原始 TCP 字节，不提供链路加密。客户端授权互访要求控制 TLS；Agent 间业务流默认建立内层 TLS，关闭通道加密后则以明文中继。
 - 服务端管理页面支持匿名只读查看状态、通道和流量历史；管理员登录后可管理客户端、通道、访问映射及普通通道的来源 IP 安全组，并查看登录与连接生命周期审计日志。
 - Agent 提供本机状态页，展示通道和可用的访问方地址，并通过导入服务端 JSON 新增或修改连接项；连接项可停用、重新启用或删除。Windows 使用 Windows Service，Linux 使用 systemd，macOS 使用 launchd 托管。
+- Agent 本机页可打开 HTTP/HTTPS 互访 URL。普通 TCP 互访入口提供系统 SSH 链接和可复制的 SSH 命令，Windows 用户也可下载远程桌面连接文件。参见[从 Agent 本机页连接互访入口](docs/operations/installation-and-usage.md#71-从-agent-本机页连接互访入口)。
 
 ## 组成与边界
 

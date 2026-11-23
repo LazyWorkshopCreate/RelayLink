@@ -129,8 +129,13 @@ public sealed class DatagramSession(IPEndPoint source, UdpClient listener) : IDi
 public sealed class DatagramListener(UdpClient listenerSocket)
 {
     private readonly UdpClient socket = DatagramRelay.PrepareSocket(listenerSocket);
+    private int stopping;
     public int Port => ((IPEndPoint)socket.Client.LocalEndPoint!).Port;
-    public void Stop() => socket.Dispose();
+
+    public void Stop()
+    {
+        if (Interlocked.Exchange(ref stopping, 1) == 0) socket.Dispose();
+    }
 
     public async Task RunAsync(int maxSessions, Func<IPEndPoint, bool> allowed,
         Func<DatagramSession, Task> handle, CancellationToken token, Action<Exception>? onHandlerFailed = null, Action? onDatagramDropped = null)
@@ -181,7 +186,7 @@ public sealed class DatagramListener(UdpClient listenerSocket)
             }
         }
         catch (ObjectDisposedException) { }
-        catch (SocketException) when (token.IsCancellationRequested || socket.Client is null) { }
+        catch (SocketException) when (token.IsCancellationRequested || Volatile.Read(ref stopping) != 0 || socket.Client is null) { }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { }
         finally
         {

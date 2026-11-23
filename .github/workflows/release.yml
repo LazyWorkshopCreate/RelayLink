@@ -3,6 +3,12 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Existing release notes tag for the package rehearsal
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -14,6 +20,7 @@ concurrency:
 jobs:
   prepare:
     name: Validate version tag
+    if: github.repository == 'LazyWorkshopCreate/RelayLink' && !github.event.repository.private
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
@@ -24,7 +31,7 @@ jobs:
       - name: Parse version
         id: version
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ inputs.version || github.ref_name }}
         run: |
           if [[ ! "$RELEASE_TAG" =~ ^v([0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.-]+)?)$ ]]; then
             echo "Expected a version tag such as v1.2.3 or v1.2.3-rc.1" >&2
@@ -33,7 +40,7 @@ jobs:
           echo "version=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
       - name: Validate release notes
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ inputs.version || github.ref_name }}
         run: |
           notes_file="docs/releases/${RELEASE_TAG}.md"
           if [[ ! -s "$notes_file" ]]; then
@@ -50,9 +57,12 @@ jobs:
 
   package-linux:
     name: Package Linux Server and Agent
-    needs: [prepare, verify]
+    needs: prepare
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    outputs:
+      server-artifact: ${{ steps.server-artifact.outputs.artifact-id }}
+      agent-artifact: ${{ steps.agent-artifact.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -60,7 +70,7 @@ jobs:
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         id: dotnet
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: 10.0.404
           dotnet-quality: ga
       - name: Select stable .NET SDK
         run: dotnet new globaljson --sdk-version "${{ steps.dotnet.outputs.dotnet-version }}" --roll-forward disable
@@ -73,15 +83,20 @@ jobs:
           version: 11.19.0
           run_install: false
       - name: Install frontend dependencies
-        run: pnpm --dir src/RelayLink.AdminWeb install --frozen-lockfile
+        env:
+          RELAYLINK_PNPM_STORE: ${{ runner.tool_cache }}/relaylink-pnpm-store
+        run: pnpm --dir src/RelayLink.AdminWeb install --frozen-lockfile --prefer-offline --store-dir "$RELAYLINK_PNPM_STORE"
       - name: Install Agent frontend dependencies
-        run: pnpm --dir src/RelayLink.AgentWeb install --frozen-lockfile
+        env:
+          RELAYLINK_PNPM_STORE: ${{ runner.tool_cache }}/relaylink-pnpm-store
+        run: pnpm --dir src/RelayLink.AgentWeb install --frozen-lockfile --prefer-offline --store-dir "$RELAYLINK_PNPM_STORE"
       - name: Restore Server for linux-x64
         run: dotnet restore src/RelayLink.Server/RelayLink.Server.csproj --runtime linux-x64 --configfile NuGet.Config
       - name: Publish self-contained Server
         run: dotnet publish src/RelayLink.Server/RelayLink.Server.csproj --configuration Release --runtime linux-x64 --self-contained true --no-restore --output artifacts/publish/linux-x64/RelayLink.Server
       - name: Publish self-contained Agent
-        run: pwsh ./scripts/publish.ps1 -RuntimeIdentifier linux-x64 -Component Agent
+        run: |
+          bash scripts/publish-agent-unix.sh linux-x64
       - name: Archive Server
         env:
           RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
@@ -95,24 +110,26 @@ jobs:
         run: |
           test -f artifacts/publish/linux-x64/RelayLink.Agent/wwwroot/index.html
           tar -C artifacts/publish/linux-x64/RelayLink.Agent -czf "artifacts/release/RelayLink-Agent-linux-x64-${RELEASE_VERSION}.tar.gz" .
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      - uses: ./.github/actions/upload-release-artifact
+        id: server-artifact
         with:
           name: release-server-linux-x64
           path: artifacts/release/RelayLink-Server-linux-x64-*.tar.gz
-          if-no-files-found: error
-          retention-days: 7
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      - uses: ./.github/actions/upload-release-artifact
+        id: agent-artifact
         with:
           name: release-agent-linux-x64
           path: artifacts/release/RelayLink-Agent-linux-x64-*.tar.gz
-          if-no-files-found: error
-          retention-days: 7
 
   package-windows:
     name: Package Windows Server and Agent
-    needs: [prepare, verify]
+    needs: prepare
     runs-on: windows-latest
     timeout-minutes: 40
+    outputs:
+      server-artifact: ${{ steps.server-artifact.outputs.artifact-id }}
+      programs-artifact: ${{ steps.programs-artifact.outputs.artifact-id }}
+      installers-artifact: ${{ steps.installers-artifact.outputs.artifact-id }}
     defaults:
       run:
         shell: pwsh
@@ -123,7 +140,7 @@ jobs:
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         id: dotnet
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: 10.0.404
           dotnet-quality: ga
       - name: Select stable .NET SDK
         run: dotnet new globaljson --sdk-version "${{ steps.dotnet.outputs.dotnet-version }}" --roll-forward disable
@@ -136,9 +153,13 @@ jobs:
           version: 11.19.0
           run_install: false
       - name: Install frontend dependencies
-        run: pnpm --dir src/RelayLink.AdminWeb install --frozen-lockfile
+        env:
+          RELAYLINK_PNPM_STORE: ${{ runner.tool_cache }}/relaylink-pnpm-store
+        run: pnpm --dir src/RelayLink.AdminWeb install --frozen-lockfile --prefer-offline --store-dir "$env:RELAYLINK_PNPM_STORE"
       - name: Install Agent frontend dependencies
-        run: pnpm --dir src/RelayLink.AgentWeb install --frozen-lockfile
+        env:
+          RELAYLINK_PNPM_STORE: ${{ runner.tool_cache }}/relaylink-pnpm-store
+        run: pnpm --dir src/RelayLink.AgentWeb install --frozen-lockfile --prefer-offline --store-dir "$env:RELAYLINK_PNPM_STORE"
       - name: Publish self-contained Server
         run: ./scripts/publish.ps1 -RuntimeIdentifier win-x64 -Component Server
       - name: Archive Server
@@ -152,44 +173,60 @@ jobs:
         run: |
           $installer = Join-Path $env:RUNNER_TEMP 'innosetup-6.7.3.exe'
           $compilerDirectory = Join-Path $env:RUNNER_TEMP 'InnoSetup'
-          Invoke-WebRequest -Uri 'https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-6.7.3.exe' -OutFile $installer
+          $installerLog = Join-Path $env:RUNNER_TEMP 'relaylink-inno-install.log'
+          $downloadUri = 'https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-6.7.3.exe'
+          for ($attempt = 1; ; $attempt++) {
+            try {
+              Invoke-WebRequest -Uri $downloadUri -OutFile $installer -ConnectionTimeoutSeconds 30 -OperationTimeoutSeconds 60 -ErrorAction Stop
+              break
+            } catch {
+              if ($attempt -eq 3) { throw }
+              Write-Warning "Inno Setup download attempt $attempt failed: $_"
+              Start-Sleep -Seconds (2 * $attempt)
+            }
+          }
           $expectedHash = '9C73C3BAE7ED48D44112A0F48E66742C00090BDB5BEF71D9D3C056C66E97B732'
           $actualHash = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash
           if ($actualHash -ne $expectedHash) { throw "Inno Setup installer SHA-256 mismatch: $actualHash" }
           $signature = Get-AuthenticodeSignature -LiteralPath $installer
           if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'CN=Pyrsys B\.V\.') { throw 'Inno Setup publisher signature verification failed.' }
-          $process = Start-Process -FilePath $installer -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/PORTABLE=1', "/DIR=$compilerDirectory") -Wait -PassThru -WindowStyle Hidden
-          if ($process.ExitCode -ne 0) { throw "Inno Setup installation failed: $($process.ExitCode)" }
+          $arguments = @('/SP-', '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/PORTABLE=1', '/CURRENTUSER',
+              ('/DIR="{0}"' -f $compilerDirectory), ('/LOG="{0}"' -f $installerLog))
+          $process = Start-Process -FilePath $installer -ArgumentList $arguments -Wait -PassThru -WindowStyle Hidden
+          if ($process.ExitCode -ne 0) {
+            if (Test-Path -LiteralPath $installerLog) { Get-Content -LiteralPath $installerLog -Tail 20 }
+            throw "Inno Setup installation failed: $($process.ExitCode)"
+          }
           if (-not (Test-Path -LiteralPath (Join-Path $compilerDirectory 'ISCC.exe'))) { throw 'ISCC.exe was not installed.' }
           "INNO_COMPILER=$(Join-Path $compilerDirectory 'ISCC.exe')" >> $env:GITHUB_ENV
       - name: Build both Agent installers and program variants
         env:
           RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
         run: ./scripts/build-agent-installer.ps1 -Version $env:RELEASE_VERSION -InnoCompiler $env:INNO_COMPILER -PublishRoot artifacts/publish/windows-agent
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      - uses: ./.github/actions/upload-release-artifact
+        id: server-artifact
         with:
           name: release-server-win-x64
           path: artifacts/release/RelayLink-Server-win-x64-*.zip
-          if-no-files-found: error
-          retention-days: 7
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      - uses: ./.github/actions/upload-release-artifact
+        id: programs-artifact
         with:
           name: release-agent-program-win-x64
           path: artifacts/release/RelayLink-Agent-win-x64-*.zip
-          if-no-files-found: error
-          retention-days: 7
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      - uses: ./.github/actions/upload-release-artifact
+        id: installers-artifact
         with:
           name: release-agent-installers-win-x64
           path: artifacts/installer/RelayLink-Agent-win-x64-*.exe
-          if-no-files-found: error
-          retention-days: 7
 
   package-macos:
     name: Package macOS Agents
-    needs: [prepare, verify]
-    runs-on: macos-latest
+    needs: prepare
+    runs-on: macos-15
     timeout-minutes: 30
+    outputs:
+      intel-artifact: ${{ steps.intel-artifact.outputs.artifact-id }}
+      arm64-artifact: ${{ steps.arm64-artifact.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -197,7 +234,7 @@ jobs:
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         id: dotnet
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: 10.0.404
           dotnet-quality: ga
       - name: Select stable .NET SDK
         run: dotnet new globaljson --sdk-version "${{ steps.dotnet.outputs.dotnet-version }}" --roll-forward disable
@@ -210,39 +247,69 @@ jobs:
           version: 11.19.0
           run_install: false
       - name: Install Agent frontend dependencies
-        run: pnpm --dir src/RelayLink.AgentWeb install --frozen-lockfile
-      - name: Publish Intel Agent
-        run: pwsh ./scripts/publish.ps1 -RuntimeIdentifier osx-x64 -Component Agent
-      - name: Publish Apple Silicon Agent
-        run: pwsh ./scripts/publish.ps1 -RuntimeIdentifier osx-arm64 -Component Agent
+        env:
+          RELAYLINK_PNPM_STORE: ${{ runner.tool_cache }}/relaylink-pnpm-store
+        run: pnpm --dir src/RelayLink.AgentWeb install --frozen-lockfile --prefer-offline --store-dir "$RELAYLINK_PNPM_STORE"
+      - name: Publish Intel and Apple Silicon Agents
+        run: |
+          bash scripts/publish-agent-unix.sh osx-x64
+          bash scripts/publish-agent-unix.sh osx-arm64
       - name: Archive Agents
         env:
           RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
         run: |
-          test -f artifacts/publish/osx-x64/RelayLink.Agent/wwwroot/index.html
-          test -f artifacts/publish/osx-arm64/RelayLink.Agent/wwwroot/index.html
+          bash scripts/check-macos-agent-package.sh artifacts/publish/osx-x64/RelayLink.Agent x86_64
+          bash scripts/check-macos-agent-package.sh artifacts/publish/osx-arm64/RelayLink.Agent arm64
           mkdir -p artifacts/release
           tar -C artifacts/publish/osx-x64/RelayLink.Agent -czf "artifacts/release/RelayLink-Agent-osx-x64-${RELEASE_VERSION}.tar.gz" .
           tar -C artifacts/publish/osx-arm64/RelayLink.Agent -czf "artifacts/release/RelayLink-Agent-osx-arm64-${RELEASE_VERSION}.tar.gz" .
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      - uses: ./.github/actions/upload-release-artifact
+        id: intel-artifact
         with:
           name: release-agent-osx-x64
           path: artifacts/release/RelayLink-Agent-osx-x64-*.tar.gz
-          if-no-files-found: error
-          retention-days: 7
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      - uses: ./.github/actions/upload-release-artifact
+        id: arm64-artifact
         with:
           name: release-agent-osx-arm64
           path: artifacts/release/RelayLink-Agent-osx-arm64-*.tar.gz
-          if-no-files-found: error
-          retention-days: 7
 
-  # Windows installers and macOS archives stay unsigned. This repository has no
-  # signing certificate or notarization secret; do not imply a signature until a
-  # later job reads that material from the environment and replaces these assets.
+  verify-assets:
+    name: Verify assembled release assets
+    needs: [prepare, package-linux, package-windows, package-macos]
+    runs-on: ubuntu-latest
+    outputs:
+      artifact-id: ${{ steps.verified-assets.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: >-
+            ${{ needs.package-linux.outputs.server-artifact }},
+            ${{ needs.package-linux.outputs.agent-artifact }},
+            ${{ needs.package-windows.outputs.server-artifact }},
+            ${{ needs.package-windows.outputs.programs-artifact }},
+            ${{ needs.package-windows.outputs.installers-artifact }},
+            ${{ needs.package-macos.outputs.intel-artifact }},
+            ${{ needs.package-macos.outputs.arm64-artifact }}
+          path: release-assets
+          merge-multiple: true
+      - name: Check assets and generate checksums
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: bash .github/scripts/check-release-assets.sh release-assets "$RELEASE_VERSION"
+      - uses: ./.github/actions/upload-release-artifact
+        id: verified-assets
+        with:
+          name: verified-release-assets
+          path: release-assets/
+
   publish:
     name: Publish GitHub Release
-    needs: [prepare, package-linux, package-windows, package-macos]
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: [verify, verify-assets]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -252,22 +319,15 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          pattern: release-*
+          artifact-ids: ${{ needs.verify-assets.outputs.artifact-id }}
           path: release-assets
-          merge-multiple: true
-      - name: Check assets and publish
+      - name: Check transferred assets and publish
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          shopt -s nullglob
-          assets=(release-assets/*)
-          if (( ${#assets[@]} != 9 )); then
-            echo "Expected nine release assets including both Windows Agent program and installer variants; found ${#assets[@]}" >&2
-            exit 1
-          fi
-          sha256sum "${assets[@]}" | sed 's#release-assets/##' > release-assets/SHA256SUMS
+          (cd release-assets && sha256sum --check SHA256SUMS)
           notes_file="docs/releases/${RELEASE_TAG}.md"
           test -s "$notes_file"
           release_flags=()

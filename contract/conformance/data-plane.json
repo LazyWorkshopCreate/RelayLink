@@ -1,0 +1,67 @@
+{
+  "$id": "relaylink-conformance-v1",
+  "description": "与语言无关的数据面行为用例。各语言 SDK 测试运行器读同一批 JSON，保证语义一致而不只是字段一致。",
+  "version": 1,
+  "cases": [
+    {
+      "id": "entry-descriptor-rejects-empty-host",
+      "area": "entry",
+      "input": { "host": "", "port": 8080 },
+      "expect": { "error": "invalid_usage" }
+    },
+    {
+      "id": "entry-descriptor-rejects-port-range",
+      "area": "entry",
+      "input": { "host": "127.0.0.1", "port": 70000 },
+      "expect": { "error": "invalid_usage" }
+    },
+    {
+      "id": "entry-endpoint-string",
+      "area": "entry",
+      "input": { "host": "127.0.0.1", "port": 20001 },
+      "expect": { "endpoint": "127.0.0.1:20001" }
+    },
+    {
+      "id": "tcp-connect-refused-maps-to-entry-unavailable",
+      "area": "tcp",
+      "input": { "host": "127.0.0.1", "port": 1 },
+      "expect": { "error": "entry_unavailable" }
+    },
+    {
+      "id": "tcp-rejects-non-tcp-transport",
+      "area": "tcp",
+      "input": { "host": "127.0.0.1", "port": 20001, "transport": "udp" },
+      "expect": { "error": "invalid_usage" }
+    },
+    {
+      "id": "udp-rejects-non-udp-transport",
+      "area": "udp",
+      "input": { "host": "127.0.0.1", "port": 20001, "transport": "tcp" },
+      "expect": { "error": "invalid_usage" }
+    },
+    {
+      "id": "udp-rejects-oversized-datagram",
+      "area": "udp",
+      "input": { "size": 70000 },
+      "expect": { "error": "invalid_usage", "note": "SDK 不得静默截断报文。" }
+    },
+    {
+      "id": "discovery-rejects-invalid-dashboard-port",
+      "area": "discovery",
+      "input": { "dashboardPort": 0 },
+      "expect": { "error": "invalid_usage" }
+    },
+    {
+      "id": "discovery-unreachable-agent",
+      "area": "discovery",
+      "input": { "dashboardPort": 1 },
+      "expect": { "error": "entry_unavailable" }
+    },
+    {
+      "id": "sdk-must-not-hold-relay-keys",
+      "area": "invariant",
+      "input": {},
+      "expect": { "note": "SDK 的公开 API 不得出现客户端密钥、通道访问密钥、绑定令牌或凭据明文；由依赖清单审查与抓包共同验证。" }
+    }
+  ]
+}

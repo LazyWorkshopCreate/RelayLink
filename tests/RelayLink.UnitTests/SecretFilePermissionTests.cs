@@ -69,6 +69,7 @@ public sealed class SecretFilePermissionTests
         var temporary = Path.GetTempPath();
         var temporaryMode = File.GetUnixFileMode(temporary);
         var temporaryDatabase = Path.Combine(temporary, $"relaylink-audit-{Guid.NewGuid():N}.db");
+        var shared = Directory.CreateTempSubdirectory("relaylink-open-").FullName;
         try
         {
             var refused = Assert.Throws<InvalidOperationException>(() => SecretFilePermissions.PrepareDatabase(temporaryDatabase));
@@ -77,7 +78,6 @@ public sealed class SecretFilePermissionTests
             Assert.False(File.Exists(temporaryDatabase));
             Assert.Equal(temporaryMode, File.GetUnixFileMode(temporary));
 
-            var shared = Directory.CreateTempSubdirectory("relaylink-open-").FullName;
             var mode = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute
                 | UnixFileMode.GroupRead | UnixFileMode.GroupWrite | UnixFileMode.GroupExecute
                 | UnixFileMode.OtherRead | UnixFileMode.OtherWrite | UnixFileMode.OtherExecute
@@ -89,11 +89,11 @@ public sealed class SecretFilePermissionTests
             Assert.Contains("not changed", exception.Message, StringComparison.OrdinalIgnoreCase);
             Assert.False(File.Exists(database));
             Assert.Equal(mode, File.GetUnixFileMode(shared));
-            Directory.Delete(shared, recursive: true);
         }
         finally
         {
             if (File.Exists(temporaryDatabase)) File.Delete(temporaryDatabase);
+            Directory.Delete(shared, recursive: true);
         }
     }
 

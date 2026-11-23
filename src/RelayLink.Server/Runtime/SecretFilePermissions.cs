@@ -92,10 +92,6 @@ internal static class SecretFilePermissions
             yield return Path.GetDirectoryName(database)!;
         }
 
-        var credentials = CredentialStore.DirectoryFor(serverConfigurationPath);
-        yield return credentials;
-        yield return Path.Combine(credentials, "key");
-        yield return Path.Combine(credentials, "store");
     }
 
     public static IReadOnlyList<string> FindLoose(IEnumerable<string> paths)
@@ -115,7 +111,11 @@ internal static class SecretFilePermissions
     private static void ProtectIfExists(string path)
     {
         if (!File.Exists(path) && !IsLink(path)) return;
-        ProtectFile(ResolveDatabaseFile(path), path);
+        try { ProtectFile(ResolveDatabaseFile(path), path); }
+        catch (FileNotFoundException) when (!File.Exists(path) && !IsLink(path))
+        {
+            // SQLite can remove WAL/SHM between the existence check and ACL update.
+        }
     }
 
     private static void ProtectFile(string file, string requested)
@@ -130,43 +130,38 @@ internal static class SecretFilePermissions
     internal static string ResolveDatabaseFile(string path)
     {
         var full = Path.GetFullPath(path);
-        var root = Path.GetPathRoot(full);
-        if (string.IsNullOrEmpty(root))
-            throw Refusal(path, full, "the path has no root");
-        var rest = full[root.Length..].TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        if (rest.Length == 0)
+        var directory = Path.GetDirectoryName(full);
+        if (directory is null)
             throw Refusal(path, full, "the path is the filesystem root");
-        var segments = rest.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var name = Path.GetFileName(full);
+        if (name.Length == 0)
+            throw Refusal(path, full, "the path has no file name");
+
+        var parent = ResolveDirectory(directory, path);
+        var file = Path.Combine(parent, name);
+        if (IsLink(file))
+            throw Refusal(path, file, "the database path is a symbolic link");
+        if (IsFilesystemRoot(parent))
+            throw Refusal(path, file, "the database resolves under the filesystem root");
+        if (Directory.Exists(file))
+            throw Refusal(path, file, "the database path is a directory");
+        return file;
+    }
+
+    private static string ResolveDirectory(string full, string requested)
+    {
+        var root = Path.GetPathRoot(full)!;
         var current = root;
-        for (var index = 0; index < segments.Length; index++)
+        foreach (var segment in full[root.Length..].Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))
         {
-            var segment = segments[index];
-            if (segment.Length == 0 || segment == ".") continue;
+            if (segment.Length == 0) continue;
             var next = Path.Combine(current, segment);
-            var final = index == segments.Length - 1;
-            if (IsLink(next))
-            {
-                if (final)
-                    throw Refusal(path, next, "the database path is a symbolic link");
-                next = FollowDirectoryLink(next, path);
-            }
-
-            if (!final)
-            {
-                if (File.Exists(next) && !Directory.Exists(next))
-                    throw Refusal(path, next, "a parent path is a file");
-                current = next;
-                continue;
-            }
-
-            if (IsFilesystemRoot(current))
-                throw Refusal(path, next, "the database resolves under the filesystem root");
-            if (Directory.Exists(next) && !File.Exists(next))
-                throw Refusal(path, next, "the database path is a directory");
-            return next;
+            if (IsLink(next)) next = FollowDirectoryLink(next, requested);
+            if (File.Exists(next) && !Directory.Exists(next))
+                throw Refusal(requested, next, "a parent path is a file");
+            current = next;
         }
-
-        throw Refusal(path, full, "the path has no file name");
+        return current;
     }
 
     private static string FollowDirectoryLink(string link, string requested)
@@ -224,7 +219,11 @@ internal static class SecretFilePermissions
 
     private static bool IsKnownSharedDirectory(string normalized)
     {
-        if (string.Equals(normalized, NormalizeDirectory(Path.GetTempPath()), PathComparison)) return true;
+        var temporary = NormalizeDirectory(Path.GetTempPath());
+        if (string.Equals(normalized, temporary, PathComparison)) return true;
+        // macOS can report TMPDIR under /var, while the database path resolves under /private/var.
+        if (Directory.Exists(temporary) &&
+            string.Equals(normalized, ResolveDirectory(temporary, temporary), PathComparison)) return true;
         if (OperatingSystem.IsWindows()) return false;
         foreach (var candidate in new[] { "/tmp", "/var/tmp", "/usr/tmp", "/dev/shm", "/private/tmp", "/private/var/tmp" })
         {

@@ -1,0 +1,41 @@
+{
+  "$id": "relaylink-errors-v1",
+  "description": "RelayLink 自动化 API 的稳定错误码。CLI 与各语言 SDK 依赖这些字符串，不得随实现细节变动。",
+  "version": 1,
+  "codes": [
+    { "code": "unauthenticated", "http": 401, "retryable": false, "summary": "缺少或无效的 Authorization: Bearer 令牌。" },
+    { "code": "proof_invalid", "http": 401, "retryable": false, "summary": "X-RelayLink-Proof 缺失、签名无效、htm/htu/ath/instanceId 不匹配，或时间窗超限。" },
+    { "code": "proof_replayed", "http": 401, "retryable": false, "summary": "同一 jti 已使用过。" },
+    { "code": "token_expired", "http": 401, "retryable": false, "summary": "令牌已过期，需要重新配对并获得人工批准。" },
+    { "code": "token_revoked", "http": 401, "retryable": false, "summary": "令牌已被管理员撤销。" },
+    { "code": "scope_insufficient", "http": 403, "retryable": false, "summary": "令牌不具备所需 scope；不得改写参数重试。" },
+    { "code": "pairing_not_found", "http": 404, "retryable": false, "summary": "配对请求不存在。" },
+    { "code": "pairing_denied", "http": 403, "retryable": false, "summary": "配对请求被拒绝，或用户码错误。" },
+    { "code": "pairing_expired", "http": 410, "retryable": false, "summary": "配对请求已过期，需重新发起。" },
+    { "code": "pairing_locked", "http": 403, "retryable": false, "summary": "用户码错误次数过多，该请求作废。" },
+    { "code": "pairing_already_completed", "http": 409, "retryable": false, "summary": "该请求已换取过令牌，不再签发。" },
+    { "code": "pending_capacity_exceeded", "http": 429, "retryable": true, "summary": "待批准请求达到上限，需管理员先处理。" },
+    { "code": "rate_limited", "http": 429, "retryable": true, "summary": "请求过于频繁。" },
+    { "code": "validation_failed", "http": 400, "retryable": false, "summary": "请求字段不合法。" },
+    { "code": "unknown_field", "http": 400, "retryable": false, "summary": "请求包含未允许的字段。" },
+    { "code": "not_found", "http": 404, "retryable": false, "summary": "目标资源不存在。" },
+    { "code": "conflict", "http": 409, "retryable": false, "summary": "状态冲突，例如同键不同载荷、目标已有未完成申请。" },
+    { "code": "requires_change_request", "http": 409, "retryable": false, "summary": "该操作属结构性变更，必须提交变更申请并由管理员批准。" },
+    { "code": "change_request_not_approved", "http": 409, "retryable": false, "summary": "变更申请尚未获得批准。" },
+    { "code": "audit_unavailable", "http": 503, "retryable": true, "summary": "审计存储不可用；写操作与申请被拒绝。" },
+    { "code": "storage_unavailable", "http": 503, "retryable": true, "summary": "自动化状态存储不可用。" },
+    { "code": "unsupported_api_version", "http": 400, "retryable": false, "summary": "请求的 API 版本不受支持；CLI 以退出码 9 结束。" },
+    { "code": "automation_disabled", "http": 404, "retryable": false, "summary": "自动化入口未启用。" }
+  ],
+  "exitCodes": [
+    { "code": 0, "meaning": "成功" },
+    { "code": 2, "meaning": "用法错误" },
+    { "code": 3, "meaning": "未授权或未配对", "from": ["unauthenticated", "proof_invalid", "proof_replayed", "token_expired", "token_revoked"] },
+    { "code": 4, "meaning": "scope 不足", "from": ["scope_insufficient"] },
+    { "code": 5, "meaning": "需要人工批准", "from": ["pairing_denied", "pairing_expired", "pairing_locked", "change_request_not_approved"] },
+    { "code": 6, "meaning": "服务端业务拒绝", "from": ["validation_failed", "unknown_field", "not_found", "conflict", "requires_change_request", "pairing_not_found", "pairing_already_completed", "automation_disabled", "rate_limited", "pending_capacity_exceeded"] },
+    { "code": 7, "meaning": "审计或存储不可用", "from": ["audit_unavailable", "storage_unavailable"] },
+    { "code": 8, "meaning": "网络或证书固定失败（含旧服务端无该端口、开关未启用、服务未启动；不得谎称 9）" },
+    { "code": 9, "meaning": "版本不兼容（仅用于连得上但 /info 返回的 API 或 CLI 版本不受支持）", "from": ["unsupported_api_version"] }
+  ]
+}

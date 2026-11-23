@@ -2,8 +2,8 @@
 
 文档 ID：DEV-001\
 状态：Active\
-版本：v1.13.0\
-更新日期：2026-10-31
+版本：v1.14.1\
+更新日期：2026-11-19
 
 ```text
 RelayLink/
@@ -49,7 +49,7 @@ RelayLink/
 
 - HTTP/HTTPS 宿主与 YARP 位于 RelayLink.Agent/HttpProxyRuntime.cs；PeerApplicationStream 在 Transport 解开既有互访 TLS 应用记录，Protocol 定义 v5 HTTP 配置/上下文/状态；Server 负责集中配置、版本/readiness 及中继。业务 HTTP 虚拟入口不创建 OS socket，现有状态页独立。部署与证据见 [运维](../operations/http-reverse-proxy.md) 和 [验证](../testing/http-reverse-proxy-verification.md)。
 
-- Server 的可审计 HTTP 使用 `Runtime/HttpInspectionRelay.cs` 的虚拟 Kestrel/YARP，SSH 由 `SshInspectionSession.cs` 管理会话；与 Agent 既有 `HttpProxyRuntime` 分开。共用阶段期限在 Transport，v7 阶段消息在 Protocol，凭据恢复仍在 Server。
+- AgentWeb 根据本机状态页的互访入口提供浏览器链接、SSH 命令和 Windows 远程桌面连接文件。行为见 [ADR-0042](../adr/0042-agent-native-tool-links.md)。
 
 - 当前已进入开发阶段，根目录使用 `RelayLink.slnx` 与各项目 csproj。共享库不得依赖 Server 或 Agent；Protocol 不依赖宿主和配置文件 I/O。
 - Server 与 Agent 通过 `RelayLink.Logging` 复用文件日志策略；组件分别决定日志目录与名称，日志库不依赖协议、运行配置或业务载荷。
@@ -64,6 +64,8 @@ RelayLink/
 - docs/intro 是演示文稿与公众号文章的唯一位置，`pages.json` 是页码来源；生成的 PPTX 与插图提交，`.build/`、`.cache/`、`.slidep/` 和 `legacy-bak/` 由目录内 .gitignore 排除。
 - 管理端源码放 `src/RelayLink.AdminWeb`；构建生成的 `dist/` 不提交。Server 构建/发布时复制产物到输出目录的 `wwwroot/`，不再手工维护服务端静态页面；参见 [ADR-0004](../adr/0004-standalone-admin-web.md)。
 - Agent 本机页面源码放 `src/RelayLink.AgentWeb`；构建生成的 `dist/` 不提交。Agent 构建/发布时复制产物到输出目录的 `wwwroot/`，由本机 Kestrel 托管；参见 [ADR-0021](../adr/0021-standalone-agent-web.md)。
+- 自动化管理面位于 `src/RelayLink.Server/Automation/`（配置段、配对、令牌、证明校验、变更申请、状态库），HTTP 端点在 `src/RelayLink.Server/AutomationEndpoints.cs`。它不新建独立项目：必须与配置写锁、审计、编辑器同进程共享状态。CLI 在 `src/RelayLink.Cli`（产物名 `relaylink`）；CLI 与 .NET SDK 管理面共用的客户端库在 `src/RelayLink.AutomationClient`；SDK 数据面在 `src/RelayLink.Sdk`，**只依赖 BCL**——仓库全局为 net10.0，`RelayLink.Protocol` 未多目标化，因此 SDK 不得引用它。见 [DES-010](../design/ai-automation-and-sdk.md)。
+- `sdk/` 保存 Python、TypeScript、Go、Java、Rust 的 SDK 数据面源码；`contract/` 保存 OpenAPI 描述、错误码与退出码映射、跨语言一致性用例，是各语言实现的单一契约来源；`skills/relaylink-admin/` 是随 CLI 发行物提供的 agent skill（`SKILL.md` + 参考文档 + 包装脚本）。这三个目录都不是服务端或 Agent 的运行依赖。
 
 ## 命名
 

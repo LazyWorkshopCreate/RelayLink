@@ -47,6 +47,17 @@ public sealed class ConfigurationLoader
             ? TrafficHistoryService.DatabasePath(server.History.FilePath)
             : Path.Combine(configurationDirectory, "audit.db"));
         server = server with { Audit = new AuditConfiguration(Path.GetFullPath(auditPath, configurationDirectory), server.Audit?.RetentionDays ?? 90) };
+        if (server.Automation is { } automation)
+        {
+            server = server with
+            {
+                Automation = automation with
+                {
+                    ResolvedCertificatePath = string.IsNullOrWhiteSpace(automation.CertificatePemPath) ? null : Path.GetFullPath(automation.CertificatePemPath, configurationDirectory),
+                    ResolvedPrivateKeyPath = string.IsNullOrWhiteSpace(automation.PrivateKeyPemPath) ? null : Path.GetFullPath(automation.PrivateKeyPemPath, configurationDirectory)
+                }
+            };
+        }
         ValidateServer(server, serverPath);
 
         var clientsDirectory = Path.GetFullPath(server.ClientsDirectory, configurationDirectory);
@@ -69,11 +80,6 @@ public sealed class ConfigurationLoader
         foreach (var path in clientFiles.OrderBy(path => path, StringComparer.Ordinal))
         {
             var client = Deserialize<ClientConfiguration>(path);
-            var clientDirectory = Path.GetDirectoryName(path)!;
-            client = client with
-            {
-                Channels = client.Channels.Select(channel => channel with { ConfigurationDirectory = clientDirectory }).ToArray()
-            };
             ValidateClient(client, path, server);
             if (!Path.GetFileNameWithoutExtension(path).Equals(client.ClientId, StringComparison.Ordinal))
             {
@@ -221,7 +227,68 @@ public sealed class ConfigurationLoader
         }
         if (server.Audit is not null && server.Audit is not { FilePath: { Length: > 0 }, RetentionDays: >= 1 and <= 3650 })
             throw new ConfigurationException("Audit configuration is invalid.");
+        ValidateAutomation(server);
     }
+
+    /// <summary>
+    /// 自动化入口只允许绑定 loopback 且必须提供 TLS。证书缺失、过期或私钥不匹配不在加载期拒绝，
+    /// 由运行时失败关闭，避免证书轮换期间整台服务起不来。
+    /// </summary>
+    private static void ValidateAutomation(ServerConfiguration server)
+    {
+        if (server.Automation is not { } automation) return;
+
+        // 仅接受 127.0.0.1。0.0.0.0、::、具体网卡地址与 localhost 一律拒绝。
+        if (!automation.IsLoopback)
+        {
+            throw new ConfigurationException(
+                $"Automation listenAddress must be exactly '{AutomationConfiguration.LoopbackAddress}'; '{automation.ListenAddress}' would expose the management surface beyond loopback.");
+        }
+
+        ValidatePort(automation.Port, "automation endpoint");
+        if (automation.SessionLifetimeMinutes is < 15 or > 480)
+            throw new ConfigurationException("Automation sessionLifetimeMinutes must be between 15 and 480.");
+        if (automation.MaxPendingPairings is < 1 or > 256)
+            throw new ConfigurationException("Automation maxPendingPairings must be between 1 and 256.");
+        if (automation.MaxAuthorizations is < 1 or > 1024)
+            throw new ConfigurationException("Automation maxAuthorizations must be between 1 and 1024.");
+        if (automation.MaxAuthorizations < automation.MaxPendingPairings)
+            throw new ConfigurationException("Automation maxAuthorizations must not be smaller than maxPendingPairings.");
+
+        // 端口不得与现有服务端端点冲突。逐项比较，不复用 ChannelPortSuggestion：
+        // 那个接口按传输协议分别计算，UDP 分支还会清空服务端保留集，不能用于这里的判定。
+        if (automation.Port == server.Tunnel.Port || automation.Port == server.Tunnel.EffectiveDataPort || automation.Port == server.Dashboard.Port)
+            throw new ConfigurationException($"Automation port {automation.Port} conflicts with a server endpoint.");
+
+        if (automation.Enabled)
+        {
+            if (string.IsNullOrWhiteSpace(automation.ResolvedCertificatePath) || string.IsNullOrWhiteSpace(automation.ResolvedPrivateKeyPath))
+                throw new ConfigurationException("Automation certificatePemPath and privateKeyPemPath are required when automation is enabled.");
+        }
+    }
+
+    /// <summary>
+    /// 回环回指校验：任何通道若把目标指向回环地址且端口等于 automation.port，必须是授权互访形态。
+    /// 只有 authorizedClientsOnly=false 会在服务端监听公网端口，因此要挡住的正是这种形态。
+    /// 该校验在三个入口执行：通道保存、启动加载、automation.port 变更。
+    /// </summary>
+    public static void ValidateAutomationLoopbackTargets(ServerConfiguration server, IEnumerable<ClientConfiguration> clients, string context)
+    {
+        if (server.Automation is not { } automation) return;
+        foreach (var client in clients)
+        foreach (var channel in client.Channels)
+        {
+            if (!IsLoopbackHost(channel.TargetHost) || channel.TargetPort != automation.Port) continue;
+            if (channel.AuthorizedClientsOnly && channel.EndToEndEncryptionEnabled && channel.ApplicationProtocol == "raw")
+                continue;
+            throw new ConfigurationException(
+                $"Channel {client.ClientId}/{channel.ChannelId} targets the automation port {automation.Port} via loopback but is not an authorized-peer channel with end-to-end encryption ({context}). Only authorizedClientsOnly=true with endToEndEncryptionEnabled=true and applicationProtocol=raw may reach the automation endpoint.");
+        }
+    }
+
+    private static bool IsLoopbackHost(string host) =>
+        host is "127.0.0.1" or "::1" or "localhost" ||
+        (IPAddress.TryParse(host, out var address) && IPAddress.IsLoopback(address));
 
     private static void ValidateClient(ClientConfiguration client, string path, ServerConfiguration server)
     {
@@ -269,7 +336,6 @@ public sealed class ConfigurationLoader
             }
             catch (ArgumentException exception) { throw new ConfigurationException(exception.Message); }
             if (channel.ApplicationProtocol == "http" && !server.Tunnel.TlsEnabled) throw new ConfigurationException("HTTP requires control TLS.");
-            if (channel.InspectionMode != "none" && !server.Tunnel.TlsEnabled) throw new ConfigurationException("Inspection channels require control TLS.");
             ValidateAddressAndPort(channel.ListenAddress, channel.ListenPort, $"channel {channel.ChannelId} listener");
             ValidatePort(channel.TargetPort, $"channel {channel.ChannelId} target");
             if (string.IsNullOrWhiteSpace(channel.TargetHost) || channel.MaxConnections < 1 || channel.MaxConnections > client.MaxConnections || channel.TargetConnectTimeoutSeconds is < 1 or > 300)
@@ -284,7 +350,6 @@ public sealed class ConfigurationLoader
                 (channel.AuthorizedClientsOnly || !server.SecurityGroups.Any(group => group.Id == channel.SecurityGroupId)))
                 throw new ConfigurationException($"Invalid security group for {client.ClientId}/{channel.ChannelId}.");
             ValidateTags(channel.Tags, $"channel {client.ClientId}/{channel.ChannelId}");
-            ChannelApplication.Validate(channel, $"{client.ClientId}/{channel.ChannelId}", Path.GetDirectoryName(path)!);
         }
 
         var mappingIds = new HashSet<string>(StringComparer.Ordinal);
@@ -347,17 +412,20 @@ public sealed class ConfigurationLoader
             if (target is not { Enabled: true, AuthorizedClientsOnly: true } || !FixedSecretEquals(mapping.AccessSecret, target.AccessSecret!) || !string.Equals(mapping.TargetCertificateSha256, targetClient.E2eCertificateSha256, StringComparison.OrdinalIgnoreCase))
                 throw new ConfigurationException($"Outbound mapping is not authorized for {client.ClientId}/{mapping.MappingId}.");
         }
+
+        // 回环回指校验：覆盖启动加载与全部保存路径。
+        ValidateAutomationLoopbackTargets(server, clients, "configuration load or save");
     }
 
     public void ValidateChannelUpdate(LoadedConfiguration current, ClientConfiguration updatedClient)
     {
-        ValidateClient(updatedClient, Path.Combine(current.Server.ClientsDirectory, updatedClient.ClientId + ".json"), current.Server);
+        ValidateClient(updatedClient, "dashboard update", current.Server);
         ValidateGlobalConflicts(current.Server, current.Clients.Values.Select(client => client.ClientId == updatedClient.ClientId ? updatedClient : client));
     }
 
     public void ValidateClientUpdate(LoadedConfiguration configuration)
     {
-        foreach (var client in configuration.Clients.Values) ValidateClient(client, Path.Combine(configuration.Server.ClientsDirectory, client.ClientId + ".json"), configuration.Server);
+        foreach (var client in configuration.Clients.Values) ValidateClient(client, "dashboard update", configuration.Server);
         ValidateGlobalConflicts(configuration.Server, configuration.Clients.Values);
     }
 

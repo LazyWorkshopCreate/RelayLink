@@ -26,8 +26,6 @@ public enum FrameType : byte
     PeerMappingStatus = 22,
     HttpStatus = 23,
     HttpIngressReady = 24,
-    InspectionActive = 25,
-    InspectionTargetReady = 26,
     Data = 32,
     Fin = 33,
     Reset = 34
