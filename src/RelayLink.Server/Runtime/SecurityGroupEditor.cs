@@ -10,7 +10,7 @@ public sealed class SecurityGroupEditor(string serverConfigurationPath, Configur
     private readonly string configurationPath = Path.GetFullPath(serverConfigurationPath);
 
     public Task<SecurityGroupConfiguration> CreateAsync(SecurityGroupCreateRequest request, CancellationToken cancellationToken) =>
-        ChangeAsync(groups =>
+        ChangeAsync((groups, _) =>
         {
             if (groups.Any(group => group.Id == request.Id)) throw new SecurityGroupUpdateException("Security group ID already exists.");
             var created = new SecurityGroupConfiguration(request.Id, request.Name, request.Entries);
@@ -18,28 +18,28 @@ public sealed class SecurityGroupEditor(string serverConfigurationPath, Configur
         }, null, cancellationToken);
 
     public Task<SecurityGroupConfiguration> UpdateAsync(string id, SecurityGroupUpdateRequest request, CancellationToken cancellationToken) =>
-        ChangeAsync(groups =>
+        ChangeAsync((groups, _) =>
         {
             if (!groups.Any(group => group.Id == id)) throw new SecurityGroupUpdateException("Security group was not found.");
             var updated = new SecurityGroupConfiguration(id, request.Name, request.Entries);
             return (groups.Select(group => group.Id == id ? updated : group).ToArray(), updated);
         }, id, cancellationToken);
 
-    public Task DeleteAsync(string id, CancellationToken cancellationToken) => ChangeAsync(groups =>
+    public Task DeleteAsync(string id, CancellationToken cancellationToken) => ChangeAsync((groups, current) =>
     {
         if (!groups.Any(group => group.Id == id)) throw new SecurityGroupUpdateException("Security group was not found.");
-        if (runtime.Configuration.Clients.Values.Any(client => client.Channels.Any(channel => channel.SecurityGroupId == id)))
+        if (current.Clients.Values.Any(client => client.Channels.Any(channel => channel.SecurityGroupId == id)))
             throw new SecurityGroupUpdateException("Security group is in use; remove it from channels first.");
         return (groups.Where(group => group.Id != id).ToArray(), (SecurityGroupConfiguration?)null);
     }, id, cancellationToken);
 
-    private async Task<T> ChangeAsync<T>(Func<IReadOnlyList<SecurityGroupConfiguration>, (IReadOnlyList<SecurityGroupConfiguration> Groups, T Result)> change, string? changedId, CancellationToken cancellationToken)
+    private async Task<T> ChangeAsync<T>(Func<IReadOnlyList<SecurityGroupConfiguration>, LoadedConfiguration, (IReadOnlyList<SecurityGroupConfiguration> Groups, T Result)> change, string? changedId, CancellationToken cancellationToken)
     {
         await writeLock.Gate.WaitAsync(cancellationToken);
         try
         {
             var current = loader.Load(configurationPath);
-            var (groups, result) = change(current.Server.SecurityGroups);
+            var (groups, result) = change(current.Server.SecurityGroups, current);
             var updated = current with { Server = current.Server with { SecurityGroups = groups } };
             loader.ValidateServerUpdate(updated);
 

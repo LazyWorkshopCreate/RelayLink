@@ -62,6 +62,8 @@
 | [安装与使用指南](operations/installation-and-usage.md) | OPS-001 | Active | Docker/原生 Server 部署、Agent 安装、通道配置和排障 |
 | [UDP 转发使用指南](operations/udp-forwarding.md) | OPS-002 | Active | UDP 版本要求、普通与授权入口、网络放行、报文和排障 |
 | [验证状态](testing/verification-status.md) | TST-001 | Active | 已执行检查与未完成验收证据 |
+| [2026-11-25 代码审查](testing/code-review-2026-11-25.md) | TST-015 | Active | 全仓同步后代码审查、38 项发现及整改验证记录 |
+| [RDP 互访静置卡死排查与修复](testing/rdp-peer-idle-freeze-diagnosis.md) | TST-016 | Active | macOS 经互访通道 RDP 静置卡死的现场排查、根因分析、修复与验证记录 |
 | [2026-10-23 代码审查](testing/code-review-2026-10-23.md) | TST-006 | Active | 静态审查发现、严重级别与修改建议；本次未修改产品代码 |
 | [本地多场景验收方案](testing/local-acceptance-plan.md) | TST-002 | Active | 隔离启动、场景判定、运行记录与安全停止 |
 | [Agent 多服务端验收记录](testing/multi-server-agent-verification.md) | TST-003 | Active | REQ-001J 的自动化测试与 Windows Sandbox 安装验收证据 |

@@ -166,24 +166,21 @@ public sealed class ProxyListenerTests
         return ((IPEndPoint)listener.LocalEndpoint).Port;
     }
 
-    // UDP bind(0) on Windows can return a port that TCP is forbidden to use
-    // (WSAEACCES, typically an excluded TCP range). Prove the candidate accepts
-    // a loopback TCP listener before the test shares it with the UDP proxy.
+    // UDP bind(0) on Windows can land inside a TCP excluded port range (WSAEACCES).
+    // Reserve a free loopback TCP port first, then prove UDP can bind the same port.
     private static int FreeTcpAndUdpPort()
     {
-        for (var attempt = 0; attempt < 32; attempt++)
+        for (var attempt = 0; attempt < 64; attempt++)
         {
-            var reservation = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
-            int port;
-            try { port = ((IPEndPoint)reservation.Client.LocalEndPoint!).Port; }
-            finally { reservation.Dispose(); }
+            using var tcp = new TcpListener(IPAddress.Loopback, 0);
+            tcp.Start();
+            var port = ((IPEndPoint)tcp.LocalEndpoint).Port;
             try
             {
-                using var tcp = new TcpListener(IPAddress.Loopback, port);
-                tcp.Start();
+                using var udp = new UdpClient(new IPEndPoint(IPAddress.Loopback, port));
                 return port;
             }
-            catch (SocketException exception) when (exception.SocketErrorCode == SocketError.AccessDenied) { }
+            catch (SocketException exception) when (exception.SocketErrorCode is SocketError.AccessDenied or SocketError.AddressAlreadyInUse) { }
         }
         throw new InvalidOperationException("No loopback port could be bound by both UDP and TCP.");
     }

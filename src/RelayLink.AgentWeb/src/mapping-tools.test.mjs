@@ -20,7 +20,7 @@ test("maps a raw TCP entry to native tools with an address-only RDP file", () =>
     assert.equal(mappingTools(raw, false).rdpFile, null);
 });
 
-test("preserves the full configured URL for a ready HTTP entry", () => {
+test("preserves and normalizes the URL for a ready HTTP entry", () => {
     const mapping = {
         ...raw,
         applicationProtocol: "http",
@@ -40,7 +40,17 @@ test("preserves the full configured URL for a ready HTTP entry", () => {
             },
             true,
         ),
-        { kind: "web", url: "https://panel.example.test:443" },
+        { kind: "web", url: "https://panel.example.test/" },
+    );
+    assert.deepEqual(
+        mappingTools(
+            {
+                ...mapping,
+                accessUrl: "http://127.0.0.1:13389",
+            },
+            true,
+        ),
+        { kind: "web", url: "http://127.0.0.1:13389/" },
     );
 });
 
@@ -59,7 +69,7 @@ test("rejects disabled, UDP and non-loopback mappings", () => {
     }
 });
 
-test("rejects unready HTTP, unsafe URLs and mismatched ports", () => {
+test("rejects unready HTTP, unsafe URLs, control chars, non-loopback IPs and mismatched ports", () => {
     const mapping = {
         ...raw,
         applicationProtocol: "http",
@@ -76,6 +86,15 @@ test("rejects unready HTTP, unsafe URLs and mismatched ports", () => {
         { ...mapping, accessUrl: "https://@panel.example.test:13389" },
         { ...mapping, accessUrl: "https://panel.example.test:443" },
         { ...mapping, accessUrl: "//panel.example.test:13389" },
+        { ...mapping, accessUrl: "http://panel.example.test:13389/\r\n" },
+        { ...mapping, accessUrl: "http://panel.example.test:13389/\t" },
+        { ...mapping, accessUrl: "http://192.168.1.10:13389" },
+        { ...mapping, accessUrl: "http://[::1]:13389" },
+        { ...mapping, accessUrl: "http://0x7f000001:13389" },
+        { ...mapping, accessUrl: "http://2130706433:13389" },
+        { ...mapping, accessUrl: "http://127.1:13389" },
+        { ...mapping, accessUrl: "http://panel.example.test:013389" },
+        { ...mapping, accessUrl: "http://panel.example.test:" },
     ]) {
         assert.equal(mappingTools(input, true), null);
     }

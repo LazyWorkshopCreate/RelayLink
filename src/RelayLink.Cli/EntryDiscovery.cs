@@ -18,12 +18,13 @@ public static class EntryDiscovery
         if (!string.IsNullOrWhiteSpace(profile.Entry)) return new Result(profile.Entry, null);
 
         var dashboardPort = options.DashboardPort ?? profile.DashboardPort;
-        if (dashboardPort <= 0) return new Result(null, "profile 未配置 dashboardPort，且没有显式 --entry。");
+        if (dashboardPort is < 1 or > 65535) return new Result(null, "profile 未配置有效的 dashboardPort，且没有显式 --entry。");
 
         // 普通代理入口无法从 v2 API 发现：这里只查授权互访映射。
         try
         {
-            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+            using var handler = new HttpClientHandler { UseProxy = false, AllowAutoRedirect = false };
+            using var http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(5) };
             var url = $"http://127.0.0.1:{dashboardPort}/api/v2/mappings";
             var text = await http.GetStringAsync(url, cancellationToken).ConfigureAwait(false);
             using var document = JsonDocument.Parse(text);
@@ -37,9 +38,14 @@ public static class EntryDiscovery
                 if (!server.TryGetProperty("mappings", out var mappings) || mappings.ValueKind != JsonValueKind.Array) continue;
                 foreach (var mapping in mappings.EnumerateArray())
                 {
+                    if (mapping.TryGetProperty("enabled", out var enabledEl) && enabledEl.ValueKind == JsonValueKind.False) continue;
+                    var transport = mapping.TryGetProperty("transportProtocol", out var tp) && tp.ValueKind == JsonValueKind.String ? tp.GetString() : "tcp";
+                    if (!string.Equals(transport, "tcp", StringComparison.OrdinalIgnoreCase)) continue;
+                    var appProto = mapping.TryGetProperty("applicationProtocol", out var ap) && ap.ValueKind == JsonValueKind.String ? ap.GetString() : "raw";
+                    if (!string.Equals(appProto, "raw", StringComparison.OrdinalIgnoreCase)) continue;
                     if (!mapping.TryGetProperty("localAddress", out var address) || address.ValueKind != JsonValueKind.String) continue;
                     var value = address.GetString();
-                    if (string.IsNullOrWhiteSpace(value)) continue;
+                    if (string.IsNullOrWhiteSpace(value) || !value.Contains(':', StringComparison.Ordinal)) continue;
                     var mappingId = mapping.TryGetProperty("mappingId", out var mid) ? mid.GetString() ?? string.Empty : string.Empty;
                     candidates.Add((profileId, mappingId, value));
                 }

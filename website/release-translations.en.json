@@ -622,5 +622,52 @@
         ]
       }
     ]
+  },
+  "v0.1.0-rc.15": {
+    "title": "RelayLink v0.1.0-rc.15",
+    "intro": "This release candidate completes remediation for all 38 repository-wide code review findings (CR26-01 through CR26-38), fixes missing peer-tunnel TCP KeepAlive and macOS RDP idle freezes, hardens automation TLS/port isolation, CLI SPKI pinning, transport and UDP reliability, both frontends, and all six SDKs, and strengthens cross-platform CI and release workflows.",
+    "sections": [
+      {
+        "title": "Highlights",
+        "items": [
+          "Fix missing peer-tunnel KeepAlive and RDP idle freezes (TST-016): enabled OS-level TcpKeepAlive (30s idle, 10s interval, 3 retries) across server DataAcceptorService, PeerRelayRegistry, and Agent PeerSessionCoordinator.ConnectDataAsync data tunnel sockets; enabled NoDelay on local peer sockets, aborted underlying tunnel sockets when peer writes block or fail, moved idle.Touch() after write completion, and coalesced the 4-byte application frame header and payload into a single TLS write.",
+          "Automation management-plane isolation, authorization, and storage hardening: strictly isolated Automation (HTTPS 127.0.0.1:18082) from Dashboard by port and TLS with certificate validity and permission fail-closed checks; persisted device thumbprints on change requests to isolate cross-device reads and deletions while enforcing audit gating and error rollback; added wrong-code lockout on /status, full proof binding checks, pairing and authorization caps, scope reduction via Satisfies, bounded replay/idempotency caches, private DB directory ordering, serialized startup reconciliation, and 30-day automation certificate expiry warnings.",
+          "Transport, server runtime, and secret-permission hardening: added pre-handshake timeouts and TcpKeepAlive on TunnelAcceptorService; isolated high-frequency rejection auditing and admission concurrency in AuditService and ProxyListenerService; latched permanent faulted state on FrameWriter failures and isolated cross-session exceptions; fixed post-header hangs in FrameReader with injectable TimeProvider timeouts; disabled Windows SIO_UDP_CONNRESET and handled recoverable errors in DatagramListener; extended SecretFilePermissions to automation keys/DBs and refused Unix GroupWrite directories; switched ControlSessionWorker TLS validation to CertificateChainPolicy with a 30-second connect-to-ready timeout.",
+          "CLI, Agent reliability, and Windows installer preflight improvements: fixed relaylink CLI SHA256(SubjectPublicKeyInfo) pinning and auth trust --reset, added Windows DPAPI plus current-user ACLs, atomic 0600 Unix storage, and strict profile naming; added Sec-Fetch-* checks, sliding local write sessions, quota propagation, port-allocator rollback, and Windows replacement retries in Agent; updated Windows framework-dependent Agent installer preflight to verify machine-wide x64 .NET 10 Runtime and ASP.NET Core Runtime before stopping existing services.",
+          "AdminWeb, AgentWeb, and static website updates: modularized AdminWeb sources with automationEnabled gating, manual approval scope/TTL narrowing controls, CSRF-verified logout state clearing, and Problem detail extraction (12/12 component tests); updated AgentWeb with automatic write-session renewal, control-character and non-127.0.0.1 URL blocking, and preserved error states (4/4 tests); disabled protocol-relative URLs, enforced noopener noreferrer on external links, and synchronized HTTP reverse proxy, AI automation, and six-language SDK pages.",
+          "Six-language SDK and contract conformance: restored RelayLink.Sdk (.NET) multi-target compilation (netstandard2.0, net8.0, net10.0) and cancellation propagation; aligned .NET, TypeScript, Python, Go, Rust, and Java SDKs on UDP discovery, profileId disambiguation, IPv6 handling, proxy/redirect disabling, and rejection mapping, adding SdkDataPlaneTests and per-language conformance test suites alongside synchronized contract/ schemas and the relaylink-admin skill.",
+          "Docker, systemd, operational scripts, and documentation updates: switched the server Dockerfile to non-root user 10001:10001 with /health/ready HEALTHCHECK and tighter config permissions; hardened the systemd unit sandbox; updated Windows service and four local acceptance scripts for multi-server Agent configs; sanitized historical verification records and synchronized operational guides with TST-015 and TST-016.",
+          "CI and release workflow resilience: restored standard ci.yml gating for public repositories and forks with six-SDK, skill, and AdminWeb build verification; removed automatic unit-test retries; added clean-staging download retry action (download-release-artifact) and force overwrite archiving in release.yml; deduplicated pages.yml triggers and extended integration fixture certificates to two days."
+        ]
+      },
+      {
+        "title": "Upgrade and compatibility",
+        "items": [
+          "Wire protocol and configuration compatibility: Server continues supporting wire protocols v3-v5 and existing ordinary TCP/UDP forwarding, authorized peer channels, and target-agent HTTP/HTTPS reverse-proxy configs without breaking schema changes.",
+          "Upgrade both sides for peer KeepAlive coverage: TCP KeepAlive for authorized peer tunnels is enabled independently by the caller Agent, Server, and target Agent on their public data tunnel sockets; upgrading all three enables 30s/10s/3 OS keepalive probes end to end.",
+          "Configure tcpIdleTimeoutSeconds for long-idle RDP/SSH sessions: OS TCP KeepAlive probes do not reset the application-layer limits.tcpIdleTimeoutSeconds timer (still 900s by default); set limits.tcpIdleTimeoutSeconds to 0 or a larger value in server.json and restart Server if RDP or SSH sessions should remain open across extended idle periods.",
+          "Stricter Unix database directory permissions: SecretFilePermissions now refuses existing GroupWrite directories in addition to temporary and other-writable directories without altering permissions; keep SQLite audit and history files under dedicated 0700 service directories on Linux and macOS.",
+          "Stronger Windows framework-dependent prerequisite check: installing or upgrading the framework-dependent Windows x64 Agent package now verifies machine-wide x64 .NET 10 Runtime and ASP.NET Core Runtime availability before stopping existing services; automation.enabled remains false by default."
+        ]
+      },
+      {
+        "title": "Verification and limitations",
+        "items": [
+          "Source repository verification passed on commit af16a13: CI (self-hosted) run 45842659827 passed all four jobs across Linux (AdminWeb 12/12, AgentWeb 4/4, TypeScript SDK 3/3, Python SDK, multi-target .NET SDK, 300/300 unit tests, 116/116 Peer TLS integration tests), Windows (matching frontend/SDK checks, 300/300 unit tests, 116/116 integration tests), macOS arm64 (300/300 unit tests, 116 native integration tests passed, AgentWeb build), and Verify website; packaged release artifacts are verified by the Release workflow triggered on this tag.",
+          "Additional local verification and open limits: Go (go vet and 6/6), Rust (4/4), and Java (javac -encoding UTF-8 and ConformanceRunner) conformance suites, full PowerShell AST validation, and 15-release bilingual website generation and tests also passed on Windows before tagging; real-world WAN NAT/CGNAT extended-idle field observation and a second named AI host acceptance remain open, and CLI and SDK sources are not bundled into the nine automated release assets.",
+          "Unchanged signing and capacity caveats: Windows Agent installers remain unsigned and macOS Agent archives remain without Developer ID signing or Apple notarization; this candidate did not run high-concurrency load stress tests or cross-host disaster recovery drills."
+        ]
+      },
+      {
+        "title": "Release assets",
+        "items": [
+          "Self-contained server archives for Linux x64 and Windows x64",
+          "Self-contained Linux x64 agent archive",
+          "Windows x64 agent archives and installer for self-contained and framework-dependent builds",
+          "Self-contained macOS Intel and Apple Silicon agent archives",
+          "SHA256SUMS checksum list"
+        ]
+      }
+    ]
   }
 }

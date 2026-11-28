@@ -31,7 +31,7 @@ $existingService = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
 if ($Mode -eq 'Install' -and $existingService) { throw "Service '$ServiceName' already exists. Choose an explicit upgrade mode." }
 if ($Mode -ne 'Install' -and -not $existingService) { throw "Service '$ServiceName' does not exist." }
 if ($existingService) {
-    $registered = Get-WmiObject -Class Win32_Service -Filter "Name='$ServiceName'"
+    $registered = Get-CimInstance -ClassName Win32_Service -Filter "Name='$ServiceName'"
     $expectedPath = '"{0}" --config "{1}"' -f $resolvedExecutable, $installedConfiguration
     $legacyPath = '"{0}" --config "{1}"' -f (Join-Path $installationDirectory 'program\RelayLink.Agent.exe'), $installedConfiguration
     if (-not $registered -or (-not [string]::Equals($registered.PathName.Trim(), $expectedPath, [StringComparison]::OrdinalIgnoreCase) -and
@@ -43,9 +43,7 @@ if ($existingService) {
 $binaryPath = '"{0}" --config "{1}"' -f $resolvedExecutable, $installedConfiguration
 function Set-AgentServiceExecutable {
     if (-not $registered -or [string]::Equals($registered.PathName.Trim(), $binaryPath, [StringComparison]::OrdinalIgnoreCase)) { return }
-    $parameters = $registered.PSBase.GetMethodParameters('Change')
-    $parameters['PathName'] = $binaryPath
-    $result = $registered.PSBase.InvokeMethod('Change', $parameters, $null)
+    $result = Invoke-CimMethod -InputObject $registered -MethodName Change -Arguments @{ PathName = $binaryPath }
     if ($result.ReturnValue -ne 0) { throw "Could not update the Agent service executable (Win32_Service.Change return code $($result.ReturnValue))." }
 }
 if ($Mode -eq 'Update') {
@@ -150,8 +148,35 @@ if ($Mode -eq 'Reconfigure') {
                     throw 'Refusing to clear an unexpected Agent profile state entry.'
                 }
                 foreach ($stateFile in (Get-ChildItem -LiteralPath $profileDirectory.FullName -Force)) {
-                    if ($stateFile.PSIsContainer -or ($stateFile.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
-                        $stateFile.Name -notmatch '^(identity\.pfx|ports\.json|relaylink-diagnostics\.jsonl(?:\.1)?)(?:\.[0-9a-f]{32}\.tmp)?$') {
+                    $fullStateEntry = [IO.Path]::GetFullPath($stateFile.FullName)
+                    $profileRootPrefix = [IO.Path]::GetFullPath($profileDirectory.FullName) + [IO.Path]::DirectorySeparatorChar
+                    if (-not $fullStateEntry.StartsWith($profileRootPrefix, [StringComparison]::OrdinalIgnoreCase) -or
+                        ($stateFile.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+                        throw 'Refusing to clear an unexpected Agent state file.'
+                    }
+                    if ($stateFile.PSIsContainer) {
+                        if ($stateFile.Name -ne 'http-resources') {
+                            throw 'Refusing to clear an unexpected Agent state file.'
+                        }
+                        $httpPrefix = $fullStateEntry + [IO.Path]::DirectorySeparatorChar
+                        $nested = @(Get-ChildItem -LiteralPath $fullStateEntry -Recurse -Force)
+                        foreach ($item in $nested) {
+                            $itemFullPath = [IO.Path]::GetFullPath($item.FullName)
+                            if (-not $itemFullPath.StartsWith($httpPrefix, [StringComparison]::OrdinalIgnoreCase) -or
+                                ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+                                throw 'Refusing to clear a reparse point under Agent HTTP resources.'
+                            }
+                        }
+                        foreach ($item in ($nested | Where-Object { -not $_.PSIsContainer })) {
+                            Remove-Item -LiteralPath $item.FullName -Force
+                        }
+                        foreach ($dir in ($nested | Where-Object { $_.PSIsContainer } | Sort-Object { $_.FullName.Length } -Descending)) {
+                            Remove-Item -LiteralPath $dir.FullName -Force
+                        }
+                        Remove-Item -LiteralPath $fullStateEntry -Force
+                        continue
+                    }
+                    if ($stateFile.Name -notmatch '^(identity\.pfx|ports\.json|relaylink-diagnostics\.jsonl(?:\.1)?)(?:\.[0-9a-f]{32}\.tmp)?$') {
                         throw 'Refusing to clear an unexpected Agent state file.'
                     }
                     if ($stateFile.Name -eq 'identity.pfx') {
@@ -189,8 +214,16 @@ if ($LASTEXITCODE -ne 0) { throw 'Installed Agent configuration validation faile
 $created = $false
 try {
     if ($Mode -eq 'Install') {
-        $serviceClass = Get-WmiObject -List -Class Win32_Service
-        $createResult = $serviceClass.Create($ServiceName, 'RelayLink Agent', $binaryPath, 16, 1, 'Automatic', $false, 'NT AUTHORITY\LocalService', $null, $null, $null, $null)
+        $createResult = Invoke-CimMethod -ClassName Win32_Service -MethodName Create -Arguments @{
+            Name = $ServiceName
+            DisplayName = 'RelayLink Agent'
+            PathName = $binaryPath
+            ServiceType = [uint32]16
+            ErrorControl = [uint32]1
+            StartMode = 'Automatic'
+            DesktopInteract = $false
+            StartName = 'NT AUTHORITY\LocalService'
+        }
         if ($createResult.ReturnValue -ne 0) {
             throw "Could not create the Agent service (Win32_Service.Create return code $($createResult.ReturnValue))."
         }

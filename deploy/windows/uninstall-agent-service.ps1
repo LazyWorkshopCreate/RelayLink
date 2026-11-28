@@ -9,7 +9,7 @@ $ErrorActionPreference = 'Stop'
 trap {
     $message = $_.Exception.Message
     if (-not [string]::IsNullOrWhiteSpace($ErrorReportPath)) {
-        [IO.File]::WriteAllText([IO.Path]::GetFullPath($ErrorReportPath), $message, [Text.Encoding]::UTF8)
+        [IO.File]::WriteAllText([IO.Path]::GetFullPath($ErrorReportPath), $message, (New-Object Text.UTF8Encoding($false)))
     }
     [Console]::Error.WriteLine($message)
     exit 1
@@ -20,7 +20,7 @@ if (-not $service) {
     Remove-AgentMonitorShortcut
     return
 }
-$registered = Get-WmiObject -Class Win32_Service -Filter "Name='$ServiceName'"
+$registered = Get-CimInstance -ClassName Win32_Service -Filter "Name='$ServiceName'"
 $expectedPrefix = '"{0}" --config ' -f ([IO.Path]::GetFullPath($ExecutablePath))
 $legacyExecutable = Join-Path (Split-Path -Parent ([IO.Path]::GetFullPath($ExecutablePath))) 'program\RelayLink.Agent.exe'
 $legacyPrefix = '"{0}" --config ' -f $legacyExecutable

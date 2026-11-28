@@ -221,6 +221,22 @@ public sealed class HttpProxyHostTests
     }
 
     [Fact]
+    public async Task Non_websocket_upgrade_header_is_rejected_with_403_and_preserve_normalizes_host_port()
+    {
+        await using var fixture = await Fixture.CreateAsync(hostMode: "preserve");
+        var (status, _) = await fixture.SendUpgradeAsync("h2c", fixture.Origin, "/echo");
+        Assert.Equal(403, status);
+        Assert.Equal(0, fixture.Requests);
+
+        using var req = new HttpRequestMessage(HttpMethod.Get, "http://panel.test/echo");
+        req.Headers.Host = "PANEL.TEST:80";
+        using var resp = await fixture.Client.SendAsync(req);
+        resp.EnsureSuccessStatusCode();
+        var echo = await resp.Content.ReadFromJsonAsync<Dictionary<string, string>>();
+        Assert.Equal("panel.test", echo!["host"]);
+    }
+
+    [Fact]
     public async Task Upgrade_variant_with_allowed_origin_uses_the_websocket_activity_timeout()
     {
         await using var fixture = await Fixture.CreateAsync(activityTimeoutSeconds: 30, webSocketActivityTimeoutSeconds: 1);

@@ -68,6 +68,8 @@ docker compose -f deploy/docker/compose.yaml up -d --build
 | Agent 控制 | `7443/tcp` | 仅允许 Agent 来源访问 |
 | Agent 数据 | `7444/tcp` | 仅允许 Agent 来源访问 |
 | 普通通道 | 动态端口 | 由管理页中的通道配置决定，按需配置主机防火墙 |
+| 运行身份与能力 | `UID/GID 10001` | 容器默认以非 root `relaylink` 用户（`10001:10001`）、`cap_drop: ALL` 与 `no-new-privileges:true` 运行；`start-server-compose.ps1` 在 Linux/macOS 自动透传当前 `RELAYLINK_UID`/`RELAYLINK_GID` 匹配宿主机挂载权限，并按 `0700`/`0600` 创建目录与 `server.json`；容器内自带 `/health/ready` `HEALTHCHECK` |
+| bridge 模式覆盖 | `compose.bridge.yaml` | 若仅使用静态映射端口而不需动态监听，可叠加 `docker compose -f deploy/docker/compose.yaml -f deploy/docker/compose.bridge.yaml up -d` 取消 host 网络隔离 |
 | 配置和客户端 | `.local/docker-server/config` | 容器内路径 `/etc/relaylink`。目录应为 `0700`，`server.json` 和客户端 JSON 为 `0600`；服务端写出这些文件时只保留所有者读写 |
 | SQLite 数据 | `.local/docker-server/data` | 容器内路径 `/var/lib/relaylink`，备份时须包含 WAL 相关文件 |
 | 服务端运行日志 | `.local/docker-server/data/logs` | 容器内 `/var/lib/relaylink/logs`，普通日志 14 天，错误日志永久保留 |

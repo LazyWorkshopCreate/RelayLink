@@ -168,7 +168,7 @@ jobs:
         run: |
           if (-not (Test-Path 'artifacts/publish/win-x64/RelayLink.Server/wwwroot/index.html')) { throw 'Management UI is missing from Server publish output.' }
           New-Item -ItemType Directory -Path 'artifacts/release' -Force | Out-Null
-          Compress-Archive -Path 'artifacts/publish/win-x64/RelayLink.Server/*' -DestinationPath "artifacts/release/RelayLink-Server-win-x64-$env:RELEASE_VERSION.zip"
+          Compress-Archive -Path 'artifacts/publish/win-x64/RelayLink.Server/*' -DestinationPath "artifacts/release/RelayLink-Server-win-x64-$env:RELEASE_VERSION.zip" -Force
       - name: Install verified Inno Setup compiler for this job
         run: |
           $installer = Join-Path $env:RUNNER_TEMP 'innosetup-6.7.3.exe'
@@ -284,7 +284,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      - uses: ./.github/actions/download-release-artifact
         with:
           artifact-ids: >-
             ${{ needs.package-linux.outputs.server-artifact }},
@@ -295,7 +295,6 @@ jobs:
             ${{ needs.package-macos.outputs.intel-artifact }},
             ${{ needs.package-macos.outputs.arm64-artifact }}
           path: release-assets
-          merge-multiple: true
       - name: Check assets and generate checksums
         env:
           RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
@@ -317,7 +316,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      - uses: ./.github/actions/download-release-artifact
         with:
           artifact-ids: ${{ needs.verify-assets.outputs.artifact-id }}
           path: release-assets

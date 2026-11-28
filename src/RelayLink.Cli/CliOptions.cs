@@ -21,6 +21,7 @@ public sealed class CliOptions
     public bool Force { get; private set; }
     public string? ResumeRequestId { get; private set; }
     public string? ResumeUserCode { get; private set; }
+    public int? ApiVersion { get; private set; }
 
     public string? Subject { get; private set; }
     public List<string> Scopes { get; } = [];
@@ -123,7 +124,10 @@ public sealed class CliOptions
                 case "--request": options.ResumeRequestId = value; break;
                 case "--code": options.ResumeUserCode = value; break;
                 case "--force": options.Force = true; break;
-                case "--api-version": break; // 兼容占位：当前仅支持 v1。
+                case "--api-version":
+                    if (!int.TryParse(value, out var apiVersion) || apiVersion <= 0) { error = "--api-version 必须是正整数。"; return false; }
+                    options.ApiVersion = apiVersion;
+                    break;
             }
         }
 

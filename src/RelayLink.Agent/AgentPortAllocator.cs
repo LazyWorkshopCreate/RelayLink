@@ -20,9 +20,28 @@ public sealed class AgentPortAllocator
         this.path = path;
         this.first = first;
         this.last = last;
-        saved = File.Exists(path)
-            ? JsonSerializer.Deserialize<Dictionary<string, int>>(File.ReadAllText(path)) ?? new Dictionary<string, int>(StringComparer.Ordinal)
-            : new Dictionary<string, int>(StringComparer.Ordinal);
+        saved = LoadSavedPorts(path);
+    }
+
+    private static Dictionary<string, int> LoadSavedPorts(string path)
+    {
+        if (!File.Exists(path)) return new Dictionary<string, int>(StringComparer.Ordinal);
+        try
+        {
+            var parsed = JsonSerializer.Deserialize<Dictionary<string, int>>(File.ReadAllText(path));
+            if (parsed is null) return new Dictionary<string, int>(StringComparer.Ordinal);
+            var valid = new Dictionary<string, int>(StringComparer.Ordinal);
+            foreach (var (key, value) in parsed)
+            {
+                if (!string.IsNullOrWhiteSpace(key) && value is >= 1024 and <= 65535)
+                    valid[key] = value;
+            }
+            return valid;
+        }
+        catch (JsonException)
+        {
+            return new Dictionary<string, int>(StringComparer.Ordinal);
+        }
     }
 
     public TcpListener Bind(string mappingId)
@@ -38,6 +57,7 @@ public sealed class AgentPortAllocator
             {
                 var port = first + (offset + index) % count;
                 if (port == preferred || saved.Any(pair => pair.Key != mappingId && pair.Value == port) || !TryStart(port, out var listener)) continue;
+                var hadPrevious = saved.TryGetValue(mappingId, out var previousPort);
                 try
                 {
                     saved[mappingId] = port;
@@ -46,6 +66,8 @@ public sealed class AgentPortAllocator
                 }
                 catch
                 {
+                    if (hadPrevious) saved[mappingId] = previousPort;
+                    else saved.Remove(mappingId);
                     listener!.Stop();
                     throw;
                 }
@@ -74,8 +96,15 @@ public sealed class AgentPortAllocator
                 catch (SocketException exception) when (exception.SocketErrorCode is SocketError.AddressAlreadyInUse or SocketError.AccessDenied)
                 { socket.Dispose(); continue; }
                 catch { socket.Dispose(); throw; }
+                var hadPrevious = saved.TryGetValue(mappingId, out var previousPort);
                 try { saved[mappingId] = port; Persist(); return socket; }
-                catch { socket.Dispose(); throw; }
+                catch
+                {
+                    if (hadPrevious) saved[mappingId] = previousPort;
+                    else saved.Remove(mappingId);
+                    socket.Dispose();
+                    throw;
+                }
             }
             throw new SocketException((int)SocketError.AddressAlreadyInUse);
         }

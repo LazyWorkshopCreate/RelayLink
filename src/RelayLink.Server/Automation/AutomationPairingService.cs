@@ -23,13 +23,17 @@ public sealed class AutomationPairingService(
     private const int RateLimitPerWindow = 10;
 
     private readonly ConcurrentDictionary<string, Queue<DateTimeOffset>> rateBuckets = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, Queue<DateTimeOffset>> tokenRateBuckets = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, DateTimeOffset> replayCache = new(StringComparer.Ordinal);
+    private long lastReplaySweepTick = Environment.TickCount64;
 
     // jti 重放缓存保留期必须覆盖证明的最大可重放寿命，三段之和：
     // iat 允许超前 60s + exp-iat 上限 60s + 过期容忍 skew 60s = 180s。
     // 少算任何一段都会出现「缓存已淘汰、时间窗仍接受」的重放窗口（上一轮按 120s
     // 计算漏了 iat 超前，150s 仍留 30s 窗口，本轮补齐）。
     private static readonly TimeSpan ReplayRetention = TimeSpan.FromSeconds(180);
+    private const int MaxReplayEntries = 65_536;
+    private const int TokenRateLimitPerWindow = 120;
 
     private AutomationConfiguration? Configuration => configuration.Server.Automation;
 
@@ -42,30 +46,34 @@ public sealed class AutomationPairingService(
     // （已有键的合法调用不受影响）。
     private const int MaxRateBuckets = 4096;
 
-    public bool IsRateLimited(string key)
+    public bool IsRateLimited(string key) => IsRateLimitedCore(rateBuckets, key, RateLimitPerWindow);
+
+    public bool IsTokenRateLimited(string grantKey) => IsRateLimitedCore(tokenRateBuckets, grantKey, TokenRateLimitPerWindow);
+
+    private bool IsRateLimitedCore(ConcurrentDictionary<string, Queue<DateTimeOffset>> buckets, string key, int limit)
     {
         var now = DateTimeOffset.UtcNow;
-        if (!rateBuckets.ContainsKey(key) && rateBuckets.Count >= MaxRateBuckets)
+        if (!buckets.ContainsKey(key) && buckets.Count >= MaxRateBuckets)
         {
-            SweepExpiredBuckets(now);
-            if (rateBuckets.Count >= MaxRateBuckets) return true;
+            SweepExpiredBuckets(buckets, now);
+            if (buckets.Count >= MaxRateBuckets) return true;
         }
 
-        var bucket = rateBuckets.GetOrAdd(key, _ => new Queue<DateTimeOffset>());
+        var bucket = buckets.GetOrAdd(key, _ => new Queue<DateTimeOffset>());
         lock (bucket)
         {
             while (bucket.Count > 0 && now - bucket.Peek() > RateWindow) bucket.Dequeue();
-            if (bucket.Count >= RateLimitPerWindow) return true;
+            if (bucket.Count >= limit) return true;
             bucket.Enqueue(now);
             return false;
         }
     }
 
-    private void SweepExpiredBuckets(DateTimeOffset now)
+    private static void SweepExpiredBuckets(ConcurrentDictionary<string, Queue<DateTimeOffset>> buckets, DateTimeOffset now)
     {
-        foreach (var key in rateBuckets.Keys.ToArray())
+        foreach (var key in buckets.Keys.ToArray())
         {
-            if (!rateBuckets.TryGetValue(key, out var bucket)) continue;
+            if (!buckets.TryGetValue(key, out var bucket)) continue;
             lock (bucket)
             {
                 var hasLive = false;
@@ -73,7 +81,7 @@ public sealed class AutomationPairingService(
                 {
                     if (now - stamp <= RateWindow) { hasLive = true; break; }
                 }
-                if (!hasLive) rateBuckets.TryRemove(key, out _);
+                if (!hasLive) buckets.TryRemove(key, out _);
             }
         }
     }
@@ -84,12 +92,20 @@ public sealed class AutomationPairingService(
     /// </summary>
     public bool IsAnonymousRateLimited() => IsRateLimited("__anonymous_global__");
 
-    /// <summary>jti 重放缓存。返回 false 表示该 jti 已出现过。</summary>
+    /// <summary>jti 重放缓存。返回 false 表示该 jti 已出现过或缓存已满。</summary>
     public bool AcceptJti(string jti)
     {
         var now = DateTimeOffset.UtcNow;
-        foreach (var entry in replayCache.Where(pair => now - pair.Value > ReplayRetention).Select(pair => pair.Key).ToArray())
-            replayCache.TryRemove(entry, out _);
+        var nowTick = Environment.TickCount64;
+        var lastSweep = Volatile.Read(ref lastReplaySweepTick);
+        if (replayCache.Count >= MaxReplayEntries || (nowTick - lastSweep >= 30_000 && Interlocked.CompareExchange(ref lastReplaySweepTick, nowTick, lastSweep) == lastSweep))
+        {
+            Volatile.Write(ref lastReplaySweepTick, nowTick);
+            foreach (var entry in replayCache.Where(pair => now - pair.Value > ReplayRetention).Select(pair => pair.Key).ToArray())
+                replayCache.TryRemove(entry, out _);
+        }
+        if (replayCache.Count >= MaxReplayEntries)
+            return false;
         return replayCache.TryAdd(jti, now);
     }
 
@@ -112,50 +128,53 @@ public sealed class AutomationPairingService(
             return (null, "validation_failed", "devicePublicKey 必须是 P-256 EC 公钥的 JWK。");
         var thumbprint = DeviceProof.ThumbprintOf(deviceKey);
 
-        if (await store.CountPairingsAsync(PairingState.Pending, cancellationToken) >= Configuration.MaxPendingPairings)
-        {
-            logger.LogWarning("Automation pairing rejected: pending capacity reached ({Limit}).", Configuration.MaxPendingPairings);
-            return (null, "pending_capacity_exceeded", "待批准请求已达上限，请管理员先处理。");
-        }
-
         var instanceId = await store.GetOrCreateInstanceIdAsync(cancellationToken);
         var now = DateTimeOffset.UtcNow;
         var code = UserCode.Generate();
         var request = new PairingRequest(Guid.NewGuid(), subject.Trim(), platform ?? "unknown", cliVersion ?? "unknown",
             scopes, thumbprint, devicePublicKeyJwk, UserCode.Digest(code), UserCode.Format(code), PairingState.Pending,
             0, now, now.AddMinutes(UserCodeLifetimeMinutes), null, null, null, null, null, null, null, null);
-        await store.CreatePairingAsync(request, cancellationToken);
+        if (!await store.TryCreatePairingAsync(request, Configuration.MaxPendingPairings, Configuration.MaxAuthorizations, cancellationToken))
+        {
+            logger.LogWarning("Automation pairing rejected: pending or authorization capacity reached (pending limit {PendingLimit}, grant limit {GrantLimit}).",
+                Configuration.MaxPendingPairings, Configuration.MaxAuthorizations);
+            return (null, "pending_capacity_exceeded", "待批准请求或有效授权已达上限，请管理员先处理。");
+        }
         await RecordAsync("automation_pairing_requested", "accepted", thumbprint, request.RequestId, subject, cancellationToken);
 
         return (new PairingCreation(request.RequestId.ToString(), code, request.ExpiresAtUtc, instanceId), null, null);
     }
 
-    /// <summary>查询配对状态。需要设备签名证明，且证明必须携带正确用户码摘要。</summary>
+    /// <summary>查询配对状态。需要设备签名证明，且证明必须携带正确用户码摘要；错码计入锁定。</summary>
     public async Task<PairingOutcome> QueryStatusAsync(Guid requestId, DeviceProof.Proof proof, string? submittedUserCode, CancellationToken cancellationToken)
     {
         var request = await store.GetPairingAsync(requestId, cancellationToken);
         if (request is null) return new PairingOutcome(false, "pairing_not_found", "配对请求不存在。", null, null);
         if (!AcceptJti(proof.Jti!)) return new PairingOutcome(false, "proof_replayed", "该证明已使用过。", null, null);
 
-        // 兑现设计承诺：status 也要校验用户码摘要，不让它沦为装饰性 claim。
-        // 与 ExchangeTokenAsync 不同的是不计数、不锁定——查询失败只拒绝本次查询。
+        var effective = await EffectiveStateAsync(request, cancellationToken);
+        if (effective is PairingState.Completed)
+            return new PairingOutcome(false, "pairing_already_completed", "该请求已换取过令牌。", request, null);
+        if (effective is PairingState.Denied)
+            return new PairingOutcome(false, "pairing_denied", "配对请求已被拒绝，请重新发起。", request, null);
+        if (effective is PairingState.Locked)
+            return new PairingOutcome(false, "pairing_locked", "用户码错误次数过多，该请求已作废。", request, null);
+        if (effective is PairingState.Expired)
+            return new PairingOutcome(false, "pairing_expired", "配对请求已过期，请重新发起。", request, null);
+
         var normalized = UserCode.Normalize(submittedUserCode);
         if (!UserCode.FixedTimeEquals(UserCode.Digest(normalized), request.UserCodeDigest) ||
             !UserCode.FixedTimeEquals(proof.UserCodeDigest, request.UserCodeDigest))
         {
-            return new PairingOutcome(false, "pairing_denied", "用户码不正确。", request, null);
+            var (attempts, lockedState) = await store.RegisterUserCodeFailureAsync(requestId, UserCodeLockAfter, cancellationToken);
+            await RecordAsync(lockedState == PairingState.Locked ? "automation_pairing_locked" : "automation_pairing_denied",
+                "failed", request.DeviceThumbprint, requestId, request.Subject, cancellationToken);
+            return lockedState == PairingState.Locked
+                ? new PairingOutcome(false, "pairing_locked", "用户码错误次数过多，该请求已作废。", request, null)
+                : new PairingOutcome(false, "pairing_denied", $"用户码不正确（第 {attempts} 次）。", request, null);
         }
 
-        var effective = await EffectiveStateAsync(request, cancellationToken);
-        return effective switch
-        {
-            PairingState.Approved => new PairingOutcome(true, null, null, request, null),
-            PairingState.Pending => new PairingOutcome(true, null, null, request, null),
-            PairingState.Completed => new PairingOutcome(false, "pairing_already_completed", "该请求已换取过令牌。", request, null),
-            PairingState.Denied => new PairingOutcome(false, "pairing_denied", "配对请求已被拒绝，请重新发起。", request, null),
-            PairingState.Locked => new PairingOutcome(false, "pairing_locked", "用户码错误次数过多，该请求已作废。", request, null),
-            _ => new PairingOutcome(false, "pairing_expired", "配对请求已过期，请重新发起。", request, null)
-        };
+        return new PairingOutcome(true, null, null, request, null);
     }
 
     /// <summary>
@@ -198,9 +217,12 @@ public sealed class AutomationPairingService(
         var tokenBytes = RandomNumberGenerator.GetBytes(32);
         var token = DeviceProof.Base64UrlEncode(tokenBytes);
         var tokenHash = HashToken(token);
-        var grant = await store.CompletePairingAsync(requestId, tokenHash, DateTimeOffset.UtcNow, null, cancellationToken);
+        var grant = await store.CompletePairingAsync(requestId, tokenHash, DateTimeOffset.UtcNow, null, cancellationToken,
+            Configuration?.MaxAuthorizations ?? AutomationConfiguration.DefaultAuthorizations);
         if (grant is null)
-            return new PairingOutcome(false, "pairing_already_completed", "该请求已换取过令牌。", request, null);
+            return await store.CountActiveGrantsAsync(cancellationToken) >= (Configuration?.MaxAuthorizations ?? AutomationConfiguration.DefaultAuthorizations)
+                ? new PairingOutcome(false, AutomationErrors.PendingCapacityExceeded, "有效授权已达上限，请管理员先撤销旧授权。", request, null)
+                : new PairingOutcome(false, "pairing_already_completed", "该请求已换取过令牌。", request, null);
 
         await RecordAsync("automation_token_issued", "accepted", request.DeviceThumbprint, requestId, request.Subject, cancellationToken);
         return new PairingOutcome(true, null, null, request, token);

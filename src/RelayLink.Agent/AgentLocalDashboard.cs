@@ -29,9 +29,20 @@ public sealed class AgentStatus(AgentConfiguration configuration)
                 TransportProtocol = mapping.TransportProtocol, ApplicationProtocol = mapping.ApplicationProtocol,
                 HttpState = mapping.ApplicationProtocol == "http" ?
                     httpMappingStates?.GetValueOrDefault(mapping.MappingId) is { } state && state != "ready" ? state : address is null ? "unavailable" : "ready" : null,
-                AccessUrl = mapping.Http is null || address is null ? null : $"{mapping.Http.Scheme}://{mapping.Http.AuthorityHost}:{address.LocalPort}"
+                AccessUrl = FormatAccessUrl(mapping, address)
             }).ToArray();
         Volatile.Write(ref current, new AgentStatusSnapshot(configuration.ClientId, true, DateTimeOffset.UtcNow, channels, mappings));
+    }
+
+    private static string? FormatAccessUrl(OutboundMappingSnapshot mapping, PeerMappingAddress? address)
+    {
+        if (mapping.Http is not { } http || address is null) return null;
+        if (http.Scheme is not ("http" or "https")) return null;
+        if (string.IsNullOrWhiteSpace(http.AuthorityHost) ||
+            http.AuthorityHost.Any(c => char.IsControl(c) || char.IsWhiteSpace(c)) ||
+            http.AuthorityHost.IndexOfAny(['/', '?', '#', '@', ':']) >= 0)
+            return null;
+        return $"{http.Scheme}://{http.AuthorityHost}:{address.LocalPort}";
     }
 
     public void SetOffline() => Volatile.Write(ref current, new AgentStatusSnapshot(configuration.ClientId, false, null, [], []));
@@ -104,15 +115,19 @@ public sealed class AgentLocalDashboard : BackgroundService
             context.Response.Headers.CacheControl = "no-store";
             context.Response.Headers.ContentSecurityPolicy = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'";
             context.Response.Headers.XContentTypeOptions = "nosniff";
-            var expectedOrigin = $"http://127.0.0.1:{dashboardPort}";
-            if (context.Request.Host.Host != "127.0.0.1" || context.Request.Host.Port != dashboardPort)
+            var expectedOrigin = dashboardPort == 80 ? "http://127.0.0.1" : $"http://127.0.0.1:{dashboardPort}";
+            var hostPort = context.Request.Host.Port ?? 80;
+            if (context.Request.Host.Host != "127.0.0.1" || hostPort != dashboardPort)
             {
                 context.Response.StatusCode = StatusCodes.Status400BadRequest;
                 return;
             }
             var origin = context.Request.Headers.Origin.ToString();
+            var requiresSameOrigin = !HttpMethods.IsGet(context.Request.Method) &&
+                !HttpMethods.IsHead(context.Request.Method) &&
+                !HttpMethods.IsOptions(context.Request.Method);
             if ((!string.IsNullOrEmpty(origin) && !string.Equals(origin, expectedOrigin, StringComparison.Ordinal)) ||
-                (context.Request.Method is "POST" or "PUT" or "PATCH" or "DELETE" && !string.Equals(origin, expectedOrigin, StringComparison.Ordinal)))
+                (requiresSameOrigin && !string.Equals(origin, expectedOrigin, StringComparison.Ordinal)))
             {
                 context.Response.StatusCode = StatusCodes.Status403Forbidden;
                 return;
@@ -151,18 +166,24 @@ public sealed class AgentLocalDashboard : BackgroundService
         {
             app.MapGet("/api/v2/admin/session", (HttpContext context) =>
             {
+                var fetchSite = context.Request.Headers["Sec-Fetch-Site"].ToString();
+                if (!string.IsNullOrEmpty(fetchSite) && !string.Equals(fetchSite, "same-origin", StringComparison.OrdinalIgnoreCase))
+                    return Results.StatusCode(StatusCodes.Status403Forbidden);
+                var fetchDest = context.Request.Headers["Sec-Fetch-Dest"].ToString();
+                if (!string.IsNullOrEmpty(fetchDest) && !string.Equals(fetchDest, "empty", StringComparison.OrdinalIgnoreCase))
+                    return Results.StatusCode(StatusCodes.Status403Forbidden);
                 var cookie = context.Request.Cookies[AdminCookie];
                 var session = writeSession.GetOrCreate(cookie);
-                if (cookie != session.Token)
-                    context.Response.Cookies.Append(AdminCookie, session.Token, new CookieOptions
-                    {
-                        HttpOnly = true, SameSite = SameSiteMode.Strict, Secure = false,
-                        IsEssential = true, Path = "/api/v2/admin", Expires = session.ExpiresAtUtc
-                    });
+                context.Response.Cookies.Append(AdminCookie, session.Token, new CookieOptions
+                {
+                    HttpOnly = true, SameSite = SameSiteMode.Strict, Secure = false,
+                    IsEssential = true, Path = "/api/v2/admin", Expires = session.ExpiresAtUtc
+                });
                 return Results.Ok(new
                 {
                     csrfToken = session.CsrfToken,
-                    version = runtime.ConfigurationVersion
+                    version = runtime.ConfigurationVersion,
+                    expiresAtUtc = session.ExpiresAtUtc
                 });
             });
             app.MapDelete("/api/v2/admin/session", (HttpContext context) =>
@@ -266,6 +287,11 @@ public sealed class AgentLocalDashboard : BackgroundService
         if (session is null) return Results.Json(new { message = "Local management session is required." }, statusCode: StatusCodes.Status401Unauthorized);
         if (!writeSession.CheckCsrf(session, context.Request.Headers["X-RelayLink-CSRF"].ToString()))
             return Results.StatusCode(StatusCodes.Status403Forbidden);
+        context.Response.Cookies.Append(AdminCookie, session.Token, new CookieOptions
+        {
+            HttpOnly = true, SameSite = SameSiteMode.Strict, Secure = false,
+            IsEssential = true, Path = "/api/v2/admin", Expires = session.ExpiresAtUtc
+        });
         return null;
     }
 

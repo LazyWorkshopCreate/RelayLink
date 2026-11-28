@@ -121,4 +121,25 @@ public sealed class HttpProxyPolicyTests
         Assert.NotNull(await reader.ReadAsync(1024, CancellationToken.None));
         Assert.Equal(version, reader.ProtocolVersion);
     }
+
+    [Theory]
+    [InlineData("http://2130706433")]
+    [InlineData("http://0x7f000001")]
+    [InlineData("http://0177.0.0.1")]
+    [InlineData("https://panel.test:")]
+    [InlineData("https://panel.test:080")]
+    [InlineData("https://bad..host")]
+    [InlineData("https://.bad.host")]
+    [InlineData("https://bad.host.")]
+    public void Rejects_non_canonical_origins(string origin) =>
+        Assert.Throws<ArgumentException>(() => HttpProxyPolicy.NormalizeOrigin(origin));
+
+    [Fact]
+    public void Rejects_trailing_newline_certificate_ref_and_normalizes_host_header()
+    {
+        Assert.Throws<ArgumentException>(() => HttpProxyPolicy.Validate("http", "tcp", false, true,
+            Options with { PublicEntryScheme = "https", CertificateRef = "valid-cert\n" }));
+        Assert.Equal("panel.test", HttpProxyPolicy.NormalizeHostHeader("PANEL.TEST:443", "https"));
+        Assert.Equal("panel.test:8443", HttpProxyPolicy.NormalizeHostHeader("PANEL.TEST:8443", "https"));
+    }
 }

@@ -12,17 +12,23 @@ public sealed class ProxyListenerService(ServerRuntime runtime, PendingConnectio
 {
     private readonly SemaphoreSlim configurationLock = new(1, 1);
     private readonly Dictionary<string, ListenerBinding> bindings = new(StringComparer.Ordinal);
-    private readonly ConcurrentDictionary<string, AdjustableConnectionLimit> clientLimits = new(StringComparer.Ordinal);
-    private readonly ConcurrentDictionary<string, AdjustableConnectionLimit> clientPendingLimits = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, bool> failedBindings = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<long, ActiveProxyConnection> activeConnections = new();
     private readonly SemaphoreSlim globalLimit = runtime.GlobalConnectionLimit;
     private readonly SemaphoreSlim globalPendingLimit = runtime.GlobalPendingLimit;
+    private readonly SemaphoreSlim preAdmissionLimit = new(Math.Max(512, runtime.Configuration.Server.Limits.MaxConnections * 4));
     private long connectionTaskSequence;
     private int unexpectedListenerFailures;
     private int forcedAcceptFailures;
     private CancellationToken serviceStoppingToken;
     internal int UnexpectedListenerFailures => Volatile.Read(ref unexpectedListenerFailures);
     internal void FailNextAccepts(int count) => Volatile.Write(ref forcedAcceptFailures, count);
+
+    public string GetListenerState(string clientId, ChannelConfiguration channel) =>
+        channel.AuthorizedClientsOnly ? "peer-only"
+        : !channel.Enabled ? "stopped"
+        : failedBindings.TryGetValue($"{clientId}/{channel.ChannelId}", out var failed) && failed ? "failed"
+        : "listening";
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -36,12 +42,9 @@ public sealed class ProxyListenerService(ServerRuntime runtime, PendingConnectio
         await configurationLock.WaitAsync(cancellationToken);
         try
         {
-            var previousConnectionLimits = clientLimits.ToDictionary(pair => pair.Key, pair => pair.Value.Maximum, StringComparer.Ordinal);
-            var previousPendingLimits = clientPendingLimits.ToDictionary(pair => pair.Key, pair => pair.Value.Maximum, StringComparer.Ordinal);
+            var (previousConnectionLimits, previousPendingLimits) = runtime.SyncClientLimits(configuration.Clients.Values);
             foreach (var client in configuration.Clients.Values)
             {
-                clientLimits.GetOrAdd(client.ClientId, _ => new AdjustableConnectionLimit(client.MaxConnections)).SetMaximum(client.MaxConnections);
-                clientPendingLimits.GetOrAdd(client.ClientId, _ => new AdjustableConnectionLimit(client.MaxPendingConnections)).SetMaximum(client.MaxPendingConnections);
                 foreach (var channel in client.Channels) metrics.For(client.ClientId, channel.ChannelId);
             }
             var desired = configuration.Clients.Values.Where(client => client.Enabled).SelectMany(client => client.Channels.Where(channel => channel.Enabled && !channel.AuthorizedClientsOnly).Select(channel => new ListenerBinding(client, channel))).ToDictionary(binding => binding.Key, StringComparer.Ordinal);
@@ -66,6 +69,7 @@ public sealed class ProxyListenerService(ServerRuntime runtime, PendingConnectio
                     {
                         restored.Start();
                         bindings[binding.Key] = restored;
+                        failedBindings[binding.Key] = false;
                         TrackAcceptLoop(restored);
                     }
                     catch (SocketException restoreException)
@@ -73,8 +77,7 @@ public sealed class ProxyListenerService(ServerRuntime runtime, PendingConnectio
                         logger.LogCritical(restoreException, "Could not restore proxy listener for {ClientId}/{ChannelId}.", binding.Client.ClientId, binding.Channel.ChannelId);
                     }
                 }
-                foreach (var pair in previousConnectionLimits) clientLimits[pair.Key].SetMaximum(pair.Value);
-                foreach (var pair in previousPendingLimits) clientPendingLimits[pair.Key].SetMaximum(pair.Value);
+                runtime.RestoreClientLimits(previousConnectionLimits, previousPendingLimits);
                 if (exception is SocketException) throw new ConfigurationException($"Unable to bind channel listener: {exception.Message}");
                 throw;
             }
@@ -88,6 +91,7 @@ public sealed class ProxyListenerService(ServerRuntime runtime, PendingConnectio
             {
                 bindings.TryGetValue(binding.Key, out var replaced);
                 bindings[binding.Key] = binding;
+                failedBindings[binding.Key] = false;
                 TrackAcceptLoop(binding);
                 logger.LogInformation("Proxy listener started for {ClientId}/{ChannelId} at {Address}:{Port}.", binding.Client.ClientId, binding.Channel.ChannelId, binding.Channel.ListenAddress, binding.Channel.ListenPort);
                 if (replaced is { Stopped: false }) replaced.Stop();
@@ -95,6 +99,7 @@ public sealed class ProxyListenerService(ServerRuntime runtime, PendingConnectio
             foreach (var obsolete in bindings.Values.Where(binding => !desired.ContainsKey(binding.Key)).ToArray())
             {
                 bindings.Remove(obsolete.Key);
+                failedBindings.TryRemove(obsolete.Key, out _);
                 obsolete.Stop();
                 logger.LogInformation("Proxy listener stopped for {ClientId}/{ChannelId}.", obsolete.Client.ClientId, obsolete.Channel.ChannelId);
             }
@@ -141,6 +146,7 @@ public sealed class ProxyListenerService(ServerRuntime runtime, PendingConnectio
     private void NoteAcceptLoopFailed(ListenerBinding binding, Exception? exception)
     {
         binding.MarkAcceptFailed();
+        failedBindings[binding.Key] = true;
         Interlocked.Increment(ref unexpectedListenerFailures);
         logger.LogError(exception, "Proxy listener for {ClientId}/{ChannelId} stopped unexpectedly.", binding.Client.ClientId, binding.Channel.ChannelId);
         runtime.IsReady = false;
@@ -201,7 +207,15 @@ public sealed class ProxyListenerService(ServerRuntime runtime, PendingConnectio
 
     public override async Task StopAsync(CancellationToken cancellationToken)
     {
-        foreach (var binding in bindings.Values) binding.Stop();
+        ListenerBinding[] snapshot;
+        await configurationLock.WaitAsync(cancellationToken);
+        try
+        {
+            snapshot = bindings.Values.ToArray();
+            foreach (var binding in snapshot) binding.Stop();
+            failedBindings.Clear();
+        }
+        finally { configurationLock.Release(); }
         var active = activeConnections.Values.Select(connection => connection.Task).OfType<Task>().ToArray();
         if (active.Length > 0) await Task.WhenAny(Task.WhenAll(active), Task.Delay(TimeSpan.FromSeconds(30), cancellationToken));
         await base.StopAsync(cancellationToken);
@@ -236,8 +250,8 @@ public sealed class ProxyListenerService(ServerRuntime runtime, PendingConnectio
         return true;
     }
 
-    internal AdjustableConnectionLimit ClientConnectionLimit(string clientId) => clientLimits[clientId];
-    internal AdjustableConnectionLimit ClientPendingLimit(string clientId) => clientPendingLimits[clientId];
+    internal AdjustableConnectionLimit ClientConnectionLimit(string clientId) => runtime.ClientConnectionLimits[clientId];
+    internal AdjustableConnectionLimit ClientPendingLimit(string clientId) => runtime.ClientPendingLimits[clientId];
 
     public void RevokeSecurityGroupConnections(string groupId, ServerConfiguration server)
     {
@@ -261,10 +275,15 @@ public sealed class ProxyListenerService(ServerRuntime runtime, PendingConnectio
 
     private void TrackConnection(Socket caller, ListenerBinding binding, CancellationToken stoppingToken)
     {
+        if (!preAdmissionLimit.Wait(0))
+        {
+            caller.Dispose();
+            return;
+        }
         var id = Interlocked.Increment(ref connectionTaskSequence);
         var connection = new ActiveProxyConnection(binding.Client.ClientId, binding.Channel, caller.RemoteEndPoint as IPEndPoint);
         activeConnections[id] = connection;
-        connection.Task = HandleCallerAsync(caller, binding, connection, stoppingToken);
+        connection.Task = HandleCallerAsync(caller, binding, connection, stoppingToken, preAdmissionHeld: true);
         _ = connection.Task.ContinueWith(completed =>
         {
             activeConnections.TryRemove(id, out ActiveProxyConnection? removed);
@@ -272,12 +291,13 @@ public sealed class ProxyListenerService(ServerRuntime runtime, PendingConnectio
         }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
     }
 
-    private async Task HandleCallerAsync(Socket? caller, ListenerBinding binding, ActiveProxyConnection connection, CancellationToken stoppingToken, DatagramSession? datagram = null)
+    private async Task HandleCallerAsync(Socket? caller, ListenerBinding binding, ActiveProxyConnection connection, CancellationToken stoppingToken, DatagramSession? datagram = null, bool preAdmissionHeld = false)
     {
         using var connectionCancellation = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken, connection.RevocationToken, datagram?.Token ?? CancellationToken.None);
         var cancellationToken = connectionCancellation.Token;
         var globalHeld = false; var clientHeld = false; var channelHeld = false; var globalPendingHeld = false; var clientPendingHeld = false;
         PendingConnection? pending = null; var relaying = false; var auditOpened = false; var relayCompletedNormally = false;
+        var callerOwned = caller is not null;
         var started = Stopwatch.GetTimestamp();
         var phase = "accepted";
         var outcome = "rejected";
@@ -292,20 +312,21 @@ public sealed class ProxyListenerService(ServerRuntime runtime, PendingConnectio
             channelMetrics.Accepted();
             if (!runtime.Configuration.Clients.TryGetValue(client.ClientId, out var currentClient) || !currentClient.Enabled ||
                 currentClient.Channels.SingleOrDefault(current => current.ChannelId == channel.ChannelId) is not { Enabled: true, AuthorizedClientsOnly: false } currentChannel)
-            { outcome = "channel_unavailable"; caller?.Dispose(); return; }
+            { outcome = "channel_unavailable"; return; }
             if (connection.SourceAddress is not { } source || !SecurityGroupMatcher.IsAllowed(currentChannel, runtime.Configuration.Server, source))
-            { outcome = "security_group_denied"; caller?.Dispose(); return; }
-            if (!runtime.Sessions.TryGet(client.ClientId, out var session) || session is not { IsReady: true }) { outcome = "agent_offline"; caller?.Dispose(); return; }
-            if (channel.TransportProtocol == "udp" && session.ProtocolVersion < 4) { outcome = "udp_not_supported"; caller?.Dispose(); return; }
-            if (channel.ApplicationProtocol == "http" && !session.IsHttpReady(channel)) { outcome = "http_unavailable"; caller?.Dispose(); return; }
-            globalHeld = await globalLimit.WaitAsync(0, cancellationToken); if (!globalHeld) { caller?.Dispose(); return; }
+            { outcome = "security_group_denied"; return; }
+            if (!runtime.Sessions.TryGet(client.ClientId, out var session) || session is not { IsReady: true }) { outcome = "agent_offline"; return; }
+            if (channel.TransportProtocol == "udp" && session.ProtocolVersion < 4) { outcome = "udp_not_supported"; return; }
+            if (channel.ApplicationProtocol == "http" && !session.IsHttpReady(channel)) { outcome = "http_unavailable"; return; }
+            globalHeld = await globalLimit.WaitAsync(0, cancellationToken); if (!globalHeld) { return; }
             cancellationToken.ThrowIfCancellationRequested();
-            clientHeld = clientLimits[client.ClientId].TryAcquire(); if (!clientHeld) { caller?.Dispose(); return; }
-            channelHeld = await binding.ChannelLimit.WaitAsync(0, cancellationToken); if (!channelHeld) { caller?.Dispose(); return; }
-            globalPendingHeld = await globalPendingLimit.WaitAsync(0, cancellationToken); if (!globalPendingHeld) { caller?.Dispose(); return; }
+            clientHeld = runtime.ClientConnectionLimits[client.ClientId].TryAcquire(); if (!clientHeld) { return; }
+            channelHeld = await binding.ChannelLimit.WaitAsync(0, cancellationToken); if (!channelHeld) { return; }
+            globalPendingHeld = await globalPendingLimit.WaitAsync(0, cancellationToken); if (!globalPendingHeld) { return; }
             cancellationToken.ThrowIfCancellationRequested();
-            clientPendingHeld = clientPendingLimits[client.ClientId].TryAcquire(); if (!clientPendingHeld) { caller?.Dispose(); return; }
+            clientPendingHeld = runtime.ClientPendingLimits[client.ClientId].TryAcquire(); if (!clientPendingHeld) { return; }
             pending = pendingConnections.Create(session, channel, caller, TimeSpan.FromSeconds(runtime.Configuration.Server.Limits.OpenTimeoutSeconds), connection.ConnectionId);
+            callerOwned = false;
             phase = "open_sent";
             logger.LogInformation("Proxy {ConnectionId} opened for {ClientId}/{ChannelId}.", pending.ConnectionId, client.ClientId, channel.ChannelId);
             await session.SendAsync(new Frame(FrameType.Open, JsonProtocolSerializer.Serialize(new OpenMessage(session.SessionId, pending.ConnectionId, channel.ChannelId, session.ConfigVersion, pending.Token, runtime.Configuration.Server.Limits.OpenTimeoutSeconds * 1000, channel.ApplicationProtocol == "http" ? new HttpIngressContext("public", channel.Http!.PublicEntryScheme, connection.SourceAddress?.ToString(), PolicyHash: HttpProxyPolicy.Hash(ConfigurationSnapshotFactory.ToHttpSnapshot(channel))) : null), session.ProtocolVersion)), cancellationToken);
@@ -321,7 +342,8 @@ public sealed class ProxyListenerService(ServerRuntime runtime, PendingConnectio
             { ConnectionId = connection.ConnectionId, SessionId = session.SessionId, ClientId = client.ClientId, ChannelId = channel.ChannelId, RemoteIp = connection.SourceAddress?.ToString() }, openTimeout.Token);
             auditOpened = true;
             await session.SendAsync(new Frame(FrameType.Start, JsonProtocolSerializer.Serialize(new StartMessage(pending.ConnectionId))), openTimeout.Token);
-            globalPendingLimit.Release(); globalPendingHeld = false; clientPendingLimits[client.ClientId].Release(); clientPendingHeld = false;
+            globalPendingLimit.Release(); globalPendingHeld = false; runtime.ClientPendingLimits[client.ClientId].Release(); clientPendingHeld = false;
+            if (preAdmissionHeld) { preAdmissionLimit.Release(); preAdmissionHeld = false; }
             channelMetrics.Opened(); relaying = true; connection.MarkRelaying(); phase = "relaying";
             logger.LogInformation("Proxy {ConnectionId} relay started after {ElapsedMs} ms.", pending.ConnectionId, (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds);
             using var relayCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, session.LifetimeToken);
@@ -376,10 +398,12 @@ public sealed class ProxyListenerService(ServerRuntime runtime, PendingConnectio
                     (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds,
                     (long)Stopwatch.GetElapsedTime(Interlocked.Read(ref lastToAgent)).TotalMilliseconds,
                     (long)Stopwatch.GetElapsedTime(Interlocked.Read(ref lastToCaller)).TotalMilliseconds);
+            if (callerOwned) caller?.Dispose();
             if (pending is not null) { pending.Complete(); pendingConnections.Remove(pending); }
             var channelMetrics = metrics.For(client.ClientId, channel.ChannelId);
             if (relaying) channelMetrics.Closed(relayCompletedNormally); else channelMetrics.OpenFailed();
-            if (channelHeld) binding.ChannelLimit.Release(); if (clientHeld) clientLimits[client.ClientId].Release(); if (globalHeld) globalLimit.Release(); if (clientPendingHeld) clientPendingLimits[client.ClientId].Release(); if (globalPendingHeld) globalPendingLimit.Release();
+            if (preAdmissionHeld) preAdmissionLimit.Release();
+            if (channelHeld) binding.ChannelLimit.Release(); if (clientHeld) runtime.ClientConnectionLimits[client.ClientId].Release(); if (globalHeld) globalLimit.Release(); if (clientPendingHeld) runtime.ClientPendingLimits[client.ClientId].Release(); if (globalPendingHeld) globalPendingLimit.Release();
             try
             {
                 await audit.RecordAsync(new AuditEvent(auditOpened ? "proxy_connection_closed" : "proxy_connection_rejected", relaying && relayCompletedNormally ? "completed" : "aborted")
@@ -390,6 +414,7 @@ public sealed class ProxyListenerService(ServerRuntime runtime, PendingConnectio
                     BytesToTarget = Interlocked.Read(ref toAgentBytes), BytesToCaller = Interlocked.Read(ref toCallerBytes)
                 }, CancellationToken.None);
             }
+            catch (AuditUnavailableException) when (!auditOpened) { /* Rejection throttling/storage already logged. */ }
             catch (Exception exception) { logger.LogError(exception, "Could not persist proxy termination audit for {ConnectionId}.", connection.ConnectionId); }
         }
     }

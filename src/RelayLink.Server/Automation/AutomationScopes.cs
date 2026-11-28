@@ -46,17 +46,25 @@ public static class AutomationScopes
     /// <summary>把申请集合规范化为去重、去隐含项后的稳定顺序。</summary>
     public static string[] Normalize(IEnumerable<string>? requested)
     {
+        TryNormalize(requested, out var ordered, out _);
+        return ordered;
+    }
+
+    public static bool TryNormalize(IEnumerable<string>? requested, out string[] normalized, out string[] unknown)
+    {
         var set = new HashSet<string>(StringComparer.Ordinal);
+        var unknownSet = new HashSet<string>(StringComparer.Ordinal);
         foreach (var scope in requested ?? [])
         {
-            if (scope is null) continue;
+            if (string.IsNullOrWhiteSpace(scope)) continue;
             var trimmed = scope.Trim();
             if (IsKnown(trimmed)) set.Add(trimmed);
+            else unknownSet.Add(trimmed);
         }
 
-        // 用户显式申请了读 scope 时不需要再加写 scope 的隐含读；但写 scope 自带读能力。
-        var ordered = All.Where(set.Contains).ToArray();
-        return ordered;
+        normalized = All.Where(set.Contains).ToArray();
+        unknown = unknownSet.ToArray();
+        return unknown.Length == 0;
     }
 
     /// <summary>
@@ -79,11 +87,11 @@ public static class AutomationScopes
     }
 
     /// <summary>
-    /// 批准时只允许缩小，不允许扩大。返回 false 表示请求了申请中未列出的 scope。
+    /// 批准时只允许缩小，不允许扩大。支持将写 scope 缩小为对应的读 scope。
     /// </summary>
     public static bool IsSubsetOf(IEnumerable<string> approved, IEnumerable<string> requested)
     {
-        var requestedSet = new HashSet<string>(requested, StringComparer.Ordinal);
-        return approved.All(scope => requestedSet.Contains(scope));
+        var requestedArray = requested.ToArray();
+        return approved.All(scope => Satisfies(requestedArray, scope));
     }
 }

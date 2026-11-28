@@ -128,7 +128,7 @@ public sealed class SecretFilePermissionTests
     }
 
     [Fact]
-    public void Group_writable_directory_is_not_made_private()
+    public void Group_writable_directory_is_refused_without_a_permission_change()
     {
         if (!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS()) return;
         var shared = Directory.CreateTempSubdirectory("relaylink-group-").FullName;
@@ -139,9 +139,11 @@ public sealed class SecretFilePermissionTests
                 | UnixFileMode.SetGroup;
             File.SetUnixFileMode(shared, mode);
             var database = Path.Combine(shared, "audit.db");
-            SecretFilePermissions.PrepareDatabase(database);
+            var exception = Assert.Throws<InvalidOperationException>(() => SecretFilePermissions.PrepareDatabase(database));
+            Assert.Contains("SECURITY", exception.Message);
+            Assert.Contains("not changed", exception.Message, StringComparison.OrdinalIgnoreCase);
+            Assert.False(File.Exists(database));
             Assert.Equal(mode, File.GetUnixFileMode(shared));
-            Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(database));
         }
         finally
         {

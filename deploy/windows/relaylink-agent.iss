@@ -161,7 +161,7 @@ begin
   if {#PackageSelfContained} = 1 then
     SetDependencyStatus(DotNetStatusLabel, True, '.NET 10 ASP.NET Core Runtime (安装包内置)')
   else
-    SetDependencyStatus(DotNetStatusLabel, DotNetPassed, '.NET 10 ASP.NET Core Runtime (x64)');
+    SetDependencyStatus(DotNetStatusLabel, DotNetPassed, '.NET 10 Runtime 与 ASP.NET Core Runtime (x64)');
   VcDownloadLabel.Visible := not VcPassed;
   DotNetDownloadLabel.Visible := ({#PackageSelfContained} = 0) and (not DotNetPassed);
   DependencyChecksPassed := OsPassed and ArchitecturePassed and VcPassed and DotNetPassed;
@@ -213,10 +213,10 @@ end;
 procedure InitializeWizard;
 begin
   ExistingInstall := RegKeyExists(HKLM, 'SYSTEM\CurrentControlSet\Services\RelayLinkAgent');
-  // The {app} constant is not initialized while InitializeWizard is running.
-  if not ExistingInstall then
-    ExistingInstall := FileExists(ExpandConstant('{autopf}\RelayLink\Agent\RelayLink.Agent.exe')) or
-      FileExists(ExpandConstant('{autopf}\RelayLink\Agent\program\RelayLink.Agent.exe'));
+  if (not ExistingInstall) and
+     (FileExists(ExpandConstant('{autopf}\RelayLink\Agent\RelayLink.Agent.exe')) or
+      FileExists(ExpandConstant('{autopf}\RelayLink\Agent\program\RelayLink.Agent.exe'))) then
+    Log('Residual Agent binaries found without RelayLinkAgent service; treating setup as a fresh install.');
   DependencyPage := CreateCustomPage(wpWelcome, '安装依赖检查',
     '必须通过以下检查才能安装 RelayLink Agent。');
   OsStatusLabel := TNewStaticText.Create(DependencyPage);
@@ -241,7 +241,7 @@ begin
   DotNetStatusLabel.SetBounds(ScaleX(0), ScaleY(122), DependencyPage.SurfaceWidth, ScaleY(20));
   DotNetDownloadLabel := TNewStaticText.Create(DependencyPage);
   DotNetDownloadLabel.Parent := DependencyPage.Surface;
-  DotNetDownloadLabel.Caption := '下载 .NET 10 ASP.NET Core Runtime (x64)';
+  DotNetDownloadLabel.Caption := '下载 .NET 10 Runtime 与 ASP.NET Core Runtime (x64)';
   DotNetDownloadLabel.SetBounds(ScaleX(22), ScaleY(144), DependencyPage.SurfaceWidth, ScaleY(20));
   DotNetDownloadLabel.Font.Color := clBlue;
   DotNetDownloadLabel.Font.Style := [fsUnderline];
@@ -322,6 +322,7 @@ begin
     ExpandConstant('{tmp}\agent-installer-preflight.ps1') + '" -Mode ' + InstallMode +
     ' -ExecutablePath "' + ExpandConstant('{app}\RelayLink.Agent.exe') + '"' +
     ' -ErrorReportPath "' + ErrorReportPath + '"';
+  if {#PackageSelfContained} = 0 then Params := Params + ' -RequireDotNetRuntime';
   if NeedsConfig then Params := Params + ' -ConfigurationPath "' + SelectedConfig + '"';
   if not Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
       Params, '', SW_HIDE, ewWaitUntilTerminated, ResultCode) or (ResultCode <> 0) then

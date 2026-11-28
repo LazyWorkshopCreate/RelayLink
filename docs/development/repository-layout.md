@@ -2,8 +2,8 @@
 
 文档 ID：DEV-001\
 状态：Active\
-版本：v1.14.1\
-更新日期：2026-11-19
+版本：v1.15.0\
+更新日期：2026-11-25
 
 ```text
 RelayLink/
@@ -28,13 +28,19 @@ RelayLink/
 │   ├── RelayLink.Protocol/   帧协议、DTO、错误码
 │   ├── RelayLink.Transport/  TLS、转发和连接生命周期
 │   ├── RelayLink.Logging/    Serilog 文件日志、级别分流与轮转保留策略
-│   ├── RelayLink.AdminWeb/   React/TypeScript 管理端源码和构建配置
-│   ├── RelayLink.AgentWeb/   React/TypeScript Agent 本机页面源码和构建配置
+│   ├── RelayLink.AdminWeb/         React/TypeScript 管理端源码和构建配置
+│   ├── RelayLink.AgentWeb/         React/TypeScript Agent 本机页面源码和构建配置
 │   ├── RelayLink.Agent.ConfigMigrator/ Agent 启动前独立配置转换器
-│   ├── RelayLink.Server/     Linux/Windows 服务端、内网仪表盘与管理 API
-│   └── RelayLink.Agent/      Windows/Linux/macOS 客户端服务
-├── tests/
-│   ├── RelayLink.UnitTests/  配置、帧、状态机及令牌测试
+│   ├── RelayLink.AutomationClient/ CLI 共用的自动化管理客户端
+│   ├── RelayLink.Cli/              AI 自动化命令行（relaylink）
+│   ├── RelayLink.Sdk/              C#/.NET 数据面入口发现与连接 SDK（netstandard2.0/net8.0/net10.0）
+│   ├── RelayLink.Server/           Linux/Windows 服务端、内网仪表盘与管理 API
+│   └── RelayLink.Agent/            Windows/Linux/macOS 客户端服务
+├── sdk/                            Python、TypeScript、Go、Java、Rust 数据面 SDK
+├── skills/relaylink-admin/         随 CLI 发行物提供的运维 agent skill
+├── contract/                       自动化 OpenAPI、错误码与跨语言一致性用例契约
+├── tests/                          单元测试与集成测试
+│   ├── RelayLink.UnitTests/        配置、帧、状态机、令牌及 SDK 测试
 │   └── RelayLink.IntegrationTests/ TCP/TLS、故障和 SQL 集成测试
 ├── tools/                    模拟目标与模拟调用方
 ├── config/examples/          可提交的虚构配置示例

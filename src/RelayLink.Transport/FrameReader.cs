@@ -3,15 +3,16 @@ using RelayLink.Protocol;
 
 namespace RelayLink.Transport;
 
-public sealed class FrameReader(Stream stream, TimeSpan? partialFrameTimeout = null)
+public sealed class FrameReader(Stream stream, TimeSpan? partialFrameTimeout = null, TimeProvider? timeProvider = null)
 {
     public byte? ProtocolVersion { get; private set; }
     private readonly TimeSpan partialFrameTimeout = partialFrameTimeout ?? TimeSpan.FromSeconds(120);
+    private readonly TimeProvider timeProvider = timeProvider ?? TimeProvider.System;
     public async ValueTask<Frame?> ReadAsync(int maximumPayloadLength, CancellationToken cancellationToken)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(maximumPayloadLength);
         var header = new byte[ProtocolConstants.HeaderLength];
-        var headerRead = await ReadAtLeastAsync(header, allowEndOfStream: true, cancellationToken);
+        var headerRead = await ReadAtLeastAsync(header, allowEndOfStream: true, startTimeoutImmediately: false, cancellationToken);
         if (headerRead == 0)
         {
             return null;
@@ -54,7 +55,7 @@ public sealed class FrameReader(Stream stream, TimeSpan? partialFrameTimeout = n
 
         FrameConstraints.ValidateLength(type, (int)payloadLength);
         var payload = new byte[(int)payloadLength];
-        if (payload.Length > 0 && await ReadAtLeastAsync(payload, allowEndOfStream: false, cancellationToken) != payload.Length)
+        if (payload.Length > 0 && await ReadAtLeastAsync(payload, allowEndOfStream: false, startTimeoutImmediately: true, cancellationToken) != payload.Length)
         {
             throw new ProtocolException("Truncated frame payload.");
         }
@@ -62,15 +63,21 @@ public sealed class FrameReader(Stream stream, TimeSpan? partialFrameTimeout = n
         return new Frame(type, payload, flags);
     }
 
-    private async ValueTask<int> ReadAtLeastAsync(Memory<byte> buffer, bool allowEndOfStream, CancellationToken cancellationToken)
+    private async ValueTask<int> ReadAtLeastAsync(Memory<byte> buffer, bool allowEndOfStream, bool startTimeoutImmediately, CancellationToken cancellationToken)
     {
         var total = 0;
-        CancellationTokenSource? partialTimeout = null;
+        CancellationTokenSource? timeoutCts = null;
+        CancellationTokenSource? linkedTimeout = null;
         try
         {
+            if (startTimeoutImmediately)
+            {
+                timeoutCts = new CancellationTokenSource(partialFrameTimeout, timeProvider);
+                linkedTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
+            }
             while (total < buffer.Length)
             {
-                var read = await stream.ReadAsync(buffer[total..], partialTimeout?.Token ?? cancellationToken);
+                var read = await stream.ReadAsync(buffer[total..], linkedTimeout?.Token ?? cancellationToken);
                 if (read == 0)
                 {
                     if (total == 0 && allowEndOfStream)
@@ -82,10 +89,17 @@ public sealed class FrameReader(Stream stream, TimeSpan? partialFrameTimeout = n
                 }
 
                 total += read;
-                if (total < buffer.Length && partialTimeout is null)
+                if (total < buffer.Length)
                 {
-                    partialTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                    partialTimeout.CancelAfter(partialFrameTimeout);
+                    if (timeoutCts is null)
+                    {
+                        timeoutCts = new CancellationTokenSource(partialFrameTimeout, timeProvider);
+                        linkedTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
+                    }
+                    else
+                    {
+                        timeoutCts.CancelAfter(partialFrameTimeout);
+                    }
                 }
             }
 
@@ -93,7 +107,8 @@ public sealed class FrameReader(Stream stream, TimeSpan? partialFrameTimeout = n
         }
         finally
         {
-            partialTimeout?.Dispose();
+            linkedTimeout?.Dispose();
+            timeoutCts?.Dispose();
         }
     }
 }

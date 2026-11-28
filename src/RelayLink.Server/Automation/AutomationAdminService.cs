@@ -9,6 +9,7 @@ namespace RelayLink.Server.Automation;
 /// </summary>
 public sealed class AutomationAdminService(
     AutomationStore store,
+    ServerRuntime runtime,
     AuditService audit,
     ILogger<AutomationAdminService> logger)
 {
@@ -27,15 +28,30 @@ public sealed class AutomationAdminService(
         if (request.State != PairingState.Pending) return new Decision(false, AutomationErrors.Conflict, "该请求已处理。");
         if (request.ExpiresAtUtc <= DateTimeOffset.UtcNow) return new Decision(false, AutomationErrors.PairingExpired, "该请求已过期。");
 
-        var scopes = approvedScopes is { Length: > 0 } ? AutomationScopes.Normalize(approvedScopes) : request.Scopes;
+        var automationConfig = runtime.Configuration.Server.Automation;
+        var maxAuthorizations = automationConfig?.MaxAuthorizations ?? AutomationConfiguration.DefaultAuthorizations;
+        if (await store.CountActiveGrantsAsync(cancellationToken) >= maxAuthorizations)
+            return new Decision(false, AutomationErrors.PendingCapacityExceeded, "有效授权已达上限，请先撤销不再使用的授权。");
+
+        string[] scopes;
+        if (approvedScopes is { Length: > 0 })
+        {
+            if (!AutomationScopes.TryNormalize(approvedScopes, out scopes, out var unknown))
+                return new Decision(false, AutomationErrors.ValidationFailed, $"包含未知 scope：{string.Join(", ", unknown)}。");
+        }
+        else
+        {
+            scopes = request.Scopes;
+        }
         if (scopes.Length == 0) return new Decision(false, AutomationErrors.ValidationFailed, "批准时必须保留至少一个 scope。");
-        // 只允许缩小：批准的每一项都必须在申请中出现过。
+        // 只允许缩小：批准的每一项都必须由申请 scope 覆盖。
         if (!AutomationScopes.IsSubsetOf(scopes, request.Scopes))
             return new Decision(false, AutomationErrors.ValidationFailed, "批准不能包含申请中未列出的 scope。");
 
-        var lifetime = lifetimeMinutes ?? AutomationConfiguration.DefaultSessionLifetimeMinutes;
-        if (lifetime is < 15 or > 480)
-            return new Decision(false, AutomationErrors.ValidationFailed, "有效期必须在 15–480 分钟之间。");
+        var configuredLifetime = automationConfig?.SessionLifetimeMinutes ?? AutomationConfiguration.DefaultSessionLifetimeMinutes;
+        var lifetime = lifetimeMinutes ?? configuredLifetime;
+        if (lifetime < 15 || lifetime > configuredLifetime)
+            return new Decision(false, AutomationErrors.ValidationFailed, $"有效期必须在 15–{configuredLifetime} 分钟之间。");
 
         var ok = await store.ApprovePairingAsync(requestId, scopes, lifetime, admin, DateTimeOffset.UtcNow, cancellationToken);
         if (!ok) return new Decision(false, AutomationErrors.Conflict, "该请求已处理。");

@@ -14,6 +14,13 @@
     "summary": "普通与授权互访、协议升级、端口放行及报文限制"
   },
   {
+    "slug": "http-reverse-proxy",
+    "section": "guides",
+    "source": "docs/operations/http-reverse-proxy.md",
+    "title": "HTTP/HTTPS 反向代理使用指南",
+    "summary": "公网 TLS 终结、加密互访 HTTP 虚拟入口、主机头与端口约束"
+  },
+  {
     "slug": "docker",
     "section": "guides",
     "source": "deploy/docker/README.md",
@@ -89,6 +96,27 @@
     "source": "docs/design/agent-to-agent.md",
     "title": "Agent 安全互访",
     "summary": "访问授权、内层 TLS 与身份校验"
+  },
+  {
+    "slug": "http-reverse-proxy",
+    "section": "docs",
+    "source": "docs/design/http-reverse-proxy.md",
+    "title": "HTTP 反向代理技术设计",
+    "summary": "目标 Agent YARP/Kestrel 虚拟宿主、Host/Origin 策略与状态上报"
+  },
+  {
+    "slug": "ai-automation-and-sdk",
+    "section": "docs",
+    "source": "docs/design/ai-automation-and-sdk.md",
+    "title": "AI 自动化与第三方 SDK 设计",
+    "summary": "回环 HTTPS 自动化面、一次性配对、CLI/Skill 契约与六语言数据面 SDK"
+  },
+  {
+    "slug": "sdk",
+    "section": "docs",
+    "source": "sdk/README.md",
+    "title": "RelayLink 数据面 SDK",
+    "summary": "C#/.NET、Python、TypeScript、Go、Java、Rust 入口发现与连接语义"
   },
   {
     "slug": "multi-server-agent",

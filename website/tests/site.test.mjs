@@ -29,6 +29,10 @@ test("every generated page has content, metadata, and a reciprocal language rout
         assert.ok(!document.documentElement.innerHTML.includes("{{"), file);
         const source = document.querySelector(".repository-source");
         if (source) assert.match(source.getAttribute("href"), /^https:\/\/github.com\/LazyWorkshopCreate\/RelayLink\/blob\/main\//, file);
+        for (const anchor of document.querySelectorAll('a[target="_blank"]')) {
+            const rel = new Set((anchor.getAttribute("rel") ?? "").split(/\s+/).filter(Boolean));
+            assert.ok(rel.has("noopener") && rel.has("noreferrer"), `${file}: target=_blank missing noopener noreferrer`);
+        }
     }
 });
 
@@ -100,5 +104,23 @@ test("UDP pages expose usage, limits, draft status, and release compatibility", 
             const article = documents.get(path.join(site, prefix, `docs/${slug}/index.html`));
             assert.ok(article.querySelector(".prose").textContent.includes(status), slug);
         }
+    }
+});
+
+test("HTTP reverse proxy, AI automation, and six-language SDK pages exist in both locales", () => {
+    for (const prefix of ["", "en/"]) {
+        const httpGuide = documents.get(path.join(site, prefix, "guides/http-reverse-proxy/index.html"));
+        assert.ok(httpGuide, `${prefix}guides/http-reverse-proxy missing`);
+        assert.ok(httpGuide.querySelector(".prose")?.textContent.includes("upstreamAuthority"));
+
+        const httpDesign = documents.get(path.join(site, prefix, "docs/http-reverse-proxy/index.html"));
+        assert.ok(httpDesign, `${prefix}docs/http-reverse-proxy missing`);
+
+        const autoDoc = documents.get(path.join(site, prefix, "docs/ai-automation-and-sdk/index.html"));
+        assert.ok(autoDoc, `${prefix}docs/ai-automation-and-sdk missing`);
+
+        const sdkDoc = documents.get(path.join(site, prefix, "docs/sdk/index.html"));
+        assert.ok(sdkDoc, `${prefix}docs/sdk missing`);
+        assert.ok(sdkDoc.querySelector(".prose")?.textContent.includes("Rust"));
     }
 });

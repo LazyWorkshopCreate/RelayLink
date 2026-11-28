@@ -51,10 +51,18 @@ public static class HttpProxyPolicy
     public static string NormalizeOrigin(string value)
     {
         if (string.IsNullOrWhiteSpace(value) || value != value.Trim() || value.Any(char.IsControl) ||
-            value.Contains('*') || value.Contains(',') || value.Contains('\\') || value.Contains('%') || value.EndsWith('/') ||
-            !Uri.TryCreate(value, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https") ||
+            value.Contains('*') || value.Contains(',') || value.Contains('\\') || value.Contains('%') || value.EndsWith('/'))
+            throw new ArgumentException("Invalid HTTP origin.");
+        var schemeSeparator = value.IndexOf("://", StringComparison.Ordinal);
+        if (schemeSeparator <= 0) throw new ArgumentException("Invalid HTTP origin.");
+        var authority = value[(schemeSeparator + 3)..];
+        ValidateRawAuthority(authority);
+        if (!Uri.TryCreate(value, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https") ||
             uri.Host.Length == 0 || uri.Port < 1 || uri.UserInfo.Length != 0 || uri.AbsolutePath != "/" ||
             uri.Query.Length != 0 || uri.Fragment.Length != 0)
+            throw new ArgumentException("Invalid HTTP origin.");
+        var rawHost = SplitRawHost(authority);
+        if (uri.HostNameType == UriHostNameType.IPv4 && !string.Equals(rawHost, uri.Host, StringComparison.Ordinal))
             throw new ArgumentException("Invalid HTTP origin.");
         return uri.GetLeftPart(UriPartial.Authority).ToLowerInvariant();
     }
@@ -64,6 +72,65 @@ public static class HttpProxyPolicy
         if (string.IsNullOrWhiteSpace(value) || value.Contains('/') || value.Contains('?') || value.Contains('#') || value.Contains('@'))
             throw new ArgumentException("Invalid HTTP authority.");
         return NormalizeOrigin($"{scheme}://{value}");
+    }
+
+    public static string NormalizeHostHeader(string value, string scheme) =>
+        NormalizeAuthority(value, scheme)[(scheme.Length + 3)..];
+
+    private static void ValidateRawAuthority(string authority)
+    {
+        if (string.IsNullOrWhiteSpace(authority) || authority.IndexOfAny(['/', '?', '#', '@']) >= 0)
+            throw new ArgumentException("Invalid HTTP authority.");
+        string rawHost;
+        string? portPart = null;
+        if (authority.StartsWith('['))
+        {
+            var closeBracket = authority.IndexOf(']');
+            if (closeBracket < 2) throw new ArgumentException("Invalid HTTP authority.");
+            rawHost = authority[1..closeBracket];
+            if (!System.Net.IPAddress.TryParse(rawHost, out var ip) || ip.AddressFamily != System.Net.Sockets.AddressFamily.InterNetworkV6)
+                throw new ArgumentException("Invalid HTTP authority.");
+            if (closeBracket + 1 < authority.Length)
+            {
+                if (authority[closeBracket + 1] != ':') throw new ArgumentException("Invalid HTTP authority.");
+                portPart = authority[(closeBracket + 2)..];
+            }
+        }
+        else
+        {
+            if (authority.IndexOfAny(['[', ']']) >= 0) throw new ArgumentException("Invalid HTTP authority.");
+            var colon = authority.IndexOf(':');
+            if (colon >= 0)
+            {
+                if (authority.IndexOf(':', colon + 1) >= 0) throw new ArgumentException("Invalid HTTP authority.");
+                rawHost = authority[..colon];
+                portPart = authority[(colon + 1)..];
+            }
+            else
+            {
+                rawHost = authority;
+            }
+            if (rawHost.Length == 0 || rawHost.EndsWith('.') || rawHost.StartsWith('.') || rawHost.Contains("..", StringComparison.Ordinal))
+                throw new ArgumentException("Invalid HTTP authority.");
+        }
+
+        if (portPart is not null)
+        {
+            if (portPart.Length is 0 or > 5 || portPart[0] == '0' || !portPart.All(char.IsAsciiDigit) ||
+                !int.TryParse(portPart, out var port) || port is < 1 or > 65535)
+                throw new ArgumentException("Invalid HTTP authority.");
+        }
+    }
+
+    private static string SplitRawHost(string authority)
+    {
+        if (authority.StartsWith('['))
+        {
+            var closeBracket = authority.IndexOf(']');
+            return authority[..(closeBracket + 1)];
+        }
+        var colon = authority.IndexOf(':');
+        return colon >= 0 ? authority[..colon] : authority;
     }
 
     public static bool IsWebSocketUpgrade(IEnumerable<string>? values)
@@ -153,7 +220,7 @@ public static class HttpProxyPolicy
         }
         else if (options.OriginValue is not null) throw new ArgumentException("Origin value requires fixed mode.");
         foreach (var reference in new[] { options.CertificateRef, options.UpstreamTrustRef }.Where(reference => reference is not null))
-            if (!Regex.IsMatch(reference!, "^[a-z0-9][a-z0-9_-]{0,63}$", RegexOptions.CultureInvariant))
+            if (!Regex.IsMatch(reference!, "\\A[a-z0-9][a-z0-9_-]{0,63}\\z", RegexOptions.CultureInvariant))
                 throw new ArgumentException("HTTP resource references must be identifiers.");
         if ((peerOnly ? options.PeerEntryScheme : options.PublicEntryScheme) == "https" && options.CertificateRef is null)
             throw new ArgumentException("HTTPS ingress requires a certificate reference.");

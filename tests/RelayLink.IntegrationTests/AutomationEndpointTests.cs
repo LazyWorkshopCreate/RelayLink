@@ -5,6 +5,7 @@ using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Data.Sqlite;
 using RelayLink.Testing;
 
 namespace RelayLink.IntegrationTests;
@@ -38,7 +39,7 @@ public sealed class AutomationEndpointTests : IAsyncLifetime
         return Task.CompletedTask;
     }
 
-    private async Task StartServerAsync(bool automationEnabled = true)
+    private async Task StartServerAsync(bool automationEnabled = true, bool expiredAutomationCert = false)
     {
         storage = new TestDirectory("relaylink-automation-");
         dashboardPort = FreePort();
@@ -67,7 +68,9 @@ public sealed class AutomationEndpointTests : IAsyncLifetime
         var san = new SubjectAlternativeNameBuilder();
         san.AddIpAddress(IPAddress.Loopback);
         request.CertificateExtensions.Add(san.Build());
-        using var certificate = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(30));
+        using var certificate = expiredAutomationCert
+            ? request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-2), DateTimeOffset.UtcNow.AddHours(-1))
+            : request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(30));
         File.WriteAllText(Path.Combine(storage.Path, "automation.pem"), certificate.ExportCertificatePem());
         File.WriteAllText(Path.Combine(storage.Path, "automation.key"), rsa.ExportPkcs8PrivateKeyPem());
 
@@ -443,11 +446,13 @@ public sealed class AutomationEndpointTests : IAsyncLifetime
 
     private static async Task<HttpResponseMessage> ExchangeAsync(HttpClient client, ECDsa key, Guid requestId, string userCode)
     {
-        using var request = new HttpRequestMessage(HttpMethod.Post, $"/api/v1/automation/pairing/requests/{requestId}/token")
+        var path = $"/api/v1/automation/pairing/requests/{requestId}/token";
+        var instanceId = await InstanceIdAsync(client);
+        using var request = new HttpRequestMessage(HttpMethod.Post, path)
         {
             Content = JsonContent.Create(new { userCode })
         };
-        request.Headers.Add("X-RelayLink-Proof", CreateProof(key, requestId, userCode));
+        request.Headers.Add("X-RelayLink-Proof", CreateProof(key, HttpMethod.Post.Method, path, instanceId, requestId, userCode));
         return await client.SendAsync(request);
     }
 
@@ -485,11 +490,18 @@ public sealed class AutomationEndpointTests : IAsyncLifetime
         return info.GetProperty("data").GetProperty("automationInstanceId").GetString()!;
     }
 
-    private static string CreateProof(ECDsa key, Guid requestId, string userCode)
+    private static string CreateProof(ECDsa key, string method, string path, string instanceId, Guid requestId, string userCode)
     {
         var normalized = new string(userCode.Where(c => c != '-' && !char.IsWhiteSpace(c)).Select(char.ToUpperInvariant).ToArray());
         var digest = Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(normalized))).ToLowerInvariant();
-        return BuildProof(key, new Dictionary<string, object> { ["requestId"] = requestId.ToString(), ["userCodeDigest"] = digest });
+        return BuildProof(key, new Dictionary<string, object>
+        {
+            ["htm"] = method,
+            ["htu"] = path,
+            ["instanceId"] = instanceId,
+            ["requestId"] = requestId.ToString(),
+            ["userCodeDigest"] = digest
+        });
     }
 
     private static string CreateProof(ECDsa key, string method, string path, string token, string instanceId)
@@ -620,6 +632,191 @@ public sealed class AutomationEndpointTests : IAsyncLifetime
         Assert.False(correct.IsSuccessStatusCode);
         var correctBody = await correct.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal("pairing_locked", correctBody.GetProperty("error").GetProperty("code").GetString());
+    }
+
+    [Fact]
+    public async Task Automation_and_dashboard_ports_are_isolated_and_session_reports_automation_state()
+    {
+        await StartServerAsync();
+        using var session = await AdminGetAsync("/api/v1/admin/session");
+        session.EnsureSuccessStatusCode();
+        var sessionBody = await session.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.True(sessionBody.GetProperty("automationEnabled").GetBoolean());
+        Assert.Equal(120, sessionBody.GetProperty("automationSessionLifetimeMinutes").GetInt32());
+
+        using var dashboardAutomation = await AdminGetAsync("/api/v1/automation/info");
+        Assert.Equal(HttpStatusCode.NotFound, dashboardAutomation.StatusCode);
+
+        using var client = CreateAutomationClient();
+        using var automationDashboard = await client.GetAsync("/api/v1/overview");
+        Assert.Equal(HttpStatusCode.NotFound, automationDashboard.StatusCode);
+    }
+
+    [Fact]
+    public async Task Expired_automation_certificate_fails_closed()
+    {
+        await StartServerAsync(automationEnabled: true, expiredAutomationCert: true);
+        using var session = await AdminGetAsync("/api/v1/admin/session");
+        session.EnsureSuccessStatusCode();
+        var sessionBody = await session.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.False(sessionBody.GetProperty("automationEnabled").GetBoolean());
+
+        using var dashboardAutomation = await AdminGetAsync("/api/v1/automation/info");
+        Assert.Equal(HttpStatusCode.NotFound, dashboardAutomation.StatusCode);
+
+        using var client = CreateAutomationClient();
+        await Assert.ThrowsAnyAsync<HttpRequestException>(() => client.GetAsync("/api/v1/automation/info"));
+    }
+
+    [Fact]
+    public async Task Pairing_status_endpoint_locks_after_five_wrong_user_codes()
+    {
+        await StartServerAsync();
+        using var client = CreateAutomationClient();
+        var instanceId = await InstanceIdAsync(client);
+
+        using var deviceKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var created = await CreatePairingAsync(client, deviceKey, ["clients.read"]);
+        var requestId = Guid.Parse(created.GetProperty("requestId").GetString()!);
+        var userCode = created.GetProperty("userCode").GetString()!;
+        var statusPath = $"/api/v1/automation/pairing/requests/{requestId}/status";
+
+        for (var attempt = 1; attempt <= 5; attempt++)
+        {
+            using var req = new HttpRequestMessage(HttpMethod.Post, statusPath) { Content = JsonContent.Create(new { userCode = "ZZZZ-ZZZZ" }) };
+            req.Headers.Add("X-RelayLink-Proof", CreateProof(deviceKey, HttpMethod.Post.Method, statusPath, instanceId, requestId, "ZZZZ-ZZZZ"));
+            using var resp = await client.SendAsync(req);
+            Assert.Equal(HttpStatusCode.Forbidden, resp.StatusCode);
+            var code = (await resp.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("error").GetProperty("code").GetString();
+            Assert.Equal(attempt < 5 ? "pairing_denied" : "pairing_locked", code);
+        }
+
+        using var lockedReq = new HttpRequestMessage(HttpMethod.Post, statusPath) { Content = JsonContent.Create(new { userCode }) };
+        lockedReq.Headers.Add("X-RelayLink-Proof", CreateProof(deviceKey, HttpMethod.Post.Method, statusPath, instanceId, requestId, userCode));
+        using var lockedResp = await client.SendAsync(lockedReq);
+        Assert.Equal(HttpStatusCode.Forbidden, lockedResp.StatusCode);
+        Assert.Equal("pairing_locked", (await lockedResp.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("error").GetProperty("code").GetString());
+    }
+
+    [Fact]
+    public async Task Pairing_delete_validates_proof_and_consumes_jti()
+    {
+        await StartServerAsync();
+        using var client = CreateAutomationClient();
+        var instanceId = await InstanceIdAsync(client);
+
+        using var deviceKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var created = await CreatePairingAsync(client, deviceKey, ["clients.read"]);
+        var requestId = Guid.Parse(created.GetProperty("requestId").GetString()!);
+        var path = $"/api/v1/automation/pairing/requests/{requestId}";
+
+        using var noProof = await client.DeleteAsync(path);
+        Assert.Equal(HttpStatusCode.Unauthorized, noProof.StatusCode);
+
+        using var badHtu = new HttpRequestMessage(HttpMethod.Delete, path);
+        badHtu.Headers.Add("X-RelayLink-Proof", BuildProof(deviceKey, new Dictionary<string, object>
+        {
+            ["htm"] = "DELETE",
+            ["htu"] = "/api/v1/automation/pairing/requests/" + Guid.NewGuid(),
+            ["instanceId"] = instanceId,
+            ["requestId"] = requestId.ToString()
+        }));
+        using var badHtuResp = await client.SendAsync(badHtu);
+        Assert.Equal(HttpStatusCode.Unauthorized, badHtuResp.StatusCode);
+
+        var validProof = BuildProof(deviceKey, new Dictionary<string, object>
+        {
+            ["htm"] = "DELETE",
+            ["htu"] = path,
+            ["instanceId"] = instanceId,
+            ["requestId"] = requestId.ToString()
+        });
+        using var valid = new HttpRequestMessage(HttpMethod.Delete, path);
+        valid.Headers.Add("X-RelayLink-Proof", validProof);
+        using var validResp = await client.SendAsync(valid);
+        Assert.Equal(HttpStatusCode.OK, validResp.StatusCode);
+
+        using var replay = new HttpRequestMessage(HttpMethod.Delete, path);
+        replay.Headers.Add("X-RelayLink-Proof", validProof);
+        using var replayResp = await client.SendAsync(replay);
+        Assert.Equal(HttpStatusCode.Unauthorized, replayResp.StatusCode);
+    }
+
+    [Fact]
+    public async Task Change_requests_are_isolated_by_device_thumbprint()
+    {
+        await StartServerAsync();
+        using var client = CreateAutomationClient();
+        var (tokenA, deviceA) = await CompletePairingAsync(client, ["changes.read", "changes.write"]);
+        var (tokenB, deviceB) = await CompletePairingAsync(client, ["changes.read", "changes.write"]);
+
+        using var submitA = await SendAsync(client, HttpMethod.Post, "/api/v1/automation/change-requests", deviceA, tokenA,
+            new { type = "client.create", target = new { clientId = "isolated-client" }, payload = new { clientId = "isolated-client", displayName = "Isolated" } },
+            Guid.NewGuid().ToString());
+        submitA.EnsureSuccessStatusCode();
+        var idA = (await submitA.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("data").GetProperty("changeRequestId").GetString()!;
+
+        using var listB = await SendAsync(client, HttpMethod.Get, "/api/v1/automation/change-requests", deviceB, tokenB);
+        listB.EnsureSuccessStatusCode();
+        var itemsB = (await listB.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("data");
+        Assert.Empty(itemsB.EnumerateArray());
+
+        using var getB = await SendAsync(client, HttpMethod.Get, $"/api/v1/automation/change-requests/{idA}", deviceB, tokenB);
+        Assert.Equal(HttpStatusCode.NotFound, getB.StatusCode);
+
+        using var deleteB = await SendAsync(client, HttpMethod.Delete, $"/api/v1/automation/change-requests/{idA}", deviceB, tokenB);
+        Assert.Equal(HttpStatusCode.NotFound, deleteB.StatusCode);
+
+        using var deleteA = await SendAsync(client, HttpMethod.Delete, $"/api/v1/automation/change-requests/{idA}", deviceA, tokenA);
+        Assert.Equal(HttpStatusCode.OK, deleteA.StatusCode);
+    }
+
+    [Fact]
+    public async Task Channel_patch_fails_closed_when_audit_database_is_locked()
+    {
+        await StartServerAsync();
+        var channelPort = FreePort();
+        using var createChannel = await AdminPostAsync("/api/v1/admin/clients/test-agent/channels", new
+        {
+            channelId = "echo", displayName = "Echo", enabled = true,
+            listenAddress = "127.0.0.1", listenPort = channelPort,
+            targetHost = "127.0.0.1", targetPort = 9,
+            maxConnections = 4, targetConnectTimeoutSeconds = 5,
+            transportProtocol = "tcp", authorizedClientsOnly = false
+        });
+        createChannel.EnsureSuccessStatusCode();
+
+        using var client = CreateAutomationClient();
+        var (token, device) = await CompletePairingAsync(client, ["channels.read", "channels.write"]);
+
+        var auditPath = Path.Combine(storage!.Path, "audit.db");
+        await using var blocker = new SqliteConnection($"Data Source={auditPath}");
+        await blocker.OpenAsync();
+        await using (var lockCmd = blocker.CreateCommand())
+        {
+            lockCmd.CommandText = "BEGIN IMMEDIATE";
+            await lockCmd.ExecuteNonQueryAsync();
+        }
+        try
+        {
+            using var patched = await SendAsync(client, HttpMethod.Patch,
+                "/api/v1/automation/clients/test-agent/channels/echo", device, token,
+                new { displayName = "Blocked Rename" }, Guid.NewGuid().ToString());
+            Assert.Equal(HttpStatusCode.ServiceUnavailable, patched.StatusCode);
+        }
+        finally
+        {
+            await using var rollback = blocker.CreateCommand();
+            rollback.CommandText = "ROLLBACK";
+            await rollback.ExecuteNonQueryAsync();
+            await blocker.CloseAsync();
+            SqliteConnection.ClearAllPools();
+        }
+
+        using var channelsAfter = await SendAsync(client, HttpMethod.Get, "/api/v1/automation/clients/test-agent/channels", device, token);
+        channelsAfter.EnsureSuccessStatusCode();
+        var channels = (await channelsAfter.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("data");
+        Assert.Equal("Echo", Assert.Single(channels.EnumerateArray()).GetProperty("displayName").GetString());
     }
 
     private static string Base64Url(byte[] bytes) => System.Buffers.Text.Base64Url.EncodeToString(bytes);

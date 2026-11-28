@@ -64,6 +64,7 @@ const renderMarkdown = async (markdown, source, current, locale) => {
         allowedTags: [...sanitize.defaults.allowedTags, "img"],
         allowedAttributes: { ...sanitize.defaults.allowedAttributes, img: ["src", "alt", "width", "height"], code: ["class"] },
         allowedSchemes: ["https", "http", "mailto"],
+        allowProtocolRelative: false,
     }));
     const document = dom.window.document;
     for (const element of document.querySelectorAll("a[href], img[src]")) {
@@ -138,12 +139,12 @@ for (const locale of ["zh", "en"]) {
         const current = prefix + page.route;
         let html = template.replaceAll("./assets/", relative(current, "assets") + "/");
         if (!page.home) html = html.replace(/<main id="main">[\s\S]*?<\/main>/, () => `<main id="main">${page.content}</main>`);
-        else html = html.replace("{{CONTENT_LINKS}}", `<section class="section docs-section"><div class="shell">${titleBlock("开始使用", "").replaceAll("h1>", "h2>")}${cards([
+        else html = html.replace("{{CONTENT_LINKS}}", () => `<section class="section docs-section"><div class="shell">${titleBlock("开始使用", "").replaceAll("h1>", "h2>")}${cards([
             { title: "使用说明", summary: "按部署方式选择指南，查看完整步骤。", href: "guides/" },
             { title: "文档中心", summary: "查阅设计、安全边界与开发规范。", href: "docs/" },
             { title: "发布日志", summary: "查看各版本的更新、兼容性与验证限制。", href: "releases/" },
         ])}</div></section>`);
-        html = html.replace(/<title>.*?<\/title>/, `<title>${escape(page.title)}${page.home ? "" : " · RelayLink"}</title>`)
+        html = html.replace(/<title>.*?<\/title>/, () => `<title>${escape(page.title)}${page.home ? "" : " · RelayLink"}</title>`)
             .replace(/<body>/, `<body data-page="${page.home ? "home" : page.section}">`)
             .replaceAll("{{HOME}}", relative(current, prefix))
             .replaceAll("{{GUIDES}}", relative(current, prefix + "guides/"))
@@ -163,6 +164,12 @@ for (const locale of ["zh", "en"]) {
                 anchor.removeAttribute("target");
                 anchor.removeAttribute("rel");
             }
+        }
+        for (const anchor of document.querySelectorAll('a[target="_blank"]')) {
+            const tokens = new Set((anchor.getAttribute("rel") ?? "").split(/\s+/).filter(Boolean));
+            tokens.add("noopener");
+            tokens.add("noreferrer");
+            anchor.setAttribute("rel", [...tokens].join(" "));
         }
         dom.window.eval(localeScript);
         const heading = document.querySelector(".page-heading h1");

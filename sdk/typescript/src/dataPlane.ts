@@ -9,8 +9,10 @@
  * 因此普通代理入口必须显式配置。
  */
 
-import { connect, Socket } from "node:net";
+import { connect, isIP, Socket } from "node:net";
+import { lookup } from "node:dns/promises";
 import { createSocket, Socket as DgramSocket } from "node:dgram";
+import { request as httpRequest } from "node:http";
 
 export const EntryUnavailable = "entry_unavailable";
 export const EntryNotFound = "entry_not_found";
@@ -45,13 +47,17 @@ export class EntryDescriptor {
     if (!Number.isInteger(port) || port < 1 || port > 65535) {
       throw new RelayLinkError(InvalidUsage, "port 必须在 1–65535。");
     }
-    this.host = host;
+    if (transport !== "tcp" && transport !== "udp") {
+      throw new RelayLinkError(InvalidUsage, "transport 必须为 tcp 或 udp。");
+    }
+    const clean = host.trim();
+    this.host = clean.startsWith("[") && clean.endsWith("]") && clean.length > 2 ? clean.slice(1, -1) : clean;
     this.port = port;
     this.transport = transport;
   }
 
   endpoint(): string {
-    return `${this.host}:${this.port}`;
+    return this.host.includes(":") ? `[${this.host}]:${this.port}` : `${this.host}:${this.port}`;
   }
 }
 
@@ -60,24 +66,43 @@ export function connectTcp(entry: EntryDescriptor, connectTimeoutMs = 20000): Pr
   if (entry.transport !== "tcp") {
     return Promise.reject(new RelayLinkError(InvalidUsage, "该入口不是 TCP。"));
   }
+  if (!Number.isFinite(connectTimeoutMs) || connectTimeoutMs <= 0) {
+    return Promise.reject(new RelayLinkError(InvalidUsage, "connectTimeoutMs 必须大于 0。"));
+  }
 
   return new Promise<Socket>((resolve, reject) => {
+    let settled = false;
     const socket = connect({ host: entry.host, port: entry.port });
+    const cleanup = () => {
+      clearTimeout(timer);
+      socket.off("connect", onConnect);
+      socket.off("error", onError);
+    };
     const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      cleanup();
       socket.destroy();
       reject(new RelayLinkError(Timeout, "连接入口超时。"));
     }, connectTimeoutMs);
 
-    socket.once("connect", () => {
-      clearTimeout(timer);
+    const onConnect = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
       resolve(socket);
-    });
+    };
 
-    socket.once("error", (error: NodeJS.ErrnoException) => {
-      clearTimeout(timer);
+    const onError = (error: NodeJS.ErrnoException) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
       socket.destroy();
       reject(new RelayLinkError(mapSocketError(error), `连接入口失败：${error.message}`));
-    });
+    };
+
+    socket.once("connect", onConnect);
+    socket.once("error", onError);
   });
 }
 
@@ -107,14 +132,37 @@ function mapSocketError(error: NodeJS.ErrnoException): string {
 const MAX_DATAGRAM = 65507;
 
 /** UDP 数据面：单 socket 会话，保留报文边界。 */
-export function bindUdp(entry: EntryDescriptor): DgramSocket {
+export async function bindUdp(entry: EntryDescriptor): Promise<DgramSocket> {
   if (entry.transport !== "udp") {
     throw new RelayLinkError(InvalidUsage, "该入口不是 UDP。");
   }
 
-  const socket = createSocket("udp4");
-  socket.connect(entry.port, entry.host);
-  return socket;
+  let family = isIP(entry.host);
+  if (family === 0) {
+    try {
+      const resolved = await lookup(entry.host);
+      family = resolved.family;
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      throw new RelayLinkError(EntryNotFound, `无法解析 UDP 入口：${msg}`);
+    }
+  }
+
+  const socket = createSocket(family === 6 ? "udp6" : "udp4");
+  return new Promise<DgramSocket>((resolve, reject) => {
+    const onError = (error: Error) => {
+      socket.off("connect", onConnect);
+      socket.close();
+      reject(new RelayLinkError(EntryUnavailable, `绑定 UDP 入口失败：${error.message}`));
+    };
+    const onConnect = () => {
+      socket.off("error", onError);
+      resolve(socket);
+    };
+    socket.once("error", onError);
+    socket.once("connect", onConnect);
+    socket.connect(entry.port, entry.host);
+  });
 }
 
 export function sendUdp(socket: DgramSocket, payload: Buffer): Promise<void> {
@@ -130,12 +178,87 @@ export function sendUdp(socket: DgramSocket, payload: Buffer): Promise<void> {
 
 interface AgentSnapshot {
   servers?: Array<{
+    profileId?: string;
     mappings?: Array<{
+      enabled?: boolean;
       targetClientId?: string;
       targetChannelId?: string;
       localAddress?: string | null;
+      transportProtocol?: string;
     }>;
   }>;
+}
+
+function parseEndpoint(address: string): { host: string; port: number } | null {
+  const trimmed = address.trim();
+  if (trimmed.startsWith("[")) {
+    const close = trimmed.indexOf("]");
+    if (close <= 1 || trimmed[close + 1] !== ":") return null;
+    const host = trimmed.slice(1, close);
+    const portText = trimmed.slice(close + 2);
+    if (!/^\d+$/.test(portText)) return null;
+    const port = Number.parseInt(portText, 10);
+    return port >= 1 && port <= 65535 ? { host, port } : null;
+  }
+  const separator = trimmed.lastIndexOf(":");
+  if (separator <= 0 || trimmed.indexOf(":") !== separator) return null;
+  const host = trimmed.slice(0, separator);
+  const portText = trimmed.slice(separator + 1);
+  if (!/^\d+$/.test(portText)) return null;
+  const port = Number.parseInt(portText, 10);
+  return port >= 1 && port <= 65535 ? { host, port } : null;
+}
+
+function fetchMappingsJson(dashboardPort: number, timeoutMs = 5000): Promise<AgentSnapshot> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const req = httpRequest(
+      {
+        host: "127.0.0.1",
+        port: dashboardPort,
+        path: "/api/v2/mappings",
+        method: "GET"
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (chunk: Buffer) => chunks.push(chunk));
+        res.on("end", () => {
+          if (settled) return;
+          settled = true;
+          if (!res.statusCode || res.statusCode !== 200) {
+            reject(new RelayLinkError(EntryUnavailable, `Agent 只读 API 返回 ${res.statusCode ?? 0}。`));
+            return;
+          }
+          try {
+            const parsed = JSON.parse(Buffer.concat(chunks).toString("utf-8")) as AgentSnapshot;
+            resolve(parsed);
+          } catch {
+            reject(new RelayLinkError(ConfigurationDrift, "Agent 返回了无法解析的内容。"));
+          }
+        });
+        res.on("error", (err) => {
+          if (settled) return;
+          settled = true;
+          reject(new RelayLinkError(EntryUnavailable, `读取 Agent 响应失败：${err.message}`));
+        });
+      }
+    );
+
+    req.setTimeout(timeoutMs, () => {
+      if (settled) return;
+      settled = true;
+      req.destroy(new Error("timeout"));
+      reject(new RelayLinkError(Timeout, "查询本机 Agent 只读 API 超时。"));
+    });
+
+    req.on("error", (err) => {
+      if (settled) return;
+      settled = true;
+      reject(new RelayLinkError(EntryUnavailable, `无法连接本机 Agent 只读 API：${err.message}`));
+    });
+
+    req.end();
+  });
 }
 
 /**
@@ -145,43 +268,29 @@ interface AgentSnapshot {
 export async function discoverMapping(
   targetClientId: string,
   targetChannelId: string,
-  dashboardPort = DEFAULT_DASHBOARD_PORT
+  dashboardPort = DEFAULT_DASHBOARD_PORT,
+  profileId?: string
 ): Promise<EntryDescriptor> {
   if (!Number.isInteger(dashboardPort) || dashboardPort < 1 || dashboardPort > 65535) {
     throw new RelayLinkError(InvalidUsage, "dashboardPort 无效。");
   }
-
-  const url = `http://127.0.0.1:${dashboardPort}/api/v2/mappings`;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 5000);
-
-  let payload: AgentSnapshot;
-  try {
-    const response = await fetch(url, { signal: controller.signal });
-    if (!response.ok) {
-      throw new RelayLinkError(EntryUnavailable, `Agent 只读 API 返回 ${response.status}。`);
-    }
-    payload = (await response.json()) as AgentSnapshot;
-  } catch (error) {
-    if (error instanceof RelayLinkError) throw error;
-    const message = error instanceof Error ? error.message : String(error);
-    throw new RelayLinkError(EntryUnavailable, `无法连接本机 Agent 只读 API：${message}`);
-  } finally {
-    clearTimeout(timer);
+  if (!targetClientId || !targetChannelId) {
+    throw new RelayLinkError(InvalidUsage, "targetClientId 与 targetChannelId 不能为空。");
   }
 
+  const payload = await fetchMappingsJson(dashboardPort);
   for (const server of payload.servers ?? []) {
+    if (profileId && server.profileId !== profileId) continue;
     for (const mapping of server.mappings ?? []) {
+      if (mapping.enabled === false) continue;
       if (mapping.targetClientId !== targetClientId) continue;
       if (mapping.targetChannelId !== targetChannelId) continue;
       const address = mapping.localAddress;
       if (!address) continue;
-      const separator = address.lastIndexOf(":");
-      if (separator <= 0) continue;
-      const host = address.slice(0, separator);
-      const port = Number.parseInt(address.slice(separator + 1), 10);
-      if (!Number.isInteger(port)) continue;
-      return new EntryDescriptor(host, port);
+      const parsed = parseEndpoint(address);
+      if (!parsed) continue;
+      const transport = mapping.transportProtocol === "udp" ? "udp" : "tcp";
+      return new EntryDescriptor(parsed.host, parsed.port, transport);
     }
   }
 

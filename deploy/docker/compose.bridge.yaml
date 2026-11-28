@@ -1,0 +1,7 @@
+services:
+  relaylink-server:
+    network_mode: !reset null
+    ports:
+      - "127.0.0.1:18080:18080"
+      - "7443:7443/tcp"
+      - "7444:7444/tcp"

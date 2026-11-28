@@ -115,7 +115,9 @@ public static class AutomationEndpoints
                 return AutomationJson.Error(AutomationErrors.RateLimited, "配对请求过于频繁，请稍后重试。", 429, retryable: true);
             }
 
-            var scopes = AutomationScopes.Normalize(body.Scopes);
+            if (!AutomationScopes.TryNormalize(body.Scopes, out var scopes, out var unknown))
+                return AutomationJson.Error(AutomationErrors.ValidationFailed,
+                    $"请求包含未知 scope：{string.Join(", ", unknown)}。", 400);
             var (created, errorCode, message) = await pairing.CreatePairingAsync(
                 body.Subject ?? string.Empty, body.Platform ?? "unknown", body.CliVersion ?? "unknown",
                 scopes, body.DevicePublicKey ?? string.Empty, context.RequestAborted);
@@ -155,19 +157,29 @@ public static class AutomationEndpoints
                     DateTimeOffset.UtcNow, request.DeviceThumbprint, out var proof, out var error))
                 return AutomationJson.Error(error!.Code, error.Message, AutomationJson.StatusFor(error.Code));
 
-            if (proof!.RequestId is not null && !string.Equals(proof.RequestId, requestId.ToString(), StringComparison.OrdinalIgnoreCase))
-                return AutomationJson.Error(AutomationErrors.ProofInvalid, "证明中的 requestId 与路径不一致。", 401);
+            var pairingError = await ValidatePairingProofAsync(proof!, requestId, context.Request, store, context.RequestAborted);
+            if (pairingError is not null)
+                return pairingError;
 
-            // body 里可带 userCode（推荐）；为兼容仅凭设备证明的旧客户端，允许 proof.userCodeDigest 兜底。
             string? userCode = null;
-            try
+            using (var reader = new StreamReader(context.Request.Body, leaveOpen: true))
             {
-                var statusBody = await JsonSerializer.DeserializeAsync<TokenRequestBody>(context.Request.Body, AutomationJson.Options, context.RequestAborted);
-                userCode = statusBody?.UserCode;
+                var bodyText = await reader.ReadToEndAsync(context.RequestAborted);
+                if (!string.IsNullOrWhiteSpace(bodyText))
+                {
+                    try
+                    {
+                        var statusBody = JsonSerializer.Deserialize<TokenRequestBody>(bodyText, AutomationJson.Options);
+                        userCode = statusBody?.UserCode;
+                    }
+                    catch (JsonException)
+                    {
+                        return AutomationJson.Error(AutomationErrors.ValidationFailed, "请求体不是有效 JSON。", 400);
+                    }
+                }
             }
-            catch (JsonException) { /* body 缺失或无效时走 proof 摘要校验 */ }
 
-            var outcome = await pairing.QueryStatusAsync(requestId, proof, userCode, context.RequestAborted);
+            var outcome = await pairing.QueryStatusAsync(requestId, proof!, userCode, context.RequestAborted);
 
             if (!outcome.Ok)
                 return AutomationJson.Error(outcome.ErrorCode!, outcome.Message!,
@@ -198,12 +210,19 @@ public static class AutomationEndpoints
                     DateTimeOffset.UtcNow, request.DeviceThumbprint, out var proof, out var error))
                 return AutomationJson.Error(error!.Code, error.Message, AutomationJson.StatusFor(error.Code));
 
+            var pairingError = await ValidatePairingProofAsync(proof!, requestId, context.Request, store, context.RequestAborted);
+            if (pairingError is not null)
+                return pairingError;
+
             TokenRequestBody? body;
             try
             {
                 body = await JsonSerializer.DeserializeAsync<TokenRequestBody>(context.Request.Body, AutomationJson.Options, context.RequestAborted);
             }
-            catch (JsonException) { body = null; }
+            catch (JsonException)
+            {
+                return AutomationJson.Error(AutomationErrors.ValidationFailed, "请求体不是有效 JSON。", 400);
+            }
 
             var outcome = await pairing.ExchangeTokenAsync(requestId, proof!, body?.UserCode, context.RequestAborted);
             if (!outcome.Ok)
@@ -223,7 +242,7 @@ public static class AutomationEndpoints
 
         // 取消自己尚未换取的配对请求。
         app.MapDelete(Prefix + "/pairing/requests/{id}", async (string id, HttpContext context,
-            AutomationStore store) =>
+            AutomationStore store, AutomationPairingService pairing) =>
         {
             if (!Guid.TryParse(id, out var requestId))
                 return AutomationJson.Error(AutomationErrors.PairingNotFound, "配对请求 ID 无效。", 404);
@@ -235,8 +254,15 @@ public static class AutomationEndpoints
             if (deviceKey is null) return AutomationJson.Error(AutomationErrors.StorageUnavailable, "设备公钥无法解析。", 503);
 
             if (!DeviceProof.TryParse(context.Request.Headers[DeviceProof.HeaderName].ToString(), deviceKey,
-                    DateTimeOffset.UtcNow, request.DeviceThumbprint, out _, out var error))
+                    DateTimeOffset.UtcNow, request.DeviceThumbprint, out var proof, out var error))
                 return AutomationJson.Error(error!.Code, error.Message, AutomationJson.StatusFor(error.Code));
+
+            var pairingError = await ValidatePairingProofAsync(proof!, requestId, context.Request, store, context.RequestAborted);
+            if (pairingError is not null)
+                return pairingError;
+
+            if (!pairing.AcceptJti(proof!.Jti!))
+                return AutomationJson.Error(AutomationErrors.ProofReplayed, "该证明已使用过。", 401);
 
             if (request.State is not PairingState.Pending)
                 return AutomationJson.Error(AutomationErrors.Conflict, "只有待批准的请求可以取消。", 409);
@@ -247,6 +273,24 @@ public static class AutomationEndpoints
             if (!cancelled) return AutomationJson.Error(AutomationErrors.Conflict, "该请求状态已变化。", 409);
             return AutomationJson.Ok(new { requestId, state = "cancelled" });
         });
+    }
+
+    private static async Task<IResult?> ValidatePairingProofAsync(DeviceProof.Proof proof, Guid requestId,
+        HttpRequest httpRequest, AutomationStore store, CancellationToken cancellationToken)
+    {
+        if (!DeviceProof.UriMatches(proof, httpRequest.Method, httpRequest.Path.Value ?? "/", httpRequest.QueryString.Value?.TrimStart('?')))
+            return AutomationJson.Error(AutomationErrors.ProofInvalid, "证明中的 htu/htm 与本次请求不一致。", 401);
+
+        if (string.IsNullOrEmpty(proof.RequestId) ||
+            !string.Equals(proof.RequestId, requestId.ToString(), StringComparison.OrdinalIgnoreCase))
+            return AutomationJson.Error(AutomationErrors.ProofInvalid, "证明中的 requestId 缺失或与路径不一致。", 401);
+
+        var instanceId = await store.GetOrCreateInstanceIdAsync(cancellationToken);
+        if (string.IsNullOrEmpty(proof.InstanceId) ||
+            !string.Equals(proof.InstanceId, instanceId.ToString(), StringComparison.OrdinalIgnoreCase))
+            return AutomationJson.Error(AutomationErrors.ProofInvalid, "证明中的 instanceId 缺失或与本服务端不一致。", 401);
+
+        return null;
     }
 
     // ---------------- 令牌端点 ----------------
@@ -274,9 +318,9 @@ public static class AutomationEndpoints
         {
             var denial = await tokens.AuthorizeAsync(context.Request, AutomationScopes.ServerRead, context.RequestAborted);
             if (denial.Authorized is null)
-                return AutomationJson.Error(denial.Code, denial.Message, AutomationJson.StatusFor(denial.Code), AutomationJson.IsRetryable(denial.Code));
+                return AutomationJson.Error(denial.Code, denial.Message, AutomationJson.StatusFor(denial.Code), AutomationJson.IsRetryable(denial.Code), details: denial.Details);
 
-            await tokens.TryAuditAsync("automation_request", "accepted", denial.Authorized.Grant, null, null, context.RequestAborted);
+            await tokens.TryAuditReadAsync(denial.Authorized.Grant, context.Request.Method, context.Request.Path.Value ?? "/", null, context.RequestAborted);
             return AutomationJson.Ok(new { ready = runtime.IsReady, startedAtUtc = runtime.StartedAtUtc });
         });
 
@@ -284,9 +328,9 @@ public static class AutomationEndpoints
         {
             var denial = await tokens.AuthorizeAsync(context.Request, AutomationScopes.ServerRead, context.RequestAborted);
             if (denial.Authorized is null)
-                return AutomationJson.Error(denial.Code, denial.Message, AutomationJson.StatusFor(denial.Code), AutomationJson.IsRetryable(denial.Code));
+                return AutomationJson.Error(denial.Code, denial.Message, AutomationJson.StatusFor(denial.Code), AutomationJson.IsRetryable(denial.Code), details: denial.Details);
 
-            await tokens.TryAuditAsync("automation_request", "accepted", denial.Authorized.Grant, null, null, context.RequestAborted);
+            await tokens.TryAuditReadAsync(denial.Authorized.Grant, context.Request.Method, context.Request.Path.Value ?? "/", null, context.RequestAborted);
             var assembly = typeof(AutomationEndpoints).Assembly;
             return AutomationJson.Ok(new
             {
@@ -300,9 +344,9 @@ public static class AutomationEndpoints
         {
             var denial = await tokens.AuthorizeAsync(context.Request, AutomationScopes.ServerRead, context.RequestAborted);
             if (denial.Authorized is null)
-                return AutomationJson.Error(denial.Code, denial.Message, AutomationJson.StatusFor(denial.Code), AutomationJson.IsRetryable(denial.Code));
+                return AutomationJson.Error(denial.Code, denial.Message, AutomationJson.StatusFor(denial.Code), AutomationJson.IsRetryable(denial.Code), details: denial.Details);
 
-            await tokens.TryAuditAsync("automation_request", "accepted", denial.Authorized.Grant, null, null, context.RequestAborted);
+            await tokens.TryAuditReadAsync(denial.Authorized.Grant, context.Request.Method, context.Request.Path.Value ?? "/", null, context.RequestAborted);
             return AutomationJson.Ok(new
             {
                 automationInstanceId = denial.Authorized.InstanceId,
@@ -316,9 +360,9 @@ public static class AutomationEndpoints
         {
             var denial = await tokens.AuthorizeAsync(context.Request, AutomationScopes.ClientsRead, context.RequestAborted);
             if (denial.Authorized is null)
-                return AutomationJson.Error(denial.Code, denial.Message, AutomationJson.StatusFor(denial.Code), AutomationJson.IsRetryable(denial.Code));
+                return AutomationJson.Error(denial.Code, denial.Message, AutomationJson.StatusFor(denial.Code), AutomationJson.IsRetryable(denial.Code), details: denial.Details);
 
-            await tokens.TryAuditAsync("automation_request", "accepted", denial.Authorized.Grant, null, null, context.RequestAborted);
+            await tokens.TryAuditReadAsync(denial.Authorized.Grant, context.Request.Method, context.Request.Path.Value ?? "/", null, context.RequestAborted);
             return AutomationJson.Ok(runtime.Configuration.Clients.Values.Select(client => new
             {
                 clientId = client.ClientId,
@@ -337,12 +381,12 @@ public static class AutomationEndpoints
         {
             var denial = await tokens.AuthorizeAsync(context.Request, AutomationScopes.ChannelsRead, context.RequestAborted);
             if (denial.Authorized is null)
-                return AutomationJson.Error(denial.Code, denial.Message, AutomationJson.StatusFor(denial.Code), AutomationJson.IsRetryable(denial.Code));
+                return AutomationJson.Error(denial.Code, denial.Message, AutomationJson.StatusFor(denial.Code), AutomationJson.IsRetryable(denial.Code), details: denial.Details);
 
             if (!runtime.Configuration.Clients.TryGetValue(clientId, out var client))
                 return AutomationJson.Error(AutomationErrors.NotFound, "客户端不存在。", 404);
 
-            await tokens.TryAuditAsync("automation_request", "accepted", denial.Authorized.Grant, null, null, context.RequestAborted);
+            await tokens.TryAuditReadAsync(denial.Authorized.Grant, context.Request.Method, context.Request.Path.Value ?? "/", clientId, context.RequestAborted);
             return AutomationJson.Ok(client.Channels.Select(channel => new
             {
                 channelId = channel.ChannelId,
@@ -366,12 +410,12 @@ public static class AutomationEndpoints
         {
             var denial = await tokens.AuthorizeAsync(context.Request, AutomationScopes.MappingsRead, context.RequestAborted);
             if (denial.Authorized is null)
-                return AutomationJson.Error(denial.Code, denial.Message, AutomationJson.StatusFor(denial.Code), AutomationJson.IsRetryable(denial.Code));
+                return AutomationJson.Error(denial.Code, denial.Message, AutomationJson.StatusFor(denial.Code), AutomationJson.IsRetryable(denial.Code), details: denial.Details);
 
             if (!runtime.Configuration.Clients.TryGetValue(clientId, out var client))
                 return AutomationJson.Error(AutomationErrors.NotFound, "客户端不存在。", 404);
 
-            await tokens.TryAuditAsync("automation_request", "accepted", denial.Authorized.Grant, null, null, context.RequestAborted);
+            await tokens.TryAuditReadAsync(denial.Authorized.Grant, context.Request.Method, context.Request.Path.Value ?? "/", clientId, context.RequestAborted);
             return AutomationJson.Ok(client.OutboundMappings.Select(mapping => new
             {
                 mappingId = mapping.MappingId,
@@ -388,7 +432,7 @@ public static class AutomationEndpoints
         {
             var denial = await tokens.AuthorizeAsync(context.Request, AutomationScopes.ChannelsWrite, context.RequestAborted);
             if (denial.Authorized is null)
-                return AutomationJson.Error(denial.Code, denial.Message, AutomationJson.StatusFor(denial.Code), AutomationJson.IsRetryable(denial.Code));
+                return AutomationJson.Error(denial.Code, denial.Message, AutomationJson.StatusFor(denial.Code), AutomationJson.IsRetryable(denial.Code), details: denial.Details);
 
             var key = context.Request.Headers[AutomationJson.IdempotencyHeader].ToString();
             if (string.IsNullOrWhiteSpace(key) || !Guid.TryParse(key, out _))
@@ -415,26 +459,20 @@ public static class AutomationEndpoints
 
             if (patch is null) return AutomationJson.Error(AutomationErrors.ValidationFailed, "请求体为空。", 400);
 
-            // 幂等键在这里真正生效：同键不同载荷 conflict；同键同载荷重放返回回执。
-            // fingerprint 取载荷与目标通道的组合摘要，避免「同键不同目标」被误判为重放。
             var fingerprint = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
                 System.Text.Encoding.UTF8.GetBytes($"{clientId}/{channelId}|{JsonSerializer.Serialize(patch, AutomationJson.Options)}")));
             if (!idempotency.TryReserve(key, fingerprint))
             {
-                // 预登记已存在：键可能在 24h 清理窗口边界被移除（prior 为 null），此时按可重新执行处理，
-                // 不能落进 replayed 假成功。
                 var prior = idempotency.GetFingerprint(key);
                 if (prior is not null && !string.Equals(prior, fingerprint, StringComparison.Ordinal))
                     return AutomationJson.Error(AutomationErrors.Conflict, "该 Idempotency-Key 已用于不同的载荷。", 409);
                 if (prior is not null)
                 {
-                    // 同键同载荷重放：不再次执行，按幂等语义返回回执。
                     context.Response.Headers[AutomationJson.OperationIdHeader] = key;
                     context.Response.Headers[AutomationJson.AuditStatusHeader] = "recorded";
                     return AutomationJson.Ok(new { channelId, replayed = true },
                         auditStatus: "recorded", operationId: key);
                 }
-                // prior 为 null：重新登记并继续执行。
                 idempotency.TryReserve(key, fingerprint);
             }
 
@@ -445,17 +483,21 @@ public static class AutomationEndpoints
                 patch.MaxConnections ?? existing.MaxConnections,
                 patch.TargetConnectTimeoutSeconds ?? existing.TargetConnectTimeoutSeconds)
             {
+                TransportProtocol = existing.TransportProtocol,
+                AuthorizedClientsOnly = existing.AuthorizedClientsOnly,
+                EndToEndEncryptionEnabled = existing.EndToEndEncryptionEnabled,
+                AccessSecret = existing.AccessSecret,
+                SecurityGroupId = existing.SecurityGroupId,
                 Tags = patch.Tags ?? existing.Tags,
                 UdpIdleTimeoutSeconds = patch.UdpIdleTimeoutSeconds ?? existing.UdpIdleTimeoutSeconds
             };
 
             try
             {
-                // 写前审计闸门：审计不可用则不执行任何配置变更（需求「失败关闭」）。
-                // 用独立的 audit_unavailable 判断与 catch，避免把业务写异常误报为审计故障。
+                // 写前检查审计可用性（fail-closed）；实际成功记录在变更生效后落库，避免先记成功再失败。
                 try
                 {
-                    await tokens.RequireAuditAsync(denial.Authorized.Grant, "automation_change_applied", context.RequestAborted);
+                    await tokens.EnsureAuditAvailableAsync(context.RequestAborted);
                 }
                 catch (AuditUnavailableException)
                 {
@@ -465,8 +507,19 @@ public static class AutomationEndpoints
                 }
 
                 var (saved, push) = await editor.UpdateAsync(clientId, channelId, updated, context.RequestAborted);
+                var auditStatus = "recorded";
+                try
+                {
+                    await tokens.RequireAuditAsync(denial.Authorized.Grant, "automation_change_applied", context.RequestAborted,
+                        clientId: clientId, channelId: channelId);
+                }
+                catch (AuditUnavailableException)
+                {
+                    auditStatus = "failed";
+                }
+
                 context.Response.Headers[AutomationJson.OperationIdHeader] = key;
-                context.Response.Headers[AutomationJson.AuditStatusHeader] = "recorded";
+                context.Response.Headers[AutomationJson.AuditStatusHeader] = auditStatus;
 
                 return AutomationJson.Ok(new
                 {
@@ -477,14 +530,12 @@ public static class AutomationEndpoints
                     tags = saved.Tags,
                     pushedToAgent = push.PushedToAgent,
                     pushFailureReason = push.FailureReason
-                }, auditStatus: "recorded", operationId: key);
+                }, auditStatus: auditStatus, operationId: key);
             }
             catch (Exception exception) when (exception is ChannelUpdateException or ConfigurationException)
             {
-                // 执行失败必须解除预留：否则该键被毒化 24h，同键同载荷重试会命中
-                // replayed 分支返回 200 假成功，而变更实际从未生效。
                 idempotency.Release(key);
-                throw;
+                return AutomationJson.Error(AutomationErrors.ValidationFailed, exception.Message, 400);
             }
         });
 
@@ -493,7 +544,7 @@ public static class AutomationEndpoints
         {
             var denial = await tokens.AuthorizeAsync(context.Request, AutomationScopes.ChangesWrite, context.RequestAborted);
             if (denial.Authorized is null)
-                return AutomationJson.Error(denial.Code, denial.Message, AutomationJson.StatusFor(denial.Code), AutomationJson.IsRetryable(denial.Code));
+                return AutomationJson.Error(denial.Code, denial.Message, AutomationJson.StatusFor(denial.Code), AutomationJson.IsRetryable(denial.Code), details: denial.Details);
 
             var key = context.Request.Headers[AutomationJson.IdempotencyHeader].ToString();
             if (string.IsNullOrWhiteSpace(key) || !Guid.TryParse(key, out _))
@@ -511,10 +562,9 @@ public static class AutomationEndpoints
 
             if (body is null) return AutomationJson.Error(AutomationErrors.ValidationFailed, "请求体为空。", 400);
 
-            // C 类申请同样受审计闸门约束：审计不可用时不落库、返回 audit_unavailable。
             try
             {
-                await tokens.RequireAuditAsync(denial.Authorized.Grant, "automation_change_requested", context.RequestAborted);
+                await tokens.EnsureAuditAvailableAsync(context.RequestAborted);
             }
             catch (AuditUnavailableException)
             {
@@ -523,7 +573,8 @@ public static class AutomationEndpoints
             }
 
             var submission = await changes.SubmitAsync(body.Type ?? string.Empty, body.Target, body.Payload, body.Reason,
-                $"automation:{denial.Authorized.Grant.Subject}", key, context.RequestAborted);
+                $"automation:{denial.Authorized.Grant.Subject}", key, context.RequestAborted,
+                deviceThumbprint: denial.Authorized.Grant.DeviceThumbprint, grantId: denial.Authorized.Grant.GrantId);
             if (!submission.Ok)
                 return AutomationJson.Error(submission.ErrorCode!, submission.Message!,
                     AutomationJson.StatusFor(submission.ErrorCode!), AutomationJson.IsRetryable(submission.ErrorCode!));
@@ -541,9 +592,10 @@ public static class AutomationEndpoints
         {
             var denial = await tokens.AuthorizeAsync(context.Request, AutomationScopes.ChangesRead, context.RequestAborted);
             if (denial.Authorized is null)
-                return AutomationJson.Error(denial.Code, denial.Message, AutomationJson.StatusFor(denial.Code), AutomationJson.IsRetryable(denial.Code));
+                return AutomationJson.Error(denial.Code, denial.Message, AutomationJson.StatusFor(denial.Code), AutomationJson.IsRetryable(denial.Code), details: denial.Details);
 
-            var items = await changes.ListAsync(null, context.RequestAborted);
+            await tokens.TryAuditReadAsync(denial.Authorized.Grant, context.Request.Method, context.Request.Path.Value ?? "/", null, context.RequestAborted);
+            var items = await changes.ListAsync(null, context.RequestAborted, denial.Authorized.Grant.DeviceThumbprint);
             return AutomationJson.Ok(items.Select(item => new
             {
                 changeRequestId = item.ChangeRequestId,
@@ -560,13 +612,15 @@ public static class AutomationEndpoints
         {
             var denial = await tokens.AuthorizeAsync(context.Request, AutomationScopes.ChangesRead, context.RequestAborted);
             if (denial.Authorized is null)
-                return AutomationJson.Error(denial.Code, denial.Message, AutomationJson.StatusFor(denial.Code), AutomationJson.IsRetryable(denial.Code));
+                return AutomationJson.Error(denial.Code, denial.Message, AutomationJson.StatusFor(denial.Code), AutomationJson.IsRetryable(denial.Code), details: denial.Details);
 
             if (!Guid.TryParse(id, out var changeRequestId))
                 return AutomationJson.Error(AutomationErrors.NotFound, "申请 ID 无效。", 404);
             var item = await changes.GetAsync(changeRequestId, context.RequestAborted);
-            if (item is null) return AutomationJson.Error(AutomationErrors.NotFound, "申请不存在。", 404);
+            if (item is null || !string.Equals(item.DeviceThumbprint, denial.Authorized.Grant.DeviceThumbprint, StringComparison.Ordinal))
+                return AutomationJson.Error(AutomationErrors.NotFound, "申请不存在。", 404);
 
+            await tokens.TryAuditReadAsync(denial.Authorized.Grant, context.Request.Method, context.Request.Path.Value ?? "/", null, context.RequestAborted);
             return AutomationJson.Ok(new
             {
                 changeRequestId = item.ChangeRequestId,
@@ -585,11 +639,27 @@ public static class AutomationEndpoints
         {
             var denial = await tokens.AuthorizeAsync(context.Request, AutomationScopes.ChangesWrite, context.RequestAborted);
             if (denial.Authorized is null)
-                return AutomationJson.Error(denial.Code, denial.Message, AutomationJson.StatusFor(denial.Code), AutomationJson.IsRetryable(denial.Code));
+                return AutomationJson.Error(denial.Code, denial.Message, AutomationJson.StatusFor(denial.Code), AutomationJson.IsRetryable(denial.Code), details: denial.Details);
 
             if (!Guid.TryParse(id, out var changeRequestId))
                 return AutomationJson.Error(AutomationErrors.NotFound, "申请 ID 无效。", 404);
-            var result = await changes.CancelAsync(changeRequestId, $"automation:{denial.Authorized.Grant.Subject}", context.RequestAborted);
+
+            var item = await changes.GetAsync(changeRequestId, context.RequestAborted);
+            if (item is null || !string.Equals(item.DeviceThumbprint, denial.Authorized.Grant.DeviceThumbprint, StringComparison.Ordinal))
+                return AutomationJson.Error(AutomationErrors.NotFound, "申请不存在。", 404);
+
+            try
+            {
+                await tokens.EnsureAuditAvailableAsync(context.RequestAborted);
+            }
+            catch (AuditUnavailableException)
+            {
+                return AutomationJson.Error(AutomationErrors.AuditUnavailable,
+                    "审计存储不可用；本次撤销未执行。", 503, retryable: true);
+            }
+
+            var result = await changes.CancelAsync(changeRequestId, $"automation:{denial.Authorized.Grant.Subject}", context.RequestAborted,
+                requiredDeviceThumbprint: denial.Authorized.Grant.DeviceThumbprint, grantId: denial.Authorized.Grant.GrantId);
             if (!result.Ok) return AutomationJson.Error(result.ErrorCode!, result.Message!, AutomationJson.StatusFor(result.ErrorCode!));
             return AutomationJson.Ok(new { changeRequestId, state = "cancelled" });
         });
@@ -753,12 +823,25 @@ public sealed class IdempotencyCache
 {
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, (string Fingerprint, DateTimeOffset At)> entries = new(StringComparer.Ordinal);
     private static readonly TimeSpan Retention = TimeSpan.FromHours(24);
+    private const int MaxEntries = 10_000;
+    private long lastSweepTick = Environment.TickCount64;
 
     public bool TryReserve(string key, string fingerprint)
     {
         var now = DateTimeOffset.UtcNow;
-        foreach (var stale in entries.Where(pair => now - pair.Value.At > Retention).Select(pair => pair.Key).ToArray())
-            entries.TryRemove(stale, out _);
+        var nowTick = Environment.TickCount64;
+        var lastSweep = Volatile.Read(ref lastSweepTick);
+        if (entries.Count >= MaxEntries || (nowTick - lastSweep >= 60_000 && Interlocked.CompareExchange(ref lastSweepTick, nowTick, lastSweep) == lastSweep))
+        {
+            Volatile.Write(ref lastSweepTick, nowTick);
+            foreach (var stale in entries.Where(pair => now - pair.Value.At > Retention).Select(pair => pair.Key).ToArray())
+                entries.TryRemove(stale, out _);
+            if (entries.Count >= MaxEntries)
+            {
+                foreach (var oldest in entries.OrderBy(pair => pair.Value.At).Take(entries.Count - MaxEntries + 1).Select(pair => pair.Key).ToArray())
+                    entries.TryRemove(oldest, out _);
+            }
+        }
         return entries.TryAdd(key, (fingerprint, now));
     }
 
@@ -782,6 +865,6 @@ public sealed class IdempotencyCache
         if (!runtime.Configuration.Clients.TryGetValue(clientId, out var client)) return false;
         var channel = client.Channels.SingleOrDefault(item => item.ChannelId == channelId);
         return channel is not null && channel.TargetPort == automation.Port &&
-               (channel.TargetHost is "127.0.0.1" or "::1" or "localhost");
+               ConfigurationLoader.IsLoopbackOrUnspecifiedHost(channel.TargetHost);
     }
 }

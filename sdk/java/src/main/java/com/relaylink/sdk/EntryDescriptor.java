@@ -32,11 +32,18 @@ public final class EntryDescriptor {
         if (host == null || host.trim().isEmpty()) {
             throw new RelayLinkException(RelayLinkException.INVALID_USAGE, "host 不能为空。");
         }
+        String cleanHost = host.trim();
+        if (cleanHost.startsWith("[") && cleanHost.endsWith("]") && cleanHost.length() > 2) {
+            cleanHost = cleanHost.substring(1, cleanHost.length() - 1);
+        }
         if (port < 1 || port > 65535) {
             throw new RelayLinkException(RelayLinkException.INVALID_USAGE, "port 必须在 1–65535。");
         }
         String normalized = (transport == null || transport.isEmpty()) ? "tcp" : transport;
-        return new EntryDescriptor(host, port, normalized);
+        if (!"tcp".equals(normalized) && !"udp".equals(normalized)) {
+            throw new RelayLinkException(RelayLinkException.INVALID_USAGE, "transport 必须为 tcp 或 udp。");
+        }
+        return new EntryDescriptor(cleanHost, port, normalized);
     }
 
     public String host() {
@@ -52,7 +59,7 @@ public final class EntryDescriptor {
     }
 
     public String endpoint() {
-        return host + ":" + port;
+        return host.indexOf(':') >= 0 ? "[" + host + "]:" + port : host + ":" + port;
     }
 
     @Override

@@ -35,9 +35,11 @@ public sealed class Session(Guid sessionId, string clientId, DateTimeOffset conn
     private readonly SemaphoreSlim configUpdateLock = new(1, 1);
     private HeartbeatSnapshot heartbeat = new(connectedAtUtc, null);
     private int ready;
+    private int handshakeCompleted;
     public CancellationToken LifetimeToken => lifetime.Token;
     public bool IsReady => Volatile.Read(ref ready) == 1 && !lifetime.IsCancellationRequested;
-    public void MarkReady() => Volatile.Write(ref ready, 1);
+    internal bool HasCompletedHandshake => Volatile.Read(ref handshakeCompleted) == 1;
+    public void MarkReady() { Volatile.Write(ref handshakeCompleted, 1); Volatile.Write(ref ready, 1); }
     public void Close() { Volatile.Write(ref ready, 0); lifetime.Cancel(); }
     public Guid SessionId { get; } = sessionId;
     public string ClientId { get; } = clientId;
@@ -159,8 +161,19 @@ public sealed class Session(Guid sessionId, string clientId, DateTimeOffset conn
         configUpdateLock.Dispose();
     }
 
-    public ValueTask SendAsync(Frame frame, CancellationToken cancellationToken) =>
-        ControlWriter?.WriteAsync(frame, cancellationToken) ?? throw new InvalidOperationException("Control writer is not available.");
+    public async ValueTask SendAsync(Frame frame, CancellationToken cancellationToken)
+    {
+        var writer = ControlWriter ?? throw new InvalidOperationException("Control writer is not available.");
+        try
+        {
+            await writer.WriteAsync(frame, cancellationToken);
+        }
+        catch (FrameWriteException)
+        {
+            Close();
+            throw;
+        }
+    }
 }
 
 public sealed record HeartbeatSnapshot(DateTimeOffset Utc, TimeSpan? Rtt);

@@ -38,4 +38,22 @@ public sealed class PeerApplicationStreamTests
         using var stream = new PeerApplicationStream(new MemoryStream(new byte[] { 0, 0, 0, 1 }));
         await Assert.ThrowsAsync<IOException>(async () => { _ = await stream.ReadAsync(new byte[1]); });
     }
+
+    [Fact]
+    public async Task CompleteWritesAsync_is_idempotent_writes_zero_header_and_blocks_future_writes()
+    {
+        await using var wire = new MemoryStream();
+        await using var stream = new PeerApplicationStream(wire, leaveOpen: true);
+        await stream.WriteAsync(new byte[] { 10, 20, 30 });
+        await stream.CompleteWritesAsync();
+        await stream.CompleteWritesAsync();
+
+        wire.Position = 0;
+        var reader = new PeerApplicationStream(wire, leaveOpen: true);
+        var buf = new byte[16];
+        Assert.Equal(3, await reader.ReadAsync(buf));
+        Assert.Equal(0, await reader.ReadAsync(buf));
+        Assert.Equal(4 + 3 + 4, wire.Length);
+        await Assert.ThrowsAsync<InvalidOperationException>(async () => await stream.WriteAsync(new byte[] { 1 }));
+    }
 }

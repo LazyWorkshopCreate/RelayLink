@@ -13,7 +13,6 @@ public sealed class PeerRelayRegistry(ServerRuntime runtime, MetricsRegistry met
     private readonly SemaphoreSlim limit = runtime.GlobalConnectionLimit;
     private readonly SemaphoreSlim pendingLimit = runtime.GlobalPendingLimit;
     private readonly object quotaLock = new();
-    private readonly Dictionary<string, int> clientCounts = new(StringComparer.Ordinal);
     private readonly Dictionary<string, int> channelCounts = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<Guid, ConcurrentDictionary<Guid, long>> recentPeerRequests = new();
     private static readonly long RecentRequestWindowTicks = Stopwatch.Frequency * 120;
@@ -85,34 +84,53 @@ public sealed class PeerRelayRegistry(ServerRuntime runtime, MetricsRegistry met
             channelMetrics.PeerFailed();
             limit.Release();
             pendingLimit.Release();
+            ReleasePendingQuotas(caller.ClientId, targetConfig.ClientId);
             ReleaseQuotas(caller.ClientId, targetConfig.ClientId, targetChannel.ChannelId);
             await RejectAsync(caller, request.RequestId, ErrorCode.ConnectionAborted, cancellationToken);
             return;
         }
         if (!caller.IsReady || !targetSession.IsReady ||
             !runtime.Configuration.Clients.TryGetValue(caller.ClientId, out var currentCaller) || !currentCaller.Enabled ||
-            !runtime.Configuration.Clients.TryGetValue(targetConfig.ClientId, out var currentTarget) || !currentTarget.Enabled)
+            currentCaller.OutboundMappings.SingleOrDefault(item => item.Enabled && item.MappingId == request.MappingId) is not { } currentMapping ||
+            currentMapping.TargetClientId != targetConfig.ClientId || currentMapping.TargetChannelId != targetChannel.ChannelId ||
+            !runtime.Configuration.Clients.TryGetValue(targetConfig.ClientId, out var currentTarget) || !currentTarget.Enabled ||
+            currentTarget.Channels.SingleOrDefault(item => item.Enabled && item.AuthorizedClientsOnly && item.ChannelId == targetChannel.ChannelId) is not { } currentTargetChannel ||
+            !string.Equals(currentMapping.TargetCertificateSha256, currentTarget.E2eCertificateSha256, StringComparison.OrdinalIgnoreCase))
         {
             Cleanup(relay);
             await RejectAsync(caller, request.RequestId, ErrorCode.ChannelUnavailable, cancellationToken);
             return;
         }
+        using (var targetSendTimeout = CancellationTokenSource.CreateLinkedTokenSource(targetSession.LifetimeToken))
+        {
+            targetSendTimeout.CancelAfter(relay.OpenTimeout > TimeSpan.Zero ? relay.OpenTimeout : TimeSpan.FromSeconds(5));
+            try
+            {
+                await targetSession.SendAsync(new Frame(FrameType.PeerOpen, JsonProtocolSerializer.Serialize(new PeerOpenMessage(relay.ConnectionId, targetSession.SessionId, caller.ClientId, targetChannel.ChannelId, relay.TargetToken, currentTargetChannel.EndToEndEncryptionEnabled, currentTargetChannel.TransportProtocol, httpIngress) { SetupTimeoutMilliseconds = setupTimeoutMilliseconds }, targetSession.ProtocolVersion)), targetSendTimeout.Token);
+            }
+            catch (Exception exception) when (exception is FrameWriteException or IOException or ProtocolException or OperationCanceledException or InvalidOperationException)
+            {
+                Cleanup(relay, "target_send_failed");
+                await RejectAsync(caller, request.RequestId, ErrorCode.ChannelUnavailable, cancellationToken);
+                return;
+            }
+        }
         try
         {
-            await targetSession.SendAsync(new Frame(FrameType.PeerOpen, JsonProtocolSerializer.Serialize(new PeerOpenMessage(relay.ConnectionId, targetSession.SessionId, caller.ClientId, targetChannel.ChannelId, relay.TargetToken, targetChannel.EndToEndEncryptionEnabled, targetChannel.TransportProtocol, httpIngress) { SetupTimeoutMilliseconds = setupTimeoutMilliseconds }, targetSession.ProtocolVersion)), cancellationToken);
-            await caller.SendAsync(new Frame(FrameType.PeerOpenGranted, JsonProtocolSerializer.Serialize(new PeerOpenGrantedMessage(request.RequestId, relay.ConnectionId, caller.SessionId, relay.CallerToken, targetChannel.EndToEndEncryptionEnabled, targetChannel.TransportProtocol, httpIngress) { SetupTimeoutMilliseconds = setupTimeoutMilliseconds }, caller.ProtocolVersion)), cancellationToken);
+            await caller.SendAsync(new Frame(FrameType.PeerOpenGranted, JsonProtocolSerializer.Serialize(new PeerOpenGrantedMessage(request.RequestId, relay.ConnectionId, caller.SessionId, relay.CallerToken, currentTargetChannel.EndToEndEncryptionEnabled, currentTargetChannel.TransportProtocol, httpIngress) { SetupTimeoutMilliseconds = setupTimeoutMilliseconds }, caller.ProtocolVersion)), cancellationToken);
             _ = RunAsync(relay);
         }
         catch
         {
-            Cleanup(relay);
+            Cleanup(relay, "caller_send_failed");
             throw;
         }
     }
 
-    public bool TryBind(PeerBindDataMessage message, DataTunnel tunnel, out PeerRelay? relay)
+    public bool TryBind(PeerBindDataMessage? message, DataTunnel tunnel, out PeerRelay? relay)
     {
         relay = null;
+        if (message is null || message.Role is not ("caller" or "target") || string.IsNullOrEmpty(message.Token)) return false;
         if (!relays.TryGetValue(message.ConnectionId, out var candidate) ||
             tunnel.Writer.ProtocolVersion != (message.Role == "caller" ? candidate.Caller : candidate.Target).ProtocolVersion ||
             !candidate.TryBind(message, tunnel)) return false;
@@ -184,7 +202,11 @@ public sealed class PeerRelayRegistry(ServerRuntime runtime, MetricsRegistry met
             var accepted = new Frame(FrameType.PeerBindAccepted, JsonProtocolSerializer.Serialize(new PeerBindAcceptedMessage(relay.ConnectionId)));
             await caller.Writer.WriteAsync(accepted, opening.Token);
             await target.Writer.WriteAsync(accepted, opening.Token);
-            if (relay.TryReleasePending()) pendingLimit.Release();
+            if (relay.TryReleasePending())
+            {
+                pendingLimit.Release();
+                ReleasePendingQuotas(relay.Caller.ClientId, relay.Target.ClientId);
+            }
             lock (relay)
             {
                 if (relay.Completed) return;
@@ -193,14 +215,29 @@ public sealed class PeerRelayRegistry(ServerRuntime runtime, MetricsRegistry met
             }
             using var relayCancellation = CancellationTokenSource.CreateLinkedTokenSource(relay.LifetimeToken);
             using var idle = new RelayIdleWatch(IdleTimeoutFor(relay.TransportProtocol, runtime.Configuration.Server.Limits.TcpIdleTimeoutSeconds), relayCancellation.Token);
+            TcpKeepAlive.Enable(caller.Socket);
+            TcpKeepAlive.Enable(target.Socket);
             var channelMetrics = metrics.For(relay.Target.ClientId, relay.ChannelId);
             var callerToTarget = ForwardAsync(caller.Reader, target.Writer, count => { channelMetrics.AddPeerCiphertextToTarget(count); relay.AddToTarget(count); idle.Touch(); }, idle.Token);
             var targetToCaller = ForwardAsync(target.Reader, caller.Writer, count => { channelMetrics.AddPeerCiphertextToCaller(count); relay.AddToCaller(count); idle.Touch(); }, idle.Token);
             var first = await Task.WhenAny(callerToTarget, targetToCaller);
             var remaining = first == callerToTarget ? targetToCaller : callerToTarget;
             if (first.IsFaulted || first.IsCanceled) relayCancellation.Cancel();
-            else if (await Task.WhenAny(remaining, Task.Delay(TimeSpan.FromSeconds(runtime.Configuration.Server.Limits.HalfCloseDrainTimeoutSeconds), relayCancellation.Token)) != remaining)
+            else if (await first)
+            {
+                relay.SetEndReason("reset");
                 relayCancellation.Cancel();
+            }
+            else
+            {
+                using var drainCts = CancellationTokenSource.CreateLinkedTokenSource(relayCancellation.Token);
+                var drainDelay = Task.Delay(TimeSpan.FromSeconds(runtime.Configuration.Server.Limits.HalfCloseDrainTimeoutSeconds), drainCts.Token);
+                var winner = await Task.WhenAny(remaining, drainDelay);
+                drainCts.Cancel();
+                try { await drainDelay; }
+                catch (OperationCanceledException) { }
+                if (winner != remaining) relayCancellation.Cancel();
+            }
             await Task.WhenAll(callerToTarget, targetToCaller);
         }
         catch (Exception exception) when (exception is OperationCanceledException or IOException or ProtocolException or AuditUnavailableException)
@@ -229,7 +266,7 @@ public sealed class PeerRelayRegistry(ServerRuntime runtime, MetricsRegistry met
     internal static TimeSpan IdleTimeoutFor(string transportProtocol, int tcpIdleTimeoutSeconds) =>
         transportProtocol == "udp" ? TimeSpan.Zero : TimeSpan.FromSeconds(Math.Max(0, tcpIdleTimeoutSeconds));
 
-    private static async Task ForwardAsync(FrameReader reader, FrameWriter writer, Action<int> bytesWritten, CancellationToken cancellationToken)
+    private static async Task<bool> ForwardAsync(FrameReader reader, FrameWriter writer, Action<int> bytesWritten, CancellationToken cancellationToken)
     {
         while (true)
         {
@@ -238,7 +275,7 @@ public sealed class PeerRelayRegistry(ServerRuntime runtime, MetricsRegistry met
             if (frame.Type is not (FrameType.Data or FrameType.Fin or FrameType.Reset)) throw new ProtocolException("Unexpected peer data frame.");
             await writer.WriteAsync(frame, cancellationToken);
             if (frame.Type == FrameType.Data) bytesWritten(frame.Payload.Length);
-            if (frame.Type != FrameType.Data) return;
+            if (frame.Type != FrameType.Data) return frame.Type == FrameType.Reset;
         }
     }
 
@@ -307,7 +344,11 @@ public sealed class PeerRelayRegistry(ServerRuntime runtime, MetricsRegistry met
         await relay.WaitForProcessingAsync();
         var channelMetrics = metrics.For(relay.Target.ClientId, relay.ChannelId);
         if (relay.Opened) channelMetrics.PeerClosed(); else channelMetrics.PeerFailed();
-        if (relay.TryReleasePending()) pendingLimit.Release();
+        if (relay.TryReleasePending())
+        {
+            pendingLimit.Release();
+            ReleasePendingQuotas(relay.Caller.ClientId, relay.Target.ClientId);
+        }
         limit.Release();
         ReleaseQuotas(relay.Caller.ClientId, relay.Target.ClientId, relay.ChannelId);
         await RecordTerminationAsync(relay);
@@ -332,17 +373,54 @@ public sealed class PeerRelayRegistry(ServerRuntime runtime, MetricsRegistry met
 
     private bool TryAcquireQuotas(ClientConfiguration caller, ClientConfiguration target, ChannelConfiguration channel)
     {
+        var sameClient = string.Equals(caller.ClientId, target.ClientId, StringComparison.Ordinal);
+        var (first, second) = string.CompareOrdinal(caller.ClientId, target.ClientId) <= 0 ? (caller, target) : (target, caller);
+        var firstLimit = runtime.ClientConnectionLimits.GetOrAdd(first.ClientId, _ => new AdjustableConnectionLimit(first.MaxConnections));
+        if (!firstLimit.TryAcquire()) return false;
+        var secondLimit = sameClient ? null : runtime.ClientConnectionLimits.GetOrAdd(second.ClientId, _ => new AdjustableConnectionLimit(second.MaxConnections));
+        if (secondLimit is not null && !secondLimit.TryAcquire())
+        {
+            firstLimit.Release();
+            return false;
+        }
+        var firstPending = runtime.ClientPendingLimits.GetOrAdd(first.ClientId, _ => new AdjustableConnectionLimit(first.MaxPendingConnections));
+        if (!firstPending.TryAcquire())
+        {
+            secondLimit?.Release();
+            firstLimit.Release();
+            return false;
+        }
+        var secondPending = sameClient ? null : runtime.ClientPendingLimits.GetOrAdd(second.ClientId, _ => new AdjustableConnectionLimit(second.MaxPendingConnections));
+        if (secondPending is not null && !secondPending.TryAcquire())
+        {
+            firstPending.Release();
+            secondLimit?.Release();
+            firstLimit.Release();
+            return false;
+        }
+
         var key = $"{target.ClientId}/{channel.ChannelId}";
         lock (quotaLock)
         {
-            if (clientCounts.GetValueOrDefault(caller.ClientId) >= caller.MaxConnections ||
-                clientCounts.GetValueOrDefault(target.ClientId) >= target.MaxConnections ||
-                channelCounts.GetValueOrDefault(key) >= channel.MaxConnections) return false;
-            clientCounts[caller.ClientId] = clientCounts.GetValueOrDefault(caller.ClientId) + 1;
-            clientCounts[target.ClientId] = clientCounts.GetValueOrDefault(target.ClientId) + 1;
-            channelCounts[key] = channelCounts.GetValueOrDefault(key) + 1;
-            return true;
+            if (channelCounts.GetValueOrDefault(key) < channel.MaxConnections)
+            {
+                channelCounts[key] = channelCounts.GetValueOrDefault(key) + 1;
+                return true;
+            }
         }
+
+        secondPending?.Release();
+        firstPending.Release();
+        secondLimit?.Release();
+        firstLimit.Release();
+        return false;
+    }
+
+    private void ReleasePendingQuotas(string callerId, string targetId)
+    {
+        runtime.ClientPendingLimits[callerId].Release();
+        if (!string.Equals(callerId, targetId, StringComparison.Ordinal))
+            runtime.ClientPendingLimits[targetId].Release();
     }
 
     private void ReleaseQuotas(string callerId, string targetId, string channelId)
@@ -350,10 +428,11 @@ public sealed class PeerRelayRegistry(ServerRuntime runtime, MetricsRegistry met
         var key = $"{targetId}/{channelId}";
         lock (quotaLock)
         {
-            clientCounts[callerId]--;
-            clientCounts[targetId]--;
             channelCounts[key]--;
         }
+        runtime.ClientConnectionLimits[callerId].Release();
+        if (!string.Equals(callerId, targetId, StringComparison.Ordinal))
+            runtime.ClientConnectionLimits[targetId].Release();
     }
 }
 
@@ -361,6 +440,8 @@ public sealed class PeerRelay(Session caller, Session target, string channelId, 
 {
     private readonly byte[] callerToken = RandomNumberGenerator.GetBytes(32);
     private readonly byte[] targetToken = RandomNumberGenerator.GetBytes(32);
+    private readonly object tokenLock = new();
+    private bool tokensZeroed;
     private readonly TaskCompletionSource<DataTunnel> callerTunnel = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TaskCompletionSource<DataTunnel> targetTunnel = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TaskCompletionSource completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -423,8 +504,15 @@ public sealed class PeerRelay(Session caller, Session target, string channelId, 
         if (!completion.TrySetResult()) return;
         if (reason != "completed") Volatile.Write(ref endReason, reason);
         lifetime.Cancel();
-        CryptographicOperations.ZeroMemory(callerToken);
-        CryptographicOperations.ZeroMemory(targetToken);
+        lock (tokenLock)
+        {
+            if (!tokensZeroed)
+            {
+                tokensZeroed = true;
+                CryptographicOperations.ZeroMemory(callerToken);
+                CryptographicOperations.ZeroMemory(targetToken);
+            }
+        }
     }
     public bool TryReleasePending() => Interlocked.Exchange(ref pendingHeld, 0) == 1;
     public bool Opened => Volatile.Read(ref opened) == 1;
@@ -439,8 +527,12 @@ public sealed class PeerRelay(Session caller, Session target, string channelId, 
         if (!callerSide && message.Role != "target") return false;
         var session = callerSide ? Caller : Target;
         var expected = callerSide ? callerToken : targetToken;
-        if (message.SessionId != session.SessionId || !TryDecodeToken(message.Token, expected, out var actual)) return false;
-        if (!CryptographicOperations.FixedTimeEquals(actual, expected)) return false;
+        if (message.SessionId != session.SessionId) return false;
+        lock (tokenLock)
+        {
+            if (tokensZeroed || !TryDecodeToken(message.Token, expected, out var actual)) return false;
+            if (!CryptographicOperations.FixedTimeEquals(actual, expected)) return false;
+        }
         if (Interlocked.CompareExchange(ref (callerSide ? ref callerBound : ref targetBound), 1, 0) != 0) return false;
         return (callerSide ? callerTunnel : targetTunnel).TrySetResult(tunnel);
     }
@@ -452,8 +544,9 @@ public sealed class PeerRelay(Session caller, Session target, string channelId, 
         return (caller, target);
     }
 
-    private static bool TryDecodeToken(string candidate, byte[] expected, out byte[] actual)
+    private static bool TryDecodeToken(string? candidate, byte[] expected, out byte[] actual)
     {
+        if (string.IsNullOrEmpty(candidate)) { actual = []; return false; }
         try { actual = Convert.FromBase64String(candidate); }
         catch (FormatException) { actual = []; return false; }
         return actual.Length == expected.Length;

@@ -70,8 +70,14 @@ $clientConfig = @{
     )
 }
 $agentConfig = @{
-    serverHost = '127.0.0.1'; serverPort = $controlPort; dataPort = $dataPort; useTls = $false; clientId = 'database-agent'; secret = $secret; dashboardPort = 0
-    reconnect = @{ initialDelaySeconds = 1; maxDelaySeconds = 2; permanentErrorDelaySeconds = 2 }
+    schemaVersion = 1
+    dashboardPort = 0
+    outboundPortRangeStart = 20000
+    outboundPortRangeEnd = 59999
+    servers = @(@{
+        profileId = 'primary'; enabled = $true; serverHost = '127.0.0.1'; serverPort = $controlPort; dataPort = $dataPort; useTls = $false; clientId = 'database-agent'; secret = $secret
+        reconnect = @{ initialDelaySeconds = 1; maxDelaySeconds = 2; permanentErrorDelaySeconds = 2 }
+    })
 }
 $serverPath = Join-Path $runDir 'server.json'
 $clientPath = Join-Path $runDir 'clients/database-agent.json'

@@ -487,7 +487,7 @@ for (const [slug] of pages) {
 // 渲染器：优先 Playwright 自带的 Chromium（稳定），失败才退回 Edge。
 // Edge 曾在本机彻底无法启动（连 --version 都无输出），所以顺序不能反。
 const RENDERERS = [
-  'C:\\Users\\deron\\AppData\\Local\\ms-playwright\\chromium-1234\\chrome-win64\\chrome.exe',
+  ...(process.env.LOCALAPPDATA ? [resolve(process.env.LOCALAPPDATA, 'ms-playwright/chromium-1234/chrome-win64/chrome.exe')] : []),
   'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
 ];
 const MIN_BYTES = 20000;

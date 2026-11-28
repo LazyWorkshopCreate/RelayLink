@@ -92,6 +92,16 @@ internal static class SecretFilePermissions
             yield return Path.GetDirectoryName(database)!;
         }
 
+        if (loaded.Server.Automation is { Enabled: true } automation)
+        {
+            if (!string.IsNullOrWhiteSpace(automation.ResolvedPrivateKeyPath))
+                yield return automation.ResolvedPrivateKeyPath;
+            var automationDb = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(serverConfigurationPath))!, "automation", "state.db");
+            yield return automationDb;
+            yield return automationDb + "-wal";
+            yield return automationDb + "-shm";
+            yield return Path.GetDirectoryName(automationDb)!;
+        }
     }
 
     public static IReadOnlyList<string> FindLoose(IEnumerable<string> paths)
@@ -213,7 +223,7 @@ internal static class SecretFilePermissions
         if (IsFilesystemRoot(full) || IsKnownSharedDirectory(full)) return true;
         if (!Directory.Exists(full)) return false;
         if (!OperatingSystem.IsWindows())
-            return (File.GetUnixFileMode(full) & UnixFileMode.OtherWrite) != 0;
+            return (File.GetUnixFileMode(full) & (UnixFileMode.OtherWrite | UnixFileMode.GroupWrite)) != 0;
         return WindowsHasLooseDirectoryAccess(full);
     }
 

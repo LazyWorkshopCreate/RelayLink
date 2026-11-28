@@ -23,6 +23,8 @@ public static class AgentConfigurationFactory
             clientId = client.ClientId,
             trustedCaPemBase64,
             secret = client.Secret,
+            maxConnections = client.MaxConnections,
+            maxPendingConnections = client.MaxPendingConnections,
             reconnect = new { initialDelaySeconds = 1, maxDelaySeconds = 30, permanentErrorDelaySeconds = 60 }
         };
         var agent = new
@@ -30,7 +32,7 @@ public static class AgentConfigurationFactory
             dashboardPort = 18081,
             outboundPortRangeStart = 20000,
             outboundPortRangeEnd = 59999,
-            maxConnections = 2000,
+            maxConnections = Math.Max(2000, client.MaxConnections),
             servers = new[] { profile }
         };
         return JsonSerializer.SerializeToUtf8Bytes(agent, JsonOptions);

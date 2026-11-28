@@ -5,6 +5,8 @@
 版本：v1.1.0\
 更新日期：2026-09-19
 
+> **里程碑口径说明**：本目录材料成稿于早期 TCP/UDP 阶段，未包含随后合入的 HTTP/HTTPS 反向代理（v5）、AI 自动化管理面（CLI/Skill）与六语言入口 SDK；当前产品全貌与各端约束以仓库首页 [README](../../README.md) 与对应设计文档为准。
+
 这个目录管理 RelayLink 的**对外介绍材料**：一份 22 页演示文稿、一篇公众号文章，以及生成它们的源文件与脚本。
 
 材料原先放在 `artifacts/relaylink-intro/`（该目录被根 `.gitignore` 忽略），2026-09-19 迁入 `docs/intro/` 纳入版本管理，并按 [文档管理规则](../development/documentation-policy.md) 统一文件和目录命名。旧目录已删除，不要再去那里修改。

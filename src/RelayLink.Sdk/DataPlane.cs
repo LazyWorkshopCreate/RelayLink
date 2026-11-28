@@ -1,4 +1,5 @@
 using System;
+using System.Net;
 using System.Net.Sockets;
 using System.Threading;
 using System.Threading.Tasks;
@@ -35,16 +36,27 @@ namespace RelayLink.Sdk
         {
             if (string.IsNullOrWhiteSpace(host)) throw new RelayLinkException(RelayLinkErrorCodes.InvalidUsage, "host 不能为空。");
             if (port is < 1 or > 65535) throw new RelayLinkException(RelayLinkErrorCodes.InvalidUsage, "port 必须在 1–65535。");
-            Host = host;
+            var normalizedTransport = string.IsNullOrEmpty(transport) ? "tcp" : transport;
+            if (!string.Equals(normalizedTransport, "tcp", StringComparison.Ordinal) &&
+                !string.Equals(normalizedTransport, "udp", StringComparison.Ordinal))
+                throw new RelayLinkException(RelayLinkErrorCodes.InvalidUsage, "transport 必须为 tcp 或 udp。");
+
+            var cleanHost = host.Trim();
+            if (cleanHost.StartsWith("[", StringComparison.Ordinal) && cleanHost.EndsWith("]", StringComparison.Ordinal) && cleanHost.Length > 2)
+                cleanHost = cleanHost.Substring(1, cleanHost.Length - 2);
+            Host = cleanHost;
             Port = port;
-            Transport = transport;
+            Transport = normalizedTransport;
         }
 
         public string Host { get; }
         public int Port { get; }
         public string Transport { get; }
 
-        public string ToEndpointString() => Host + ":" + Port.ToString();
+        public string ToEndpointString() =>
+            Host.IndexOf(':') >= 0
+                ? "[" + Host + "]:" + Port.ToString()
+                : Host + ":" + Port.ToString();
     }
 
     /// <summary>
@@ -55,8 +67,13 @@ namespace RelayLink.Sdk
     {
         public static async Task<TcpClient> ConnectAsync(EntryDescriptor entry, TimeSpan? connectTimeout = null, CancellationToken cancellationToken = default)
         {
+            if (entry is null)
+                throw new RelayLinkException(RelayLinkErrorCodes.InvalidUsage, "entry 不能为空。");
             if (entry.Transport != "tcp")
                 throw new RelayLinkException(RelayLinkErrorCodes.InvalidUsage, "该入口不是 TCP。");
+            if (connectTimeout is { } requestedTimeout && requestedTimeout <= TimeSpan.Zero)
+                throw new RelayLinkException(RelayLinkErrorCodes.InvalidUsage, "connectTimeout 必须大于 0。");
+            cancellationToken.ThrowIfCancellationRequested();
 
             var client = new TcpClient();
             try
@@ -64,12 +81,40 @@ namespace RelayLink.Sdk
                 using (var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
                 {
                     timeout.CancelAfter(connectTimeout ?? TimeSpan.FromSeconds(20));
-                    await client.ConnectAsync(entry.Host, entry.Port).ConfigureAwait(false);
+#if NET8_0_OR_GREATER
+                    await client.ConnectAsync(entry.Host, entry.Port, timeout.Token).ConfigureAwait(false);
+#else
+                    using (timeout.Token.Register(static state => ((TcpClient)state!).Dispose(), client))
+                    {
+                        try
+                        {
+                            await client.ConnectAsync(entry.Host, entry.Port).ConfigureAwait(false);
+                        }
+                        catch (ObjectDisposedException exception) when (timeout.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+                        {
+                            throw new RelayLinkException(RelayLinkErrorCodes.Timeout, "连接入口超时。", exception);
+                        }
+                        catch (SocketException exception) when (timeout.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+                        {
+                            throw new RelayLinkException(RelayLinkErrorCodes.Timeout, "连接入口超时。", exception);
+                        }
+                    }
+#endif
                 }
 
                 return client;
             }
-            catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested)
+            catch (RelayLinkException)
+            {
+                client.Dispose();
+                throw;
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                client.Dispose();
+                throw;
+            }
+            catch (OperationCanceledException exception)
             {
                 client.Dispose();
                 throw new RelayLinkException(RelayLinkErrorCodes.Timeout, "连接入口超时。", exception);
@@ -107,14 +152,41 @@ namespace RelayLink.Sdk
     {
         public static async Task<UdpClient> BindAsync(EntryDescriptor entry, CancellationToken cancellationToken = default)
         {
+            if (entry is null)
+                throw new RelayLinkException(RelayLinkErrorCodes.InvalidUsage, "entry 不能为空。");
             if (entry.Transport != "udp")
                 throw new RelayLinkException(RelayLinkErrorCodes.InvalidUsage, "该入口不是 UDP。");
+            cancellationToken.ThrowIfCancellationRequested();
 
-            var client = new UdpClient();
+            AddressFamily family;
+            if (IPAddress.TryParse(entry.Host, out var ip))
+            {
+                family = ip.AddressFamily;
+            }
+            else
+            {
+                try
+                {
+#if NET8_0_OR_GREATER
+                    var addresses = await Dns.GetHostAddressesAsync(entry.Host, cancellationToken).ConfigureAwait(false);
+#else
+                    var addresses = await Dns.GetHostAddressesAsync(entry.Host).ConfigureAwait(false);
+                    cancellationToken.ThrowIfCancellationRequested();
+#endif
+                    if (addresses.Length == 0)
+                        throw new RelayLinkException(RelayLinkErrorCodes.EntryNotFound, "无法解析 UDP 入口。");
+                    family = addresses[0].AddressFamily;
+                }
+                catch (SocketException exception)
+                {
+                    throw new RelayLinkException(RelayLinkErrorCodes.EntryNotFound, "无法解析 UDP 入口：" + exception.Message, exception);
+                }
+            }
+
+            var client = new UdpClient(family);
             try
             {
                 client.Connect(entry.Host, entry.Port);
-                await Task.CompletedTask;
                 return client;
             }
             catch (SocketException exception)
@@ -126,9 +198,23 @@ namespace RelayLink.Sdk
 
         public static async Task SendAsync(UdpClient client, byte[] datagram, CancellationToken cancellationToken = default)
         {
+            if (datagram is null)
+                throw new RelayLinkException(RelayLinkErrorCodes.InvalidUsage, "报文不能为空。");
             if (datagram.Length > 65507)
                 throw new RelayLinkException(RelayLinkErrorCodes.InvalidUsage, "报文超过 UDP 上限，SDK 不静默截断。");
-            await client.SendAsync(datagram, datagram.Length).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+#if NET8_0_OR_GREATER
+                await client.SendAsync(datagram.AsMemory(), cancellationToken).ConfigureAwait(false);
+#else
+                await client.SendAsync(datagram, datagram.Length).ConfigureAwait(false);
+#endif
+            }
+            catch (SocketException exception)
+            {
+                throw new RelayLinkException(RelayLinkErrorCodes.TargetConnectFailed, "发送 UDP 报文失败：" + exception.Message, exception);
+            }
         }
     }
 }

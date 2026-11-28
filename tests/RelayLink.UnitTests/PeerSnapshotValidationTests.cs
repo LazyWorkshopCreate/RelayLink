@@ -45,6 +45,22 @@ public sealed class PeerSnapshotValidationTests
             [
                 Mapping("map-c", "127.0.0.1", secret) with { ApplicationProtocol = "http", TransportProtocol = "udp" }
             ]), StringComparison.Ordinal);
+            Assert.NotNull(PeerSessionCoordinator.InvalidOutboundMappingReason(
+            [
+                Mapping("map-d", "127.0.0.1", secret) with { ApplicationProtocol = "http", Http = new HttpPeerOptions("ftp", "localhost", new string('a', 64)) }
+            ]));
+            Assert.NotNull(PeerSessionCoordinator.InvalidOutboundMappingReason(
+            [
+                Mapping("map-e", "127.0.0.1", secret) with { ApplicationProtocol = "http", Http = new HttpPeerOptions("http", "localhost\r\n", new string('a', 64)) }
+            ]));
+            Assert.NotNull(PeerSessionCoordinator.InvalidOutboundMappingReason(
+            [
+                Mapping("map-f", "127.0.0.1", secret) with { ApplicationProtocol = "http", Http = new HttpPeerOptions("http", "localhost:8080", new string('a', 64)) }
+            ]));
+            Assert.NotNull(PeerSessionCoordinator.InvalidOutboundMappingReason(
+            [
+                Mapping("map-g", "127.0.0.1", secret) with { ApplicationProtocol = "http", Http = new HttpPeerOptions("http", "localhost", "bad-hash") }
+            ]));
         }
         finally
         {

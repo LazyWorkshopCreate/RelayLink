@@ -128,8 +128,9 @@ public sealed class ChannelConfigurationEditor(
                     !pair.First.Tags.SequenceEqual(pair.Second.Tags, StringComparer.Ordinal));
             var failures = new List<string>();
             var attempted = false;
-            var primaryOnline = sessions.TryGet(clientId, out var session) && session is not null;
-            if (!onlyTagsChanged && primaryOnline)
+            var hasSession = sessions.TryGet(clientId, out var session);
+            var primaryOnline = hasSession && session is { IsReady: true };
+            if (!onlyTagsChanged && hasSession && session is { HasCompletedHandshake: true })
             {
                 var (snapshot, version) = ConfigurationSnapshotFactory.Create(updatedClient, updatedConfiguration, session!.ProtocolVersion);
                 attempted = true;
@@ -139,7 +140,7 @@ public sealed class ChannelConfigurationEditor(
             foreach (var dependent in updatedConfiguration.Clients.Values.Where(c => c.ClientId != clientId &&
                 c.OutboundMappings.Any(m => m.TargetClientId == clientId)))
             {
-                if (!sessions.TryGet(dependent.ClientId, out var dependentSession) || dependentSession is null) continue;
+                if (!sessions.TryGet(dependent.ClientId, out var dependentSession) || dependentSession is not { IsReady: true }) continue;
                 var before = ConfigurationSnapshotFactory.Create(dependent, current, dependentSession.ProtocolVersion);
                 var after = ConfigurationSnapshotFactory.Create(dependent, updatedConfiguration, dependentSession.ProtocolVersion);
                 if (before.Version == after.Version) continue;

@@ -14,6 +14,7 @@ public sealed class AutomationChangeService(
     ChannelConfigurationEditor channelEditor,
     ClientConfigurationEditor clientEditor,
     ServerRuntime runtime,
+    ConfigurationWriteLock writeLock,
     AuditService audit,
     ILogger<AutomationChangeService> logger)
 {
@@ -26,7 +27,8 @@ public sealed class AutomationChangeService(
     public sealed record Execution(bool Ok, string? ErrorCode, string? Message, ChangeState State);
 
     public async Task<Submission> SubmitAsync(string type, JsonElement target, JsonElement payload, string? reason,
-        string requestedBy, string idempotencyKey, CancellationToken cancellationToken)
+        string requestedBy, string idempotencyKey, CancellationToken cancellationToken,
+        string? deviceThumbprint = null, Guid? grantId = null)
     {
         if (!SupportedTypes.Contains(type, StringComparer.Ordinal))
             return new Submission(false, AutomationErrors.ValidationFailed, $"不支持的变更类型：{type}。", null);
@@ -37,42 +39,45 @@ public sealed class AutomationChangeService(
         if (targetKey is null)
             return new Submission(false, AutomationErrors.ValidationFailed, "target 字段不完整。", null);
 
-        // credential.delete 在提交即拒：执行器无法代做凭据删除（凭据写入与删除始终
-        // 由管理员在管理页面完成），放它进审批流只会产生一条必然失败的申请。
         if (type == "credential.delete")
             return new Submission(false, AutomationErrors.RequiresChangeRequest,
                 "凭据删除请在管理页面执行；自动化接口不接受凭据变更申请。", null);
 
-        // 自动化接入通道与访问映射不可经自动化删除或改加密开关：会让 CLI 当场断开。
-        // 与 B 类 PATCH 的 IsAutomationChannel 保护对齐（复核发现 C 类路径漏了这条）。
+        var validation = ValidatePayload(type, target, payload);
+        if (validation is not null)
+            return new Submission(false, AutomationErrors.ValidationFailed, validation, null);
+
         var selfProtected = SelfProtectionConflict(type, targetKey);
         if (selfProtected is not null)
             return new Submission(false, AutomationErrors.Conflict, selfProtected, null);
 
-        // 同键重放返回同一申请。
-        var existing = await store.FindChangeByIdempotencyAsync(idempotencyKey, cancellationToken);
-        if (existing is not null)
+        var canonicalPayload = JsonSerializer.Serialize(payload, AutomationJson.Options);
+        var now = DateTimeOffset.UtcNow;
+        var request = new ChangeRequest(Guid.NewGuid(), type, targetKey, canonicalPayload, reason, requestedBy,
+            ChangeState.Pending, now, now.AddHours(ExpiryHours), null, null, null, idempotencyKey)
         {
-            if (existing.Type != type || existing.TargetKey != targetKey)
-                return new Submission(false, AutomationErrors.Conflict, "该 Idempotency-Key 已用于不同的变更。", existing);
-            return new Submission(true, null, null, existing);
+            DeviceThumbprint = deviceThumbprint
+        };
+
+        var (created, existingIdempotent, existingOpen) = await store.TrySubmitChangeAsync(request, cancellationToken);
+        if (!created)
+        {
+            if (existingIdempotent is not null)
+            {
+                if (existingIdempotent.Type != type ||
+                    existingIdempotent.TargetKey != targetKey ||
+                    !string.Equals(NormalizeJson(existingIdempotent.PayloadJson), canonicalPayload, StringComparison.Ordinal) ||
+                    !string.Equals(existingIdempotent.DeviceThumbprint, deviceThumbprint, StringComparison.Ordinal) ||
+                    !string.Equals(existingIdempotent.RequestedBy, requestedBy, StringComparison.Ordinal))
+                    return new Submission(false, AutomationErrors.Conflict, "该 Idempotency-Key 已用于不同的变更或主体。", existingIdempotent);
+                return new Submission(true, null, null, existingIdempotent);
+            }
+            if (existingOpen is not null)
+                return new Submission(false, AutomationErrors.Conflict,
+                    $"该目标已有未完成的申请（{existingOpen.ChangeRequestId}），请先处理。", existingOpen);
         }
 
-        // 同一 (type,target) 已有未终态申请时拒绝，避免多条申请以不确定顺序执行。
-        var open = await store.FindOpenChangeAsync(type, targetKey, cancellationToken);
-        if (open is not null)
-            return new Submission(false, AutomationErrors.Conflict,
-                $"该目标已有未完成的申请（{open.ChangeRequestId}），请先处理。", open);
-
-        var validation = ValidatePayload(type, payload);
-        if (validation is not null)
-            return new Submission(false, AutomationErrors.ValidationFailed, validation, null);
-
-        var now = DateTimeOffset.UtcNow;
-        var request = new ChangeRequest(Guid.NewGuid(), type, targetKey, payload.GetRawText(), reason, requestedBy,
-            ChangeState.Pending, now, now.AddHours(ExpiryHours), null, null, null, idempotencyKey);
-        await store.CreateChangeAsync(request, cancellationToken);
-        await TryAuditAsync("automation_change_requested", "accepted", request.ChangeRequestId, requestedBy, cancellationToken);
+        await TryAuditAsync("automation_change_requested", "accepted", request.ChangeRequestId, requestedBy, cancellationToken, grantId, deviceThumbprint);
         return new Submission(true, null, null, request);
     }
 
@@ -91,7 +96,7 @@ public sealed class AutomationChangeService(
 
         var isAutomationChannel = (ChannelConfiguration channel) =>
             channel.TargetPort == automation.Port &&
-            channel.TargetHost is "127.0.0.1" or "::1" or "localhost";
+            ConfigurationLoader.IsLoopbackOrUnspecifiedHost(channel.TargetHost);
 
         switch (type)
         {
@@ -121,7 +126,7 @@ public sealed class AutomationChangeService(
     /// 提交时的校验：复用既有编辑器的校验语义，但不落盘。
     /// 真正的写入只在管理员批准后的执行阶段发生。
     /// </summary>
-    private static string? ValidatePayload(string type, JsonElement payload)
+    private static string? ValidatePayload(string type, JsonElement target, JsonElement payload)
     {
         if (payload.ValueKind != JsonValueKind.Object) return "payload 必须是 JSON 对象。";
         foreach (var property in payload.EnumerateObject())
@@ -133,39 +138,78 @@ public sealed class AutomationChangeService(
                 return $"payload 不接受秘密字段：{property.Name}。";
         }
 
-        return type switch
+        var targetClientId = GetString(target, "clientId");
+        var targetChannelId = GetString(target, "channelId");
+        var targetMappingId = GetString(target, "mappingId");
+
+        switch (type)
         {
-            "client.create" when !payload.TryGetProperty("clientId", out _) => "client.create 需要 clientId。",
-            "client.delete" when !payload.TryGetProperty("clientId", out _) => "client.delete 需要 clientId。",
-            "channel.create" when !payload.TryGetProperty("channelId", out _) => "channel.create 需要 channelId。",
-            "channel.delete" when !payload.TryGetProperty("channelId", out _) => "channel.delete 需要 channelId。",
-            "mapping.create" when !payload.TryGetProperty("targetClientId", out _) || !payload.TryGetProperty("targetChannelId", out _) =>
-                "mapping.create 需要 targetClientId 与 targetChannelId。",
-            "channel.security" when !payload.TryGetProperty("endToEndEncryptionEnabled", out _) =>
-                "channel.security 首期只支持 endToEndEncryptionEnabled（审计模式变更需删除后重建）。",
-            _ => null
-        };
+            case "client.create" or "client.delete":
+            {
+                var payloadClientId = GetString(payload, "clientId");
+                if (string.IsNullOrWhiteSpace(payloadClientId))
+                    return $"{type} 需要 clientId。";
+                if (!string.Equals(payloadClientId, targetClientId, StringComparison.Ordinal))
+                    return "payload.clientId 必须与 target.clientId 一致。";
+                return null;
+            }
+            case "channel.create" or "channel.delete":
+            {
+                var payloadChannelId = GetString(payload, "channelId");
+                if (string.IsNullOrWhiteSpace(payloadChannelId))
+                    return $"{type} 需要 channelId。";
+                if (!string.Equals(payloadChannelId, targetChannelId, StringComparison.Ordinal))
+                    return "payload.channelId 必须与 target.channelId 一致。";
+                var payloadClientId = GetString(payload, "clientId");
+                if (payloadClientId is not null && !string.Equals(payloadClientId, targetClientId, StringComparison.Ordinal))
+                    return "payload.clientId 与 target.clientId 不一致。";
+                return null;
+            }
+            case "channel.security":
+            {
+                var payloadChannelId = GetString(payload, "channelId");
+                if (payloadChannelId is not null && !string.Equals(payloadChannelId, targetChannelId, StringComparison.Ordinal))
+                    return "payload.channelId 与 target.channelId 不一致。";
+                if (GetBool(payload, "endToEndEncryptionEnabled") is null)
+                    return "channel.security 只支持布尔字段 endToEndEncryptionEnabled。";
+                return null;
+            }
+            case "mapping.create":
+            {
+                var remoteClient = GetString(payload, "targetClientId");
+                var remoteChannel = GetString(payload, "targetChannelId");
+                if (string.IsNullOrWhiteSpace(remoteClient) || string.IsNullOrWhiteSpace(remoteChannel))
+                    return "mapping.create 需要非空字符串 targetClientId 与 targetChannelId。";
+                if (!string.Equals(targetMappingId, $"{remoteClient}-{remoteChannel}", StringComparison.Ordinal))
+                    return "target.mappingId 必须等于 <targetClientId>-<targetChannelId>。";
+                return null;
+            }
+            default:
+                return null;
+        }
     }
 
     private static string? BuildTargetKey(string type, JsonElement target)
     {
         if (target.ValueKind != JsonValueKind.Object) return null;
-        var clientId = target.TryGetProperty("clientId", out var client) ? client.GetString() : null;
-        var channelId = target.TryGetProperty("channelId", out var channel) ? channel.GetString() : null;
-        var mappingId = target.TryGetProperty("mappingId", out var mapping) ? mapping.GetString() : null;
+        var clientId = GetString(target, "clientId");
+        var channelId = GetString(target, "channelId");
+        var mappingId = GetString(target, "mappingId");
         return type switch
         {
-            "client.create" or "client.delete" => clientId,
-            "channel.create" or "channel.delete" or "channel.security" => clientId is null || channelId is null ? null : $"{clientId}/{channelId}",
-            "mapping.create" => clientId is null || mappingId is null ? null : $"{clientId}/{mappingId}",
-            // credential.delete 已从 SupportedTypes 移除；此分支仅为比对历史申请（idempotency 重放）保留，不代表该类型仍受支持。
-            "credential.delete" => clientId is null || channelId is null ? null : $"{clientId}/{channelId}",
+            "client.create" or "client.delete" => string.IsNullOrWhiteSpace(clientId) ? null : clientId,
+            "channel.create" or "channel.delete" or "channel.security" =>
+                string.IsNullOrWhiteSpace(clientId) || string.IsNullOrWhiteSpace(channelId) ? null : $"{clientId}/{channelId}",
+            "mapping.create" =>
+                string.IsNullOrWhiteSpace(clientId) || string.IsNullOrWhiteSpace(mappingId) ? null : $"{clientId}/{mappingId}",
+            "credential.delete" =>
+                string.IsNullOrWhiteSpace(clientId) || string.IsNullOrWhiteSpace(channelId) ? null : $"{clientId}/{channelId}",
             _ => null
         };
     }
 
-    public async Task<IReadOnlyList<ChangeRequest>> ListAsync(ChangeState? state, CancellationToken cancellationToken) =>
-        await store.ListChangesAsync(state, 200, cancellationToken);
+    public async Task<IReadOnlyList<ChangeRequest>> ListAsync(ChangeState? state, CancellationToken cancellationToken, string? deviceThumbprint = null) =>
+        await store.ListChangesAsync(state, 200, cancellationToken, deviceThumbprint);
 
     public async Task<ChangeRequest?> GetAsync(Guid changeRequestId, CancellationToken cancellationToken) =>
         await store.GetChangeAsync(changeRequestId, cancellationToken);
@@ -175,27 +219,42 @@ public sealed class AutomationChangeService(
     /// </summary>
     public async Task<Execution> ApproveAsync(Guid changeRequestId, string admin, CancellationToken cancellationToken)
     {
+        var existing = await store.GetChangeAsync(changeRequestId, cancellationToken);
+        if (existing is null) return new Execution(false, AutomationErrors.NotFound, "申请不存在。", ChangeState.Pending);
+        if (existing.State == ChangeState.Expired || existing.ExpiresAtUtc <= DateTimeOffset.UtcNow)
+            return new Execution(false, AutomationErrors.Conflict, "该申请已超过 24 小时有效期，已自动过期。", ChangeState.Expired);
         var changed = await store.TransitionChangeAsync(changeRequestId, ChangeState.Approved, [ChangeState.Pending], admin, null,
             DateTimeOffset.UtcNow, cancellationToken);
-        if (!changed) return new Execution(false, AutomationErrors.Conflict, "该申请不在待批准状态。", ChangeState.Pending);
-        await TryAuditAsync("automation_change_approved", "accepted", changeRequestId, admin, cancellationToken);
+        if (!changed) return new Execution(false, AutomationErrors.Conflict, "该申请不在待批准状态。", existing.State);
+        await TryAuditAsync("automation_change_approved", "accepted", changeRequestId, admin, cancellationToken, deviceThumbprint: existing.DeviceThumbprint);
         return new Execution(true, null, null, ChangeState.Approved);
     }
 
     public async Task<Execution> RejectAsync(Guid changeRequestId, string admin, string? reason, CancellationToken cancellationToken)
     {
+        var existing = await store.GetChangeAsync(changeRequestId, cancellationToken);
+        if (existing is null) return new Execution(false, AutomationErrors.NotFound, "申请不存在。", ChangeState.Pending);
         var changed = await store.TransitionChangeAsync(changeRequestId, ChangeState.Rejected,
-            [ChangeState.Pending, ChangeState.Approved], admin, reason, DateTimeOffset.UtcNow, cancellationToken);
-        if (!changed) return new Execution(false, AutomationErrors.Conflict, "该申请已终结。", ChangeState.Rejected);
-        await TryAuditAsync("automation_change_rejected", "denied", changeRequestId, admin, cancellationToken);
+            [ChangeState.Pending, ChangeState.Approved], admin, reason, DateTimeOffset.UtcNow, cancellationToken, requireUnexpired: false);
+        if (!changed) return new Execution(false, AutomationErrors.Conflict, "该申请已终结。", existing.State);
+        await TryAuditAsync("automation_change_rejected", "denied", changeRequestId, admin, cancellationToken, deviceThumbprint: existing.DeviceThumbprint);
         return new Execution(true, null, null, ChangeState.Rejected);
     }
 
-    public async Task<Execution> CancelAsync(Guid changeRequestId, string actor, CancellationToken cancellationToken)
+    public async Task<Execution> CancelAsync(Guid changeRequestId, string actor, CancellationToken cancellationToken,
+        string? requiredDeviceThumbprint = null, Guid? grantId = null)
     {
+        var existing = await store.GetChangeAsync(changeRequestId, cancellationToken);
+        if (existing is null || (requiredDeviceThumbprint is not null && !string.Equals(existing.DeviceThumbprint, requiredDeviceThumbprint, StringComparison.Ordinal)))
+            return new Execution(false, AutomationErrors.NotFound, "申请不存在。", ChangeState.Cancelled);
+        if (existing.State == ChangeState.Expired || existing.ExpiresAtUtc <= DateTimeOffset.UtcNow)
+            return new Execution(false, AutomationErrors.Conflict, "该申请已过期。", ChangeState.Expired);
+
         var changed = await store.TransitionChangeAsync(changeRequestId, ChangeState.Cancelled,
-            [ChangeState.Pending], actor, "cancelled by requester", DateTimeOffset.UtcNow, cancellationToken);
-        if (!changed) return new Execution(false, AutomationErrors.Conflict, "只有待批准的申请可以撤销。", ChangeState.Cancelled);
+            [ChangeState.Pending], actor, "cancelled by requester", DateTimeOffset.UtcNow, cancellationToken,
+            requireUnexpired: true, requiredDeviceThumbprint: requiredDeviceThumbprint);
+        if (!changed) return new Execution(false, AutomationErrors.Conflict, "只有待批准的申请可以撤销。", existing.State);
+        await TryAuditAsync("automation_change_cancelled", "accepted", changeRequestId, actor, cancellationToken, grantId, existing.DeviceThumbprint);
         return new Execution(true, null, null, ChangeState.Cancelled);
     }
 
@@ -207,29 +266,31 @@ public sealed class AutomationChangeService(
     {
         var request = await store.GetChangeAsync(changeRequestId, cancellationToken);
         if (request is null) return new Execution(false, AutomationErrors.NotFound, "申请不存在。", ChangeState.Pending);
+        if (request.State == ChangeState.Expired || request.ExpiresAtUtc <= DateTimeOffset.UtcNow)
+            return new Execution(false, AutomationErrors.Conflict, "该申请已超过 24 小时有效期，已自动过期。", ChangeState.Expired);
         if (request.State is not ChangeState.Approved)
             return new Execution(false, AutomationErrors.ChangeRequestNotApproved, "只有已批准的申请可以执行。", request.State);
 
         if (!await store.TransitionChangeAsync(changeRequestId, ChangeState.Applying, [ChangeState.Approved], admin, null,
                 DateTimeOffset.UtcNow, cancellationToken))
-            return new Execution(false, AutomationErrors.Conflict, "该申请状态已变化。", request.State);
+            return new Execution(false, AutomationErrors.Conflict, "该申请状态已变化或已过期。", request.State);
 
-        await TryAuditAsync("automation_change_applying", "accepted", changeRequestId, admin, cancellationToken);
+        await TryAuditAsync("automation_change_applying", "accepted", changeRequestId, admin, cancellationToken, deviceThumbprint: request.DeviceThumbprint);
 
         try
         {
             await ApplyAsync(request, cancellationToken);
             await store.TransitionChangeAsync(changeRequestId, ChangeState.Applied, [ChangeState.Applying], admin, null,
-                DateTimeOffset.UtcNow, cancellationToken);
-            await TryAuditAsync("automation_change_applied", "accepted", changeRequestId, admin, cancellationToken);
+                DateTimeOffset.UtcNow, cancellationToken, requireUnexpired: false);
+            await TryAuditAsync("automation_change_applied", "accepted", changeRequestId, admin, cancellationToken, deviceThumbprint: request.DeviceThumbprint);
             return new Execution(true, null, null, ChangeState.Applied);
         }
-        catch (Exception exception) when (exception is ChannelUpdateException or ConfigurationException or InvalidOperationException)
+        catch (Exception exception) when (exception is ChannelUpdateException or ClientUpdateException or ConfigurationException or InvalidOperationException or IOException or UnauthorizedAccessException)
         {
             logger.LogError(exception, "Automation change {ChangeRequestId} of type {Type} failed.", changeRequestId, request.Type);
             await store.TransitionChangeAsync(changeRequestId, ChangeState.Approved, [ChangeState.Applying], admin, exception.Message,
-                DateTimeOffset.UtcNow, cancellationToken);
-            await TryAuditAsync("automation_change_failed", "failed", changeRequestId, admin, cancellationToken);
+                DateTimeOffset.UtcNow, cancellationToken, requireUnexpired: false);
+            await TryAuditAsync("automation_change_failed", "failed", changeRequestId, admin, cancellationToken, deviceThumbprint: request.DeviceThumbprint);
             return new Execution(false, AutomationErrors.ValidationFailed, exception.Message, ChangeState.Approved);
         }
     }
@@ -247,7 +308,8 @@ public sealed class AutomationChangeService(
             case "client.create":
                 await clientEditor.CreateAsync(new ClientCreateRequest(
                     clientId, GetString(root, "displayName") ?? clientId, true,
-                    GetInt(root, "maxConnections") ?? 100, GetInt(root, "maxPendingConnections") ?? 20, GetString(root, "agentServerHost") ?? string.Empty)
+                    GetInt(root, "maxConnections") ?? 100, GetInt(root, "maxPendingConnections") ?? 20,
+                    GetString(root, "agentServerHost") ?? runtime.Configuration.Server.Tunnel.DefaultAgentServerHost)
                 {
                     Tags = GetStringArray(root, "tags") ?? []
                 }, cancellationToken);
@@ -278,8 +340,6 @@ public sealed class AutomationChangeService(
                     GetString(root, "targetClientId")!, GetString(root, "targetChannelId")!), cancellationToken);
                 break;
             case "channel.security":
-                // 首期只覆盖端到端加密开关。
-                // 既有编辑器要求整包字段，因此先用当前通道值填充，只改动加密开关。
                 var existing = runtime.Configuration.Clients.TryGetValue(clientId, out var owner)
                     ? owner.Channels.SingleOrDefault(channel => channel.ChannelId == channelId)
                     : null;
@@ -288,7 +348,13 @@ public sealed class AutomationChangeService(
                     existing.DisplayName, existing.Enabled, existing.ListenAddress, existing.ListenPort,
                     existing.TargetHost, existing.TargetPort, existing.MaxConnections, existing.TargetConnectTimeoutSeconds)
                 {
-                    EndToEndEncryptionEnabled = GetBool(root, "endToEndEncryptionEnabled")
+                    TransportProtocol = existing.TransportProtocol,
+                    UdpIdleTimeoutSeconds = existing.UdpIdleTimeoutSeconds,
+                    AuthorizedClientsOnly = existing.AuthorizedClientsOnly,
+                    EndToEndEncryptionEnabled = GetBool(root, "endToEndEncryptionEnabled"),
+                    AccessSecret = existing.AccessSecret,
+                    SecurityGroupId = existing.SecurityGroupId,
+                    Tags = existing.Tags
                 }, cancellationToken);
                 break;
             case "credential.delete":
@@ -305,22 +371,30 @@ public sealed class AutomationChangeService(
     /// </summary>
     public async Task ReconcileAsync(CancellationToken cancellationToken)
     {
-        var applying = await store.ListApplyingChangesAsync(cancellationToken);
-        foreach (var request in applying)
+        await writeLock.Gate.WaitAsync(cancellationToken);
+        try
         {
-            var reached = ReachableState(request);
-            if (reached)
+            var applying = await store.ListApplyingChangesAsync(cancellationToken);
+            foreach (var request in applying)
             {
-                await store.TransitionChangeAsync(request.ChangeRequestId, ChangeState.Applied, [ChangeState.Applying], "reconciler", null,
-                    DateTimeOffset.UtcNow, cancellationToken);
-                logger.LogWarning("Automation change {ChangeRequestId} was reconciled to applied after a restart.", request.ChangeRequestId);
+                var reached = ReachableState(request);
+                if (reached)
+                {
+                    await store.TransitionChangeAsync(request.ChangeRequestId, ChangeState.Applied, [ChangeState.Applying], "reconciler", null,
+                        DateTimeOffset.UtcNow, cancellationToken, requireUnexpired: false);
+                    logger.LogWarning("Automation change {ChangeRequestId} was reconciled to applied after a restart.", request.ChangeRequestId);
+                }
+                else
+                {
+                    await store.TransitionChangeAsync(request.ChangeRequestId, ChangeState.Approved, [ChangeState.Applying], "reconciler",
+                        "执行在配置写入前中断，已回退为已批准，可重试。", DateTimeOffset.UtcNow, cancellationToken, requireUnexpired: false);
+                    logger.LogWarning("Automation change {ChangeRequestId} was rolled back to approved after a restart.", request.ChangeRequestId);
+                }
             }
-            else
-            {
-                await store.TransitionChangeAsync(request.ChangeRequestId, ChangeState.Approved, [ChangeState.Applying], "reconciler",
-                    "执行在配置写入前中断，已回退为已批准，可重试。", DateTimeOffset.UtcNow, cancellationToken);
-                logger.LogWarning("Automation change {ChangeRequestId} was rolled back to approved after a restart.", request.ChangeRequestId);
-            }
+        }
+        finally
+        {
+            writeLock.Gate.Release();
         }
     }
 
@@ -336,10 +410,12 @@ public sealed class AutomationChangeService(
                 return request.Type == "client.create" ? clients.ContainsKey(clientId) : !clients.ContainsKey(clientId);
 
             case "channel.create" or "channel.delete":
-                return clients.TryGetValue(clientId, out var owner) && channelId is not null &&
-                       (request.Type == "channel.delete"
-                           ? owner.Channels.All(channel => channel.ChannelId != channelId)
-                           : owner.Channels.Any(channel => channel.ChannelId == channelId));
+                if (channelId is null) return false;
+                if (!clients.TryGetValue(clientId, out var owner))
+                    return request.Type == "channel.delete";
+                return request.Type == "channel.delete"
+                    ? owner.Channels.All(channel => channel.ChannelId != channelId)
+                    : owner.Channels.Any(channel => channel.ChannelId == channelId);
 
             case "channel.security":
             {
@@ -377,19 +453,35 @@ public sealed class AutomationChangeService(
         }
     }
 
-    private async Task TryAuditAsync(string eventType, string outcome, Guid changeRequestId, string? actor, CancellationToken cancellationToken)
+    private async Task TryAuditAsync(string eventType, string outcome, Guid changeRequestId, string? actor, CancellationToken cancellationToken,
+        Guid? grantId = null, string? deviceThumbprint = null)
     {
         try
         {
             await audit.RecordAsync(new AuditEvent(eventType, outcome)
             {
                 Actor = actor ?? "automation",
-                ReasonCode = changeRequestId.ToString()
+                ReasonCode = changeRequestId.ToString(),
+                AutomationGrantId = grantId,
+                DeviceKeyThumbprint = deviceThumbprint
             }, cancellationToken);
         }
         catch (AuditUnavailableException)
         {
             logger.LogError("Audit unavailable for automation change {EventType} {ChangeRequestId}.", eventType, changeRequestId);
+        }
+    }
+
+    private static string NormalizeJson(string rawJson)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(rawJson);
+            return JsonSerializer.Serialize(doc.RootElement, AutomationJson.Options);
+        }
+        catch (JsonException)
+        {
+            return rawJson;
         }
     }
 

@@ -6,6 +6,7 @@
 // 前置要求：宿主机必须存在 Node.js 运行时。
 
 import { spawn } from "node:child_process";
+import path from "node:path";
 
 const argv = process.argv.slice(2);
 
@@ -17,10 +18,42 @@ if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h") {
   process.exit(0);
 }
 
-const child = spawn(process.env.RELAYLINK_BIN || "relaylink", argv, {
+const explicitBin = process.env.RELAYLINK_BIN;
+if (explicitBin && !path.isAbsolute(explicitBin)) {
+  process.stderr.write("RELAYLINK_BIN 必须是绝对路径。\n");
+  process.exit(8);
+}
+
+const ALLOWED_ENV = [
+  "PATH",
+  "HOME",
+  "USERPROFILE",
+  "APPDATA",
+  "LOCALAPPDATA",
+  "XDG_CONFIG_HOME",
+  "XDG_DATA_HOME",
+  "SYSTEMROOT",
+  "COMSPEC",
+  "TEMP",
+  "TMP",
+  "TMPDIR",
+  "LANG",
+  "LC_ALL",
+  "RELAYLINK_HOME",
+  "DOTNET_ROOT",
+  "PATHEXT"
+];
+
+const cleanEnv = {};
+for (const key of ALLOWED_ENV) {
+  if (typeof process.env[key] === "string") {
+    cleanEnv[key] = process.env[key];
+  }
+}
+
+const child = spawn(explicitBin || "relaylink", argv, {
   stdio: "inherit",
-  // 不注入额外环境变量，避免把宿主秘密透传给 CLI。
-  env: process.env
+  env: cleanEnv
 });
 
 child.on("error", (error) => {

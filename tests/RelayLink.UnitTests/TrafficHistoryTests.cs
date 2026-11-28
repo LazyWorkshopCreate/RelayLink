@@ -122,6 +122,48 @@ public sealed class TrafficHistoryTests
         finally { SqliteConnection.ClearAllPools(); }
     }
 
+    [Fact]
+    public async Task Large_sample_interval_validates_and_reads_align_to_query_buckets()
+    {
+        using var directory = new TestDirectory("relaylink-history-bucket-");
+        try
+        {
+            var path = Path.Combine(directory.Path, "traffic.db");
+            var configuration = Configuration(path) with
+            {
+                Server = Configuration(path).Server with
+                {
+                    Tunnel = Configuration(path).Server.Tunnel with { TlsEnabled = false },
+                    History = new HistoryConfiguration(true, path, SampleIntervalSeconds: 60)
+                }
+            };
+            new ConfigurationLoader().ValidateServerUpdate(configuration);
+
+            var metrics = new MetricsRegistry(configuration);
+            using var service = new TrafficHistoryService(new ServerRuntime(configuration, new SessionRegistry()), metrics,
+                NullLogger<TrafficHistoryService>.Instance);
+            await service.RecordAsync(CancellationToken.None);
+
+            // For hours = 200 (> 168), bucketSeconds = 3600. Verify aligned start bucket sums all minutes inside it.
+            var startBucket = (DateTimeOffset.UtcNow.AddHours(-200).ToUnixTimeSeconds() / 3600L) * 3600L;
+            await using var database = new SqliteConnection($"Data Source={path}");
+            await database.OpenAsync();
+            foreach (var offsetMinutes in new[] { 0L, 15L })
+            {
+                await using var insert = database.CreateCommand();
+                insert.CommandText = "INSERT INTO traffic_minute VALUES ($minute, 'agent', 'channel', 50, 75, 0, 0, 1, 1, 0)";
+                insert.Parameters.AddWithValue("$minute", startBucket + offsetMinutes * 60L);
+                await insert.ExecuteNonQueryAsync();
+            }
+
+            var samples = await service.ReadAsync("agent", "channel", 200, CancellationToken.None);
+            var bucket = Assert.Single(samples, item => item.TimestampUtc.ToUnixTimeSeconds() == startBucket);
+            Assert.Equal(100, bucket.BytesToTarget);
+            Assert.Equal(150, bucket.BytesToCaller);
+        }
+        finally { SqliteConnection.ClearAllPools(); }
+    }
+
     private static LoadedConfiguration Configuration(string path)
     {
         var channel = new ChannelConfiguration("channel", "Channel", true, "127.0.0.1", 19000,

@@ -109,6 +109,13 @@ public sealed class CliApp(CliOptions options, TextWriter output, TextWriter err
                 return ExitCodes.NetworkOrPin;
             }
 
+            var pinned = options.Spki ?? profile.SpkiSha256;
+            if (string.IsNullOrWhiteSpace(pinned))
+            {
+                error.WriteLine("profile 未记录服务端证书 SPKI 指纹；请使用 --spki 指定，或重新执行带 --accept-spki 的 pair。");
+                return ExitCodes.NetworkOrPin;
+            }
+
             var (resumeKey, _) = CliStorage.LoadCredential(profile.Name);
             if (resumeKey is null)
             {
@@ -116,12 +123,9 @@ public sealed class CliApp(CliOptions options, TextWriter output, TextWriter err
                 return ExitCodes.Unauthorized;
             }
 
-            using var resumeClient = new ApiClient($"https://{resumeDiscovery.Entry}", profile.SpkiSha256, acceptAny: profile.SpkiSha256 is null)
-            {
-                AutomationInstanceId = profile.AutomationInstanceId
-            };
+            using var resumeClient = CreateClient(resumeDiscovery.Entry, pinned, acceptAny: false, profile.AutomationInstanceId);
             using var resumeDevice = DeviceKey.FromPrivateKey(resumeKey);
-            return await WaitForApprovalAsync(resumeClient, resumeId, options.ResumeUserCode, resumeDevice, profile, profile.AutomationInstanceId, profile.SpkiSha256, configuration, cancellationToken);
+            return await WaitForApprovalAsync(resumeClient, resumeId, options.ResumeUserCode, resumeDevice, profile, profile.AutomationInstanceId, pinned, configuration, cancellationToken);
         }
 
         var discovery = await EntryDiscovery.DiscoverAsync(profile, options, cancellationToken);
@@ -131,15 +135,15 @@ public sealed class CliApp(CliOptions options, TextWriter output, TextWriter err
             return ExitCodes.NetworkOrPin;
         }
 
-        var spki = options.Spki ?? profile.SpkiSha256;
-        using var client = new ApiClient($"https://{discovery.Entry}", spki, acceptAny: spki is null || options.AcceptSpki);
+        var explicitSpki = options.Spki ?? profile.SpkiSha256;
+        using var client = CreateClient(discovery.Entry, explicitSpki, acceptAny: options.AcceptSpki && explicitSpki is null);
 
         // 版本判定：连得上才可能得到 9；连不上只能是 8。
         ApiClient.ApiResult info;
         try { info = await client.GetInfoAsync(cancellationToken); }
         catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException)
         {
-            error.WriteLine($"无法连接到自动化端点 https://{discovery.Entry}。可能原因：服务端未启用 automation、服务端版本较旧无该端口，或该入口不通。");
+            error.WriteLine($"无法连接到自动化端点 https://{discovery.Entry}。可能原因：服务端未启用 automation、服务端版本较旧无该端口、证书未固定（可传 --spki 或首次配对加 --accept-spki），或该入口不通。");
             if (options.Verbose) error.WriteLine(exception.Message);
             return ExitCodes.NetworkOrPin;
         }
@@ -151,7 +155,6 @@ public sealed class CliApp(CliOptions options, TextWriter output, TextWriter err
         }
 
         // 版本协商：连得上但 apiVersions 不含本 CLI 支持的版本 → 退出码 9。
-        // 这是退出码 9 唯一的触发点；连不上永远是 8。
         var apiVersions = info.Data?.TryGetProperty("apiVersions", out var versions) == true
             ? versions.EnumerateArray().Select(item => item.GetInt32()).ToArray()
             : [];
@@ -161,48 +164,82 @@ public sealed class CliApp(CliOptions options, TextWriter output, TextWriter err
             return ExitCodes.VersionIncompatible;
         }
 
-        var instanceId = info.Data?.TryGetProperty("automationInstanceId", out var instance) == true ? instance.GetString() : null;
+        if (options.ApiVersion is { } requestedVersion && apiVersions.Length > 0 && !apiVersions.Contains(requestedVersion))
+        {
+            error.WriteLine($"指定的 API 版本 {requestedVersion} 不受服务端支持（服务端支持 [{string.Join(',', apiVersions)}]）。");
+            return ExitCodes.VersionIncompatible;
+        }
 
-        var device = DeviceKey.Generate();
+        var instanceId = info.Data?.TryGetProperty("automationInstanceId", out var instance) == true ? instance.GetString() : null;
+        var observedSpki = explicitSpki ?? client.ObservedSpkiSha256;
+        if (string.IsNullOrWhiteSpace(observedSpki))
+        {
+            error.WriteLine("未能获取服务端证书 SPKI 指纹；无法完成固定校验。");
+            return ExitCodes.NetworkOrPin;
+        }
+        client.AutomationInstanceId = instanceId;
+
+        using var device = DeviceKey.Generate();
         var scopes = options.Scopes.Count > 0 ? options.Scopes.ToArray() : ["server.read"];
         var subject = options.Subject ?? Environment.MachineName;
 
         var created = await client.CreatePairingAsync(subject, PlatformName(), CliVersion, scopes, device.PublicKeyJwk, cancellationToken);
         if (!created.Ok) return MapError(created);
 
-        // 设备私钥必须在发起配对后立即落盘：二段式配对（CLI 退出 → 管理员批准 → --request 续接）
-        // 依赖本地保存的私钥；若只在换令牌成功后保存，续接路径必然失败。
-        // 此时 token 为空，凭据文件里的令牌字段留空，成功换取后再覆盖。
+        // 设备私钥必须在发起配对后立即落盘：二段式配对依赖本地保存的私钥。
         if (!CliStorage.TrySaveCredential(profile.Name, device.PrivateKeyPkcs8Base64, token: string.Empty, out var keyWarning))
         {
             error.WriteLine(keyWarning);
             return ExitCodes.AuditOrStorage;
         }
 
-        // 本次生效的 SPKI 必须在第一阶段就写回 profile：二段式配对的第一阶段在此返回，
-        // 续接路径只认 profile.SpkiSha256；不写回会让证书固定在续接阶段退化为 acceptAny。
-        if (spki != profile.SpkiSha256)
+        // 在第一阶段即持久化已采集到的 SPKI 与实例标识，防止续接或后续调用退化。
+        if (!string.Equals(observedSpki, profile.SpkiSha256, StringComparison.Ordinal) ||
+            !string.Equals(instanceId, profile.AutomationInstanceId, StringComparison.OrdinalIgnoreCase))
         {
-            profile = profile with { SpkiSha256 = spki };
+            profile = profile with { SpkiSha256 = observedSpki, AutomationInstanceId = instanceId ?? profile.AutomationInstanceId };
             ReplaceProfile(configuration, profile);
             CliStorage.SaveConfiguration(configuration);
         }
 
         var requestIdText = created.Data?.GetProperty("requestId").GetString();
-        // 用户码必须出现在输出中：AI agent 无 TTY，需要读出它转达给管理员核对。
         var userCode = created.Data?.GetProperty("userCode").GetString() ?? string.Empty;
-        output.WriteLine($"USER_CODE={userCode}");
-        output.WriteLine($"配对请求已创建：{requestIdText}");
-        output.WriteLine($"请在服务端管理页面的“自动化授权”面板核对用户码 {userCode} 后批准。");
-
-        if (!options.Wait || !Guid.TryParse(requestIdText, out var requestId))
+        if (!options.Wait)
         {
-            output.WriteLine("批准后执行：relaylink pair --wait --request " + requestIdText + " --code " + userCode);
-            output.WriteLine("（--wait 需要 --request 与 --code 才能续接原申请；不带它们会创建新申请。）");
+            if (options.Json)
+            {
+                Emit(new
+                {
+                    requestId = requestIdText,
+                    userCode,
+                    state = "pending",
+                    expiresAtUtc = created.Data?.TryGetProperty("expiresAtUtc", out var expEl) == true ? expEl.GetString() : null,
+                    automationInstanceId = instanceId,
+                    spkiSha256 = observedSpki
+                });
+            }
+            else
+            {
+                output.WriteLine($"USER_CODE={userCode}");
+                output.WriteLine($"配对请求已创建：{requestIdText}");
+                output.WriteLine($"请在服务端管理页面的“自动化授权”面板核对用户码 {userCode} 后批准。");
+                output.WriteLine("批准后执行：relaylink pair --wait --request " + requestIdText + " --code " + userCode);
+                output.WriteLine("（--wait 需要 --request 与 --code 才能续接原申请；不带它们会创建新申请。）");
+            }
             return ExitCodes.ApprovalRequired;
         }
 
-        return await WaitForApprovalAsync(client, requestId, userCode, device, profile, instanceId, spki, configuration, cancellationToken);
+        if (!Guid.TryParse(requestIdText, out var requestId))
+            return ExitCodes.ServerRejected;
+
+        if (!options.Json)
+        {
+            output.WriteLine($"USER_CODE={userCode}");
+            output.WriteLine($"配对请求已创建：{requestIdText}");
+            output.WriteLine($"请在服务端管理页面的“自动化授权”面板核对用户码 {userCode} 后批准。");
+        }
+
+        return await WaitForApprovalAsync(client, requestId, userCode, device, profile, instanceId, observedSpki, configuration, cancellationToken);
     }
 
     /// <summary>
@@ -212,21 +249,54 @@ public sealed class CliApp(CliOptions options, TextWriter output, TextWriter err
     private async Task<int> WaitForApprovalAsync(ApiClient client, Guid requestId, string userCode,
         DeviceKey device, CliProfile profile, string? instanceId, string? effectiveSpki, CliConfiguration configuration, CancellationToken cancellationToken)
     {
-        var deadline = DateTimeOffset.UtcNow.AddMinutes(11);
+        var waitDuration = options.TimeoutSeconds is { } seconds ? TimeSpan.FromSeconds(seconds) : TimeSpan.FromMinutes(11);
+        var deadline = DateTimeOffset.UtcNow.Add(waitDuration);
+        var approved = false;
         while (DateTimeOffset.UtcNow < deadline)
         {
-            await Task.Delay(TimeSpan.FromSeconds(3), cancellationToken);
-            var status = await client.QueryPairingAsync(requestId, userCode, device, cancellationToken);
-            if (status.Ok && status.Data?.TryGetProperty("state", out var state) == true && state.GetString() == "approved") break;
-            if (!status.Ok && status.Error?.Code is "pairing_denied" or "pairing_expired" or "pairing_locked") return MapError(status);
+            ApiClient.ApiResult status;
+            try
+            {
+                status = await client.QueryPairingAsync(requestId, userCode, device, cancellationToken);
+            }
+            catch (HttpRequestException exception)
+            {
+                return NetworkError(exception.Message);
+            }
+
+            if (status.Ok && status.Data?.TryGetProperty("state", out var state) == true && state.GetString() == "approved")
+            {
+                approved = true;
+                break;
+            }
+            if (!status.Ok && status.Error?.Code is "pairing_denied" or "pairing_expired" or "pairing_locked"
+                or "pairing_not_found" or "pairing_already_completed" or "proof_invalid" or "proof_replayed" or "unsupported_api_version")
+                return MapError(status);
+
+            var remaining = deadline - DateTimeOffset.UtcNow;
+            if (remaining <= TimeSpan.Zero) break;
+            var delay = remaining < TimeSpan.FromSeconds(3) ? remaining : TimeSpan.FromSeconds(3);
+            await Task.Delay(delay, cancellationToken);
         }
 
-        var exchange = await client.ExchangeTokenAsync(requestId, userCode, device, cancellationToken);
+        if (!approved)
+        {
+            error.WriteLine($"等待审批超时；请在管理页面批准后执行：relaylink pair --wait --request {requestId} --code {userCode}");
+            return ExitCodes.ApprovalRequired;
+        }
+
+        ApiClient.ApiResult exchange;
+        try
+        {
+            exchange = await client.ExchangeTokenAsync(requestId, userCode, device, cancellationToken);
+        }
+        catch (HttpRequestException exception)
+        {
+            return NetworkError(exception.Message);
+        }
         if (!exchange.Ok) return MapError(exchange);
 
         var token = exchange.Data?.GetProperty("token").GetString() ?? string.Empty;
-        // 续接进程没有 /info 返回的 instanceId；换令牌响应里带 automationInstanceId，
-        // 必须在这里兜底写入 profile，否则后续所有令牌请求的证明都会缺 instanceId。
         var effectiveInstanceId = instanceId;
         if (string.IsNullOrEmpty(effectiveInstanceId) &&
             exchange.Data?.TryGetProperty("automationInstanceId", out var exchangeInstance) == true)
@@ -239,14 +309,17 @@ public sealed class CliApp(CliOptions options, TextWriter output, TextWriter err
             return ExitCodes.AuditOrStorage;
         }
 
-        // 本次实际生效的 SPKI 必须写回 profile：否则用户显式给的 --spki 在第一次
-        // 配对成功后就丢失，后续连接退化为 acceptAny，与「配对后固定」承诺冲突。
-        profile = profile with { AutomationInstanceId = effectiveInstanceId, SpkiSha256 = effectiveSpki ?? profile.SpkiSha256 };
+        profile = profile with
+        {
+            AutomationInstanceId = effectiveInstanceId,
+            SpkiSha256 = effectiveSpki ?? profile.SpkiSha256,
+            GrantId = exchange.Data?.TryGetProperty("grantId", out var gId) == true ? gId.GetString() : profile.GrantId
+        };
         ReplaceProfile(configuration, profile);
         CliStorage.SaveConfiguration(configuration);
 
         if (options.Json)
-            output.WriteLine(JsonSerializer.Serialize(new { schemaVersion = 1, data = new { grantId = exchange.Data?.GetProperty("grantId").GetString(), requestId = requestId.ToString() } }, Json));
+            Emit(new { grantId = exchange.Data?.GetProperty("grantId").GetString(), requestId = requestId.ToString(), spkiSha256 = profile.SpkiSha256 });
         else
             output.WriteLine($"配对完成，令牌已保存。{warning}");
         return ExitCodes.Success;
@@ -260,11 +333,14 @@ public sealed class CliApp(CliOptions options, TextWriter output, TextWriter err
 
         var (profile, client, device) = await OpenPairingSessionAsync(cancellationToken);
         if (client is null || device is null) return LastErrorCode;
-
-        var status = await client.QueryPairingAsync(requestId, options.ResumeUserCode ?? string.Empty, device, cancellationToken);
-        if (!status.Ok) return MapError(status);
-        Emit(status.Data);
-        return ExitCodes.Success;
+        using (client)
+        using (device)
+        {
+            var status = await client.QueryPairingAsync(requestId, options.ResumeUserCode ?? string.Empty, device, cancellationToken);
+            if (!status.Ok) return MapError(status);
+            Emit(status.Data);
+            return ExitCodes.Success;
+        }
     }
 
     /// <summary>取消自己的待批准配对请求。</summary>
@@ -275,19 +351,30 @@ public sealed class CliApp(CliOptions options, TextWriter output, TextWriter err
 
         var (profile, client, device) = await OpenPairingSessionAsync(cancellationToken);
         if (client is null || device is null) return LastErrorCode;
-
-        var result = await client.CancelPairingAsync(requestId, device, cancellationToken);
-        if (!result.Ok) return MapError(result);
-        Emit(result.Data);
-        return ExitCodes.Success;
+        using (client)
+        using (device)
+        {
+            var result = await client.CancelPairingAsync(requestId, device, cancellationToken);
+            if (!result.Ok) return MapError(result);
+            Emit(result.Data);
+            return ExitCodes.Success;
+        }
     }
 
-    /// <summary>打开配对续接所需的会话（入口发现 + 设备私钥）。</summary>
+    /// <summary>打开配对续接所需的会话（入口发现 + 固定证书 + 设备私钥）。</summary>
     private async Task<(CliProfile? Profile, ApiClient? Client, DeviceKey? Device)> OpenPairingSessionAsync(CancellationToken cancellationToken)
     {
         var configuration = CliStorage.LoadConfiguration();
         var profile = ResolveProfile(configuration, out var profileError);
         if (profile is null) { LastErrorCode = profileError; return (null, null, null); }
+
+        var pinned = options.Spki ?? profile.SpkiSha256;
+        if (string.IsNullOrWhiteSpace(pinned))
+        {
+            error.WriteLine("profile 尚未固定服务端证书 SPKI 指纹；请先重新配对或传 --spki。");
+            LastErrorCode = ExitCodes.NetworkOrPin;
+            return (null, null, null);
+        }
 
         var (devicePrivateKey, _) = CliStorage.LoadCredential(profile.Name);
         if (devicePrivateKey is null)
@@ -305,7 +392,7 @@ public sealed class CliApp(CliOptions options, TextWriter output, TextWriter err
             return (null, null, null);
         }
 
-        var client = new ApiClient($"https://{discovery.Entry}", profile.SpkiSha256, acceptAny: profile.SpkiSha256 is null);
+        var client = CreateClient(discovery.Entry, pinned, acceptAny: false, profile.AutomationInstanceId);
         return (profile, client, DeviceKey.FromPrivateKey(devicePrivateKey));
     }
 
@@ -320,16 +407,42 @@ public sealed class CliApp(CliOptions options, TextWriter output, TextWriter err
 
         if (sub is "profiles")
         {
-            foreach (var item in configuration.Profiles)
-                output.WriteLine($"{item.Name}\t{item.Entry ?? "(自动发现)"}\t{item.AutomationInstanceId ?? "(未配对)"}");
+            if (options.Json)
+            {
+                Emit(configuration.Profiles.Select(item => new
+                {
+                    name = item.Name,
+                    entry = item.Entry,
+                    automationInstanceId = item.AutomationInstanceId,
+                    spkiPinned = !string.IsNullOrEmpty(item.SpkiSha256)
+                }));
+            }
+            else
+            {
+                foreach (var item in configuration.Profiles)
+                    output.WriteLine($"{item.Name}\t{item.Entry ?? "(自动发现)"}\t{item.AutomationInstanceId ?? "(未配对)"}");
+            }
             return ExitCodes.Success;
         }
 
         if (sub is "logout")
         {
-            var storage = Path.Combine(CliStorage.CredentialDirectory, profile.Name + ".json");
-            if (File.Exists(storage)) File.Delete(storage);
-            output.WriteLine("已删除本地令牌。服务端授权仍有效，需在管理页面撤销。");
+            CliStorage.DeleteCredential(profile.Name);
+            if (options.Json) Emit(new { profile = profile.Name, loggedOut = true });
+            else output.WriteLine("已删除本地令牌。服务端授权仍有效，需在管理页面撤销。");
+            return ExitCodes.Success;
+        }
+
+        if (sub is "trust")
+        {
+            var args = ParseSubArguments(rest.Skip(1).ToArray());
+            if (!args.ContainsKey("reset"))
+                return Usage("用法：relaylink auth trust --reset");
+            profile = profile with { SpkiSha256 = null };
+            ReplaceProfile(configuration, profile);
+            CliStorage.SaveConfiguration(configuration);
+            if (options.Json) Emit(new { profile = profile.Name, spkiReset = true });
+            else output.WriteLine($"已清除 profile \"{profile.Name}\" 固定的服务端证书 SPKI 指纹；下次 pair 需重新传 --spki 或 --accept-spki。");
             return ExitCodes.Success;
         }
 
@@ -340,15 +453,21 @@ public sealed class CliApp(CliOptions options, TextWriter output, TextWriter err
             return ExitCodes.Unauthorized;
         }
 
-        using var device = DeviceKey.FromPrivateKey(devicePrivateKey);
+        var pinned = options.Spki ?? profile.SpkiSha256;
+        if (string.IsNullOrWhiteSpace(pinned))
+        {
+            error.WriteLine("profile 未固定服务端证书 SPKI 指纹；请重新配对或使用 auth trust --reset 后带 --accept-spki 配对。");
+            return ExitCodes.NetworkOrPin;
+        }
+
         var discovery = await EntryDiscovery.DiscoverAsync(profile, options, cancellationToken);
         if (discovery.Entry is null) return NetworkError(discovery.Reason);
 
-        using var client = new ApiClient($"https://{discovery.Entry}", profile.SpkiSha256, acceptAny: profile.SpkiSha256 is null)
-        {
-            AutomationInstanceId = profile.AutomationInstanceId
-        };
-        var result = await client.WhoAmIAsync(device, token, cancellationToken);
+        using var device = DeviceKey.FromPrivateKey(devicePrivateKey);
+        using var client = CreateClient(discovery.Entry, pinned, acceptAny: false, profile.AutomationInstanceId);
+        ApiClient.ApiResult result;
+        try { result = await client.WhoAmIAsync(device, token, cancellationToken); }
+        catch (HttpRequestException exception) { return NetworkError(exception.Message); }
         if (!result.Ok) return MapError(result);
 
         Emit(new { subject = result.Data?.GetProperty("subject").GetString(), scopes = result.Data?.GetProperty("scopes"), expiresAtUtc = result.Data?.GetProperty("expiresAtUtc").GetString() });
@@ -365,7 +484,7 @@ public sealed class CliApp(CliOptions options, TextWriter output, TextWriter err
         {
             var (_, token) = CliStorage.LoadCredential(profile.Name);
             var discovery = await EntryDiscovery.DiscoverAsync(profile, options, cancellationToken);
-            output.WriteLine($"  {profile.Name}: 入口={discovery.Entry ?? discovery.Reason ?? "(未发现)"}  令牌={(string.IsNullOrEmpty(token) ? "未换取（配对未完成）" : "已保存")}");
+            output.WriteLine($"  {profile.Name}: 入口={discovery.Entry ?? discovery.Reason ?? "(未发现)"}  SPKI={(string.IsNullOrEmpty(profile.SpkiSha256) ? "未固定" : "已固定")}  令牌={(string.IsNullOrEmpty(token) ? "未换取（配对未完成）" : "已保存")}");
         }
 
         return ExitCodes.Success;
@@ -376,16 +495,24 @@ public sealed class CliApp(CliOptions options, TextWriter output, TextWriter err
     private async Task<int> ServerAsync(string[] rest, CancellationToken cancellationToken)
     {
         var sub = rest.FirstOrDefault() ?? "health";
-        var session = await OpenSessionAsync(cancellationToken);
+        using var session = await OpenSessionAsync(cancellationToken);
         if (session is null) return LastErrorCode;
 
-        var result = sub switch
+        ApiClient.ApiResult? result;
+        try
         {
-            "health" => await session.Client.GetOverviewAsync(session.Device, session.Token, cancellationToken),
-            "overview" => await session.Client.GetOverviewAsync(session.Device, session.Token, cancellationToken),
-            "version" => await session.Client.GetVersionAsync(session.Device, session.Token, cancellationToken),
-            _ => null
-        };
+            result = sub switch
+            {
+                "health" => await session.Client.GetHealthAsync(session.Device, session.Token, cancellationToken),
+                "overview" => await session.Client.GetOverviewAsync(session.Device, session.Token, cancellationToken),
+                "version" => await session.Client.GetVersionAsync(session.Device, session.Token, cancellationToken),
+                _ => null
+            };
+        }
+        catch (HttpRequestException exception)
+        {
+            return NetworkError(exception.Message);
+        }
 
         if (result is null) return Usage($"未知的 server 子命令：{sub}");
         if (!result.Ok) return MapError(result);
@@ -395,9 +522,11 @@ public sealed class CliApp(CliOptions options, TextWriter output, TextWriter err
 
     private async Task<int> ClientsAsync(string[] rest, CancellationToken cancellationToken)
     {
-        var session = await OpenSessionAsync(cancellationToken);
+        using var session = await OpenSessionAsync(cancellationToken);
         if (session is null) return LastErrorCode;
-        var result = await session.Client.ListClientsAsync(session.Device, session.Token, cancellationToken);
+        ApiClient.ApiResult result;
+        try { result = await session.Client.ListClientsAsync(session.Device, session.Token, cancellationToken); }
+        catch (HttpRequestException exception) { return NetworkError(exception.Message); }
         if (!result.Ok) return MapError(result);
         Emit(result.Data);
         return ExitCodes.Success;
@@ -432,16 +561,16 @@ public sealed class CliApp(CliOptions options, TextWriter output, TextWriter err
     private async Task<int> ChannelsAsync(string[] rest, CancellationToken cancellationToken)
     {
         var sub = rest.FirstOrDefault() ?? "ls";
-        var arguments = ParseSubArguments(rest.Skip(1).ToArray());
+        var subRest = rest.Skip(1).ToArray();
+        var arguments = ParseSubArguments(subRest);
         var clientId = arguments.TryGetValue("target", out var targetClient) ? targetClient
-            : rest.Skip(1).FirstOrDefault(argument => !argument.StartsWith('-')) ?? string.Empty;
+            : subRest.FirstOrDefault(argument => !argument.StartsWith('-')) ?? string.Empty;
         if (string.IsNullOrWhiteSpace(clientId)) return Usage("需要 clientId。");
-
-        var session = await OpenSessionAsync(cancellationToken);
-        if (session is null) return LastErrorCode;
 
         if (sub is "ls")
         {
+            using var session = await OpenSessionAsync(cancellationToken);
+            if (session is null) return LastErrorCode;
             var result = await session.Client.ListChannelsAsync(clientId, session.Device, session.Token, cancellationToken);
             if (!result.Ok) return MapError(result);
             Emit(result.Data);
@@ -450,17 +579,57 @@ public sealed class CliApp(CliOptions options, TextWriter output, TextWriter err
 
         if (sub is "set")
         {
-            if (!arguments.TryGetValue("channel", out var channelId)) return Usage("需要 --channel。");
-            if (options.DryRun)
-            {
-                output.WriteLine($"[dry-run] 将 PATCH {clientId}/{channelId}：displayName={arguments.GetValueOrDefault("display-name")}, tags={arguments.GetValueOrDefault("tags")}");
-                return ExitCodes.Success;
-            }
+            if (!arguments.TryGetValue("channel", out var channelId) || string.IsNullOrWhiteSpace(channelId))
+                return Usage("需要 --channel。");
 
             var patch = new Dictionary<string, object?>();
             if (arguments.TryGetValue("display-name", out var displayName)) patch["displayName"] = displayName;
-            if (arguments.TryGetValue("tags", out var tags)) patch["tags"] = tags.Split(',');
-            var key = Guid.NewGuid().ToString();
+            if (arguments.TryGetValue("enabled", out var enabledRaw))
+            {
+                if (!bool.TryParse(enabledRaw, out var enabledValue))
+                    return Usage("--enabled 必须是 true 或 false。");
+                patch["enabled"] = enabledValue;
+            }
+            if (arguments.TryGetValue("max-connections", out var maxConnRaw))
+            {
+                if (!int.TryParse(maxConnRaw, out var maxConn) || maxConn < 1)
+                    return Usage("--max-connections 必须是正整数。");
+                patch["maxConnections"] = maxConn;
+            }
+            if (arguments.TryGetValue("target-connect-timeout", out var connectTimeoutRaw))
+            {
+                if (!int.TryParse(connectTimeoutRaw, out var connectTimeout) || connectTimeout is < 1 or > 300)
+                    return Usage("--target-connect-timeout 必须在 1–300 秒之间。");
+                patch["targetConnectTimeoutSeconds"] = connectTimeout;
+            }
+            if (arguments.TryGetValue("udp-idle-timeout", out var udpTimeoutRaw))
+            {
+                if (!int.TryParse(udpTimeoutRaw, out var udpTimeout) || udpTimeout is < 1 or > 3600)
+                    return Usage("--udp-idle-timeout 必须在 1–3600 秒之间。");
+                patch["udpIdleTimeoutSeconds"] = udpTimeout;
+            }
+
+            var repeatedTags = CollectRepeatedOptionValues(subRest, "--tag");
+            if (arguments.TryGetValue("tags", out var commaTags))
+                repeatedTags.AddRange(commaTags.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+            if (repeatedTags.Count > 0)
+                patch["tags"] = repeatedTags.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+
+            if (patch.Count == 0)
+                return Usage("channels set 至少需要指定一个待修改字段（如 --display-name、--enabled、--max-connections、--tag 等）。");
+
+            var key = arguments.TryGetValue("idempotency-key", out var explicitKey) ? explicitKey : Guid.NewGuid().ToString();
+            if (!Guid.TryParse(key, out _))
+                return Usage("--idempotency-key 必须是有效的 UUID。");
+
+            if (options.DryRun)
+            {
+                output.WriteLine($"[dry-run] 将 PATCH {clientId}/{channelId}：{JsonSerializer.Serialize(patch)}");
+                return ExitCodes.Success;
+            }
+
+            using var session = await OpenSessionAsync(cancellationToken);
+            if (session is null) return LastErrorCode;
             var result = await session.Client.PatchChannelAsync(clientId, channelId, session.Device, session.Token, patch, key, cancellationToken);
             if (!result.Ok) return MapError(result);
             Emit(result.Data);
@@ -470,13 +639,24 @@ public sealed class CliApp(CliOptions options, TextWriter output, TextWriter err
         return Usage($"未知的 channels 子命令：{sub}");
     }
 
+    private static List<string> CollectRepeatedOptionValues(string[] args, string optionName)
+    {
+        var values = new List<string>();
+        for (var index = 0; index < args.Length - 1; index++)
+        {
+            if (string.Equals(args[index], optionName, StringComparison.Ordinal) && !args[index + 1].StartsWith('-'))
+                values.Add(args[++index]);
+        }
+        return values;
+    }
+
     private async Task<int> MappingsAsync(string[] rest, CancellationToken cancellationToken)
     {
         var arguments = ParseSubArguments(rest.Skip(1).ToArray());
         var clientId = arguments.TryGetValue("target", out var targetClient) ? targetClient
             : rest.Skip(1).FirstOrDefault(argument => !argument.StartsWith('-')) ?? string.Empty;
         if (string.IsNullOrWhiteSpace(clientId)) return Usage("需要 clientId。");
-        var session = await OpenSessionAsync(cancellationToken);
+        using var session = await OpenSessionAsync(cancellationToken);
         if (session is null) return LastErrorCode;
         var result = await session.Client.ListMappingsAsync(clientId, session.Device, session.Token, cancellationToken);
         if (!result.Ok) return MapError(result);
@@ -487,7 +667,7 @@ public sealed class CliApp(CliOptions options, TextWriter output, TextWriter err
     private async Task<int> ChangesAsync(string[] rest, CancellationToken cancellationToken)
     {
         var sub = rest.FirstOrDefault() ?? "ls";
-        var session = await OpenSessionAsync(cancellationToken);
+        using var session = await OpenSessionAsync(cancellationToken);
         if (session is null) return LastErrorCode;
 
         switch (sub)
@@ -577,18 +757,102 @@ public sealed class CliApp(CliOptions options, TextWriter output, TextWriter err
 
     private async Task<int> SkillAsync(string[] rest, CancellationToken cancellationToken)
     {
-        if (rest.FirstOrDefault() != "install") return Usage("用法：relaylink skill install --host <host> [--force]");
-        var host = rest.Skip(1).FirstOrDefault(argument => !argument.StartsWith('-')) ?? string.Empty;
-        if (string.IsNullOrWhiteSpace(host)) return Usage("需要 --host <host>。");
+        if (rest.FirstOrDefault() != "install") return Usage("用法：relaylink skill install --host <host> [--target <dir>] [--force]");
+        var arguments = ParseSubArguments(rest.Skip(1).ToArray());
+        var host = arguments.TryGetValue("host", out var parsedHost) ? parsedHost
+            : rest.Skip(1).FirstOrDefault(argument => !argument.StartsWith('-')) ?? string.Empty;
+        arguments.TryGetValue("target", out var explicitTarget);
+        if (string.IsNullOrWhiteSpace(host) && string.IsNullOrWhiteSpace(explicitTarget))
+            return Usage("需要 --host <host> 或 --target <dir>。");
 
-        output.WriteLine($"skill 安装目标宿主：{host}");
-        output.WriteLine("请把随发行物提供的 skills/relaylink-admin 目录复制到该宿主的 skill 目录。");
-        output.WriteLine("前置要求：目标宿主需存在 Node.js 运行时（包装脚本依赖它）。");
+        var sourceDirectory = FindBundledSkillDirectory();
+        if (sourceDirectory is null)
+        {
+            error.WriteLine("未能定位随发行物提供的 skills/relaylink-admin 目录；请确认构建或发行包完整。");
+            return ExitCodes.AuditOrStorage;
+        }
+
+        string destination;
+        if (!string.IsNullOrWhiteSpace(explicitTarget))
+        {
+            destination = Path.GetFullPath(explicitTarget);
+        }
+        else
+        {
+            var userHome = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            destination = host.ToLowerInvariant() switch
+            {
+                "claude" or "claude-code" => Path.Combine(userHome, ".claude", "skills", "relaylink-admin"),
+                "codex" => Path.Combine(userHome, ".codex", "skills", "relaylink-admin"),
+                "cursor" => Path.Combine(userHome, ".cursor", "skills", "relaylink-admin"),
+                "openclaw" => Path.Combine(userHome, ".openclaw", "skills", "relaylink-admin"),
+                _ => string.Empty
+            };
+            if (string.IsNullOrEmpty(destination))
+                return Usage($"不支持的 --host：{host}（可选：claude-code、codex、cursor、openclaw，或用 --target 指定目标目录）。");
+        }
+
+        if (Directory.Exists(destination) && !options.Force)
+        {
+            error.WriteLine($"目标目录已存在：{destination}；如需覆盖请传入 --force。");
+            return ExitCodes.AuditOrStorage;
+        }
+
+        if (options.DryRun)
+        {
+            output.WriteLine($"[dry-run] 将把 {sourceDirectory} 复制到 {destination}");
+            return ExitCodes.Success;
+        }
+
+        CopyDirectoryRecursive(sourceDirectory, destination, overwrite: true);
+        if (options.Json)
+            Emit(new { host, source = sourceDirectory, destination, installed = true });
+        else
+        {
+            output.WriteLine($"已将 relaylink-admin skill 安装到：{destination}");
+            output.WriteLine("前置要求：目标宿主需存在 Node.js 运行时（包装脚本依赖它）。");
+        }
         await Task.CompletedTask;
         return ExitCodes.Success;
     }
 
+    private static string? FindBundledSkillDirectory()
+    {
+        var bundled = Path.Combine(AppContext.BaseDirectory, "skills", "relaylink-admin");
+        if (File.Exists(Path.Combine(bundled, "SKILL.md"))) return bundled;
+
+        var current = new DirectoryInfo(AppContext.BaseDirectory);
+        while (current is not null)
+        {
+            var candidate = Path.Combine(current.FullName, "skills", "relaylink-admin");
+            if (File.Exists(Path.Combine(candidate, "SKILL.md"))) return candidate;
+            current = current.Parent;
+        }
+        return null;
+    }
+
+    private static void CopyDirectoryRecursive(string sourceDir, string destinationDir, bool overwrite)
+    {
+        Directory.CreateDirectory(destinationDir);
+        foreach (var file in Directory.GetFiles(sourceDir))
+        {
+            File.Copy(file, Path.Combine(destinationDir, Path.GetFileName(file)), overwrite);
+        }
+        foreach (var subDir in Directory.GetDirectories(sourceDir))
+        {
+            CopyDirectoryRecursive(subDir, Path.Combine(destinationDir, Path.GetFileName(subDir)), overwrite);
+        }
+    }
+
     // ---------------- 会话与错误 ----------------
+
+    private ApiClient CreateClient(string entry, string? pinnedSpki, bool acceptAny, string? instanceId = null) =>
+        new($"https://{entry}", pinnedSpki, acceptAny,
+            apiVersion: options.ApiVersion ?? ApiClient.SupportedApiVersion,
+            timeout: options.TimeoutSeconds is { } sec ? TimeSpan.FromSeconds(sec) : null)
+        {
+            AutomationInstanceId = instanceId
+        };
 
     private sealed record Session(ApiClient Client, DeviceKey Device, string Token) : IDisposable
     {
@@ -607,6 +871,14 @@ public sealed class CliApp(CliOptions options, TextWriter output, TextWriter err
         var profile = ResolveProfile(configuration, out var profileError);
         if (profile is null) { LastErrorCode = profileError; return null; }
 
+        var pinned = options.Spki ?? profile.SpkiSha256;
+        if (string.IsNullOrWhiteSpace(pinned))
+        {
+            error.WriteLine("profile 未固定服务端证书 SPKI 指纹；请先执行 pair --accept-spki 或传 --spki。");
+            LastErrorCode = ExitCodes.NetworkOrPin;
+            return null;
+        }
+
         var (devicePrivateKey, token) = CliStorage.LoadCredential(profile.Name);
         if (devicePrivateKey is null || string.IsNullOrEmpty(token))
         {
@@ -623,16 +895,20 @@ public sealed class CliApp(CliOptions options, TextWriter output, TextWriter err
             return null;
         }
 
-        var client = new ApiClient($"https://{discovery.Entry}", profile.SpkiSha256, acceptAny: profile.SpkiSha256 is null)
-        {
-            AutomationInstanceId = profile.AutomationInstanceId
-        };
+        var client = CreateClient(discovery.Entry, pinned, acceptAny: false, profile.AutomationInstanceId);
         return new Session(client, DeviceKey.FromPrivateKey(devicePrivateKey), token);
     }
 
     private CliProfile? ResolveProfile(CliConfiguration configuration, out int errorCode)
     {
         errorCode = ExitCodes.Usage;
+        if (options.Profile is not null && !CliStorage.IsValidProfileName(options.Profile))
+        {
+            error.WriteLine("profile 名称不合法（仅允许 1–64 位字母数字及 . _ -，不得含 ..）。");
+            errorCode = ExitCodes.Usage;
+            return null;
+        }
+
         if (configuration.Profiles.Count == 0)
         {
             // 允许用 --entry 直接试连，但配对仍需要一个 profile 名称。
@@ -655,6 +931,14 @@ public sealed class CliApp(CliOptions options, TextWriter output, TextWriter err
         {
             error.WriteLine($"找不到 profile：{options.Profile}");
             errorCode = ExitCodes.Usage;
+            return null;
+        }
+
+        if (!CliStorage.IsValidProfileName(profile.Name))
+        {
+            error.WriteLine("配置文件中的 profile 名称不合法。");
+            errorCode = ExitCodes.Usage;
+            return null;
         }
 
         return profile;

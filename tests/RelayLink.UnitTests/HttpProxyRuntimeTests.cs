@@ -165,6 +165,23 @@ public sealed class HttpProxyRuntimeTests
         await Assert.ThrowsAsync<ProtocolException>(() => runtime.ServeAsync(channel, Stream.Null, ingress, CancellationToken.None));
     }
 
+    [Fact]
+    public async Task Cancelled_serve_while_active_in_kestrel_completes_without_disposing_cts_prematurely()
+    {
+        await using var runtime = new HttpProxyRuntime(Agent);
+        var channel = Channel;
+        await runtime.PrepareAsync(Snapshot(channel), CancellationToken.None);
+        var ingress = new HttpIngressContext("public", "http", "192.0.2.10", PolicyHash: HttpProxyPolicy.Hash(channel));
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        using var client = new TcpClient();
+        await client.ConnectAsync((IPEndPoint)listener.LocalEndpoint);
+        using var accepted = await listener.AcceptTcpClientAsync();
+        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(150));
+
+        await Assert.ThrowsAnyAsync<Exception>(() => runtime.ServeAsync(channel, accepted.GetStream(), ingress, cts.Token));
+    }
+
     private static HttpProxyHost? Host(HttpProxyRuntime runtime, string id)
     {
         var hosts = (Dictionary<string, (string Hash, HttpProxyHost? Host)>)typeof(HttpProxyRuntime)

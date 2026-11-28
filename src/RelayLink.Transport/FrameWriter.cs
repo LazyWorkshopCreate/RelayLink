@@ -9,10 +9,13 @@ public sealed class FrameWriter(Stream stream, TimeSpan? blockedWriteTimeout = n
         ? protocolVersion : throw new ArgumentOutOfRangeException(nameof(protocolVersion));
     private readonly SemaphoreSlim writeLock = new(1, 1);
     private readonly TimeSpan blockedWriteTimeout = blockedWriteTimeout ?? TimeSpan.FromSeconds(120);
+    private Exception? faultReason;
 
     public async ValueTask WriteAsync(Frame frame, CancellationToken cancellationToken)
     {
         FrameConstraints.ValidateForWrite(frame);
+        if (Volatile.Read(ref faultReason) is { } priorFault)
+            throw new FrameWriteException("A control frame writer is faulted.", priorFault);
 
         var header = new byte[ProtocolConstants.HeaderLength];
         "NTP1"u8.CopyTo(header);
@@ -26,6 +29,8 @@ public sealed class FrameWriter(Stream stream, TimeSpan? blockedWriteTimeout = n
         await writeLock.WaitAsync(timeout.Token);
         try
         {
+            if (Volatile.Read(ref faultReason) is { } lockFault)
+                throw new FrameWriteException("A control frame writer is faulted.", lockFault);
             try
             {
                 await stream.WriteAsync(header, timeout.Token);
@@ -35,6 +40,7 @@ public sealed class FrameWriter(Stream stream, TimeSpan? blockedWriteTimeout = n
             }
             catch (Exception exception)
             {
+                Volatile.Write(ref faultReason, exception);
                 throw new FrameWriteException("A control frame write did not finish.", exception);
             }
         }

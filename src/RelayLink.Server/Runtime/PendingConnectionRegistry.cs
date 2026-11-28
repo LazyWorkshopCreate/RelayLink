@@ -49,6 +49,7 @@ public sealed class PendingConnectionRegistry
 public sealed class PendingConnection(Guid sessionId, ChannelConfiguration channel, Socket? caller, DateTimeOffset deadlineUtc, CancellationToken sessionToken = default, Guid? connectionId = null) : IDisposable
 {
     private readonly byte[] tokenBytes = RandomNumberGenerator.GetBytes(32);
+    private readonly object tokenLock = new();
     private int tokenConsumed;
     private int disposed;
     private readonly TaskCompletionSource<DataTunnel> bound = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -63,13 +64,17 @@ public sealed class PendingConnection(Guid sessionId, ChannelConfiguration chann
     public DateTimeOffset DeadlineUtc { get; } = deadlineUtc;
     public string Token => Convert.ToBase64String(tokenBytes);
 
-    public bool TryConsumeToken(string candidate)
+    public bool TryConsumeToken(string? candidate)
     {
-        if (sessionToken.IsCancellationRequested || Volatile.Read(ref disposed) != 0 || DateTimeOffset.UtcNow > DeadlineUtc) return false;
+        if (string.IsNullOrEmpty(candidate) || sessionToken.IsCancellationRequested || DateTimeOffset.UtcNow > DeadlineUtc) return false;
         byte[] provided;
         try { provided = Convert.FromBase64String(candidate); }
         catch (FormatException) { return false; }
-        return provided.Length == tokenBytes.Length && CryptographicOperations.FixedTimeEquals(provided, tokenBytes) && Interlocked.CompareExchange(ref tokenConsumed, 1, 0) == 0;
+        lock (tokenLock)
+        {
+            if (Volatile.Read(ref disposed) != 0) return false;
+            return provided.Length == tokenBytes.Length && CryptographicOperations.FixedTimeEquals(provided, tokenBytes) && Interlocked.CompareExchange(ref tokenConsumed, 1, 0) == 0;
+        }
     }
 
     public bool TrySetTunnel(DataTunnel tunnel) => bound.TrySetResult(tunnel);
@@ -83,7 +88,10 @@ public sealed class PendingConnection(Guid sessionId, ChannelConfiguration chann
     {
         if (Interlocked.Exchange(ref disposed, 1) == 0)
         {
-            CryptographicOperations.ZeroMemory(tokenBytes);
+            lock (tokenLock)
+            {
+                CryptographicOperations.ZeroMemory(tokenBytes);
+            }
             Caller?.Dispose();
             completed.TrySetResult();
         }

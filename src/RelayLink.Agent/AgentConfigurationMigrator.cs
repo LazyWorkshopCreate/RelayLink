@@ -58,20 +58,23 @@ public static class AgentConfigurationMigrator
     private static AgentProcessConfiguration CreateNewConfiguration(AgentConfiguration legacy)
     {
         var ca = legacy.UseTls ? legacy.TrustedCaPemBase64 : null;
-        if (legacy.UseTls && ca is null)
+        if (legacy.UseTls && string.IsNullOrWhiteSpace(ca))
             ca = Convert.ToBase64String(File.ReadAllBytes(legacy.TrustedCaPemPath!));
         return new AgentProcessConfiguration
         {
             DashboardPort = legacy.DashboardPort,
             OutboundPortRangeStart = legacy.OutboundPortRangeStart,
             OutboundPortRangeEnd = legacy.OutboundPortRangeEnd,
+            MaxConnections = Math.Max(2000, legacy.MaxConnections),
             Servers =
             [
                 new AgentServerProfile
                 {
                     ProfileId = "primary", ServerHost = legacy.ServerHost, ServerPort = legacy.ServerPort,
                     DataPort = legacy.EffectiveDataPort, UseTls = legacy.UseTls, ClientId = legacy.ClientId,
-                    Secret = legacy.Secret, TrustedCaPemBase64 = ca, Reconnect = legacy.Reconnect
+                    Secret = legacy.Secret, TrustedCaPemBase64 = ca,
+                    MaxConnections = legacy.MaxConnections, MaxPendingConnections = legacy.MaxPendingConnections,
+                    Reconnect = legacy.Reconnect
                 }
             ]
         };
@@ -184,7 +187,8 @@ public static class AgentConfigurationMigrator
                 file.Write(content);
                 file.Flush(flushToDisk: true);
             }
-            File.Move(temporary, path, overwrite);
+            if (overwrite) AgentPortAllocator.ReplacePortStateFile(temporary, path);
+            else File.Move(temporary, path, overwrite: false);
         }
         finally { if (File.Exists(temporary)) File.Delete(temporary); }
     }

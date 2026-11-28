@@ -12,6 +12,7 @@ C 类结构性变更永远不能在一步内完成。按以下五步走，不要
 
 ```json
 {
+  "channelId": "shanghai-sql",
   "displayName": "上海 SQL",
   "listenAddress": "0.0.0.0",
   "listenPort": 21433,

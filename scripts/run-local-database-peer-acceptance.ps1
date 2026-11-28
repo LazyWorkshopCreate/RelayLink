@@ -88,10 +88,20 @@ $caBase64 = [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($rootCa))
 $reconnect = @{ initialDelaySeconds = 1; maxDelaySeconds = 2; permanentErrorDelaySeconds = 2 }
 $visitedAgentPath = Join-Path $runDir 'visited/agent.json'
 $callerAgentPath = Join-Path $runDir 'caller/agent.json'
-@{ serverHost = '127.0.0.1'; serverPort = $controlPort; dataPort = $dataPort; useTls = $true; clientId = 'db-visited'; secret = $visitedSecret; trustedCaPemBase64 = $caBase64; dashboardPort = 0; reconnect = $reconnect } |
-    ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $visitedAgentPath -Encoding utf8
-@{ serverHost = '127.0.0.1'; serverPort = $controlPort; dataPort = $dataPort; useTls = $true; clientId = 'db-caller'; secret = $callerSecret; trustedCaPemBase64 = $caBase64; dashboardPort = $agentDashboardPort; reconnect = $reconnect } |
-    ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $callerAgentPath -Encoding utf8
+@{
+    schemaVersion = 1
+    dashboardPort = 0
+    outboundPortRangeStart = 20000
+    outboundPortRangeEnd = 59999
+    servers = @(@{ profileId = 'primary'; enabled = $true; serverHost = '127.0.0.1'; serverPort = $controlPort; dataPort = $dataPort; useTls = $true; clientId = 'db-visited'; secret = $visitedSecret; trustedCaPemBase64 = $caBase64; reconnect = $reconnect })
+} | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $visitedAgentPath -Encoding utf8
+@{
+    schemaVersion = 1
+    dashboardPort = $agentDashboardPort
+    outboundPortRangeStart = 20000
+    outboundPortRangeEnd = 59999
+    servers = @(@{ profileId = 'primary'; enabled = $true; serverHost = '127.0.0.1'; serverPort = $controlPort; dataPort = $dataPort; useTls = $true; clientId = 'db-caller'; secret = $callerSecret; trustedCaPemBase64 = $caBase64; reconnect = $reconnect })
+} | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $callerAgentPath -Encoding utf8
 $fingerprint = (& dotnet $agentDll --config $visitedAgentPath --show-e2e-fingerprint).Trim()
 if ($LASTEXITCODE -ne 0 -or $fingerprint -notmatch '^[0-9A-F]{64}$') { throw 'Could not create the visited Agent identity fingerprint.' }
 
@@ -133,7 +143,7 @@ try {
     Start-RelayProcess 'server' $serverDll $serverPath
     Start-RelayProcess 'visited' $agentDll $visitedAgentPath
     Start-RelayProcess 'caller' $agentDll $callerAgentPath
-    $portsPath = Join-Path $runDir 'caller/db-caller.ports.json'
+    $portsPath = Join-Path $runDir 'caller/state/primary/ports.json'
     $ready = $false
     for ($attempt = 0; $attempt -lt 200; $attempt++) {
         Start-Sleep -Milliseconds 200

@@ -2,21 +2,16 @@
 //! 保证各语言实现面对同一批场景给出同一批错误码。
 
 use std::fs;
+use std::io::{Read, Write};
+use std::net::{TcpListener, UdpSocket};
+use std::thread;
+use std::time::Duration;
 
-use relaylink_sdk::{connect_tcp, EntryDescriptor, RelayLinkError};
+use relaylink_sdk::{
+    bind_udp, connect_tcp, discover_mapping, discover_mapping_for_profile, send_udp, shutdown_write,
+    EntryDescriptor, RelayLinkError, CONFIGURATION_DRIFT, ENTRY_NOT_FOUND, INVALID_USAGE, TIMEOUT,
+};
 
-const CASES_JSON: &str = r#"
-[
-  {"id": "entry-descriptor-rejects-empty-host", "input": {"host": "", "port": 8080}, "expect": {"error": "invalid_usage"}},
-  {"id": "entry-descriptor-rejects-port-range", "input": {"host": "127.0.0.1", "port": 70000}, "expect": {"error": "invalid_usage"}},
-  {"id": "entry-endpoint-string", "input": {"host": "127.0.0.1", "port": 20001}, "expect": {"endpoint": "127.0.0.1:20001"}},
-  {"id": "tcp-connect-refused-maps-to-entry-unavailable", "input": {"host": "127.0.0.1", "port": 1}, "expect": {"error": "entry_unavailable"}},
-  {"id": "tcp-rejects-non-tcp-transport", "input": {"host": "127.0.0.1", "port": 20001, "transport": "udp"}, "expect": {"error": "invalid_usage"}},
-  {"id": "udp-rejects-non-udp-transport", "input": {"host": "127.0.0.1", "port": 20001, "transport": "tcp"}, "expect": {"error": "invalid_usage"}}
-]
-"#;
-
-/// 仓库根 = Cargo.toml 上溯三级（sdk/rust -> sdk -> 仓库根）。
 fn contract_path() -> std::path::PathBuf {
     let manifest = env!("CARGO_MANIFEST_DIR");
     std::path::Path::new(manifest)
@@ -27,52 +22,40 @@ fn contract_path() -> std::path::PathBuf {
         .join("data-plane.json")
 }
 
-/// Rust 无 serde（零依赖承诺），手写极简提取：取指定 case 的 input 两个字段。
-/// 提取必须在 case 窗口内：越过 `}`（case 边界）就停止，否则会命中
-/// 下一个用例的字段（实测：refused 用例无 transport，泄漏到后续用例的 "udp"，
-/// 导致错误地用 udp 构造 TCP 连接拿到 invalid_usage）。
 fn field_of(case_json: &str, field: &str) -> Option<String> {
     let marker = format!("\"{field}\":");
     let start = case_json.find(&marker)? + marker.len();
     let rest = case_json[start..].trim_start();
-    // 字段值必须在本用例块内：先截断到下一个 "}"（块边界），再取值。
     let bounded = &rest[..rest.find('}')?];
     let bounded = bounded.trim_start();
     if let Some(stripped) = bounded.strip_prefix('"') {
         let end = stripped.find('"')?;
         Some(stripped[..end].to_string())
     } else {
-        let end = bounded.find(|c: char| !c.is_ascii_digit())?;
+        let end = bounded.find(|c: char| !c.is_ascii_digit()).unwrap_or(bounded.len());
         Some(bounded[..end].to_string())
     }
 }
 
-/// load_case 返回五元组：(host, port, transport, expect_error, expect_endpoint)。
-/// port-range 用例的 70000 无法用 u16 表达：返回 (host, 0, transport, "invalid_usage", "")，
-/// 由调用方通过 port == 0 识别该特殊情形并断言拒绝。
-fn load_case(id: &str) -> (String, u16, String, String, String) {
-    // 优先读仓库文件；读取失败时用内联副本（同一内容，见 CASES_JSON 注释）。
-    let raw = fs::read_to_string(contract_path()).unwrap_or_else(|_| CASES_JSON.to_string());
+fn load_case(id: &str) -> (String, u16, usize, String, String, String) {
+    let raw = fs::read_to_string(contract_path()).expect("contract/conformance/data-plane.json");
     let marker = format!("\"id\": \"{id}\"");
-    let start = raw
-        .find(&marker)
-        .unwrap_or_else(|| panic!("case {id} not found"));
-    // 先把窗口截断到本用例：用例以 "id" 开头，下一个 "id": 之前就是本用例的全部内容。
-    // 没有这一步，field_of 会越过本用例命中后续用例的同名字段
-    // （实测：refused 用例无 transport，泄漏到下一用例的 "udp"）。
+    let start = raw.find(&marker).unwrap_or_else(|| panic!("case {id} not found"));
     let next_case = raw[start + marker.len()..]
         .find("\"id\":")
         .map(|index| start + marker.len() + index)
         .unwrap_or(raw.len());
     let case = &raw[start..next_case];
-    let host = field_of(case, "host").expect("host");
-    let port_text = field_of(case, "port").expect("port");
-    // transport 字段可选：缺失时用默认 tcp，不跨界查找。
+    let host = field_of(case, "host").unwrap_or_default();
+    let port_text = field_of(case, "port")
+        .or_else(|| field_of(case, "dashboardPort"))
+        .unwrap_or_default();
+    let size = field_of(case, "size").and_then(|s| s.parse::<usize>().ok()).unwrap_or(0);
     let transport = field_of(case, "transport").unwrap_or_else(|| "tcp".to_string());
     let expect_error = field_of(case, "error").unwrap_or_default();
     let expect_endpoint = field_of(case, "endpoint").unwrap_or_default();
     let port: u16 = port_text.parse().unwrap_or(0);
-    (host, port, transport, expect_error, expect_endpoint)
+    (host, port, size, transport, expect_error, expect_endpoint)
 }
 
 fn code_of(error: &RelayLinkError) -> &'static str {
@@ -80,40 +63,144 @@ fn code_of(error: &RelayLinkError) -> &'static str {
 }
 
 #[test]
-fn entry_descriptor_rejects_empty_host() {
-    let (host, port, transport, expect, _) = load_case("entry-descriptor-rejects-empty-host");
-    let error = EntryDescriptor::new(host, port, transport).expect_err("should reject");
-    assert_eq!(code_of(&error), expect);
-}
+fn entry_descriptor_cases_and_ipv6() {
+    let (host, port, _, transport, expect, _) = load_case("entry-descriptor-rejects-empty-host");
+    assert_eq!(code_of(&EntryDescriptor::new(host, port, transport).expect_err("reject")), expect);
 
-#[test]
-fn entry_descriptor_rejects_port_range() {
-    let (host, port, transport, expect, _) = load_case("entry-descriptor-rejects-port-range");
-    // load_case 对超出 u16 的端口返回 0：0 本身就是非法端口，构造即拒绝。
-    assert_eq!(port, 0, "port 70000 应以 0 表达「超出 u16」");
-    let error = EntryDescriptor::new(host, port, transport).expect_err("should reject");
-    assert_eq!(code_of(&error), expect);
-}
+    let (host, port, _, transport, expect, _) = load_case("entry-descriptor-rejects-port-range");
+    assert_eq!(port, 0);
+    assert_eq!(code_of(&EntryDescriptor::new(host, port, transport).expect_err("reject")), expect);
 
-#[test]
-fn entry_endpoint_string() {
-    let (host, port, transport, _, expect) = load_case("entry-endpoint-string");
-    let entry = EntryDescriptor::new(host, port, transport).expect("should accept");
+    let (host, port, _, transport, _, expect) = load_case("entry-endpoint-string");
+    let entry = EntryDescriptor::new(host, port, transport).expect("accept");
     assert_eq!(entry.endpoint(), expect);
+
+    let v6 = EntryDescriptor::new("::1", 20001, "tcp").expect("accept v6");
+    assert_eq!(v6.endpoint(), "[::1]:20001");
+    assert_eq!(EntryDescriptor::new("[::1]", 20001, "tcp").expect("accept v6 bracket").endpoint(), "[::1]:20001");
+    assert_eq!(code_of(&EntryDescriptor::new("127.0.0.1", 8080, "sctp").expect_err("reject")), INVALID_USAGE);
 }
 
 #[test]
-fn tcp_connect_refused_maps_to_entry_unavailable() {
-    let (host, port, transport, expect, _) = load_case("tcp-connect-refused-maps-to-entry-unavailable");
-    let entry = EntryDescriptor::new(host, port, transport).expect("should accept");
-    let error = connect_tcp(&entry, std::time::Duration::from_millis(200)).expect_err("should refuse");
+fn tcp_connect_refused_and_mismatch_and_half_close() {
+    let (host, port, _, transport, expect, _) = load_case("tcp-connect-refused-maps-to-entry-unavailable");
+    let entry = EntryDescriptor::new(host, port, transport).expect("accept");
+    let error = connect_tcp(&entry, Duration::from_secs(5)).expect_err("should refuse");
     assert_eq!(code_of(&error), expect);
+
+    let (host, port, _, transport, expect, _) = load_case("tcp-rejects-non-tcp-transport");
+    let entry = EntryDescriptor::new(host, port, transport).expect("accept");
+    assert_eq!(code_of(&connect_tcp(&entry, Duration::from_secs(1)).expect_err("reject")), expect);
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let server_port = listener.local_addr().unwrap().port();
+    thread::spawn(move || {
+        if let Ok((mut conn, _)) = listener.accept() {
+            let mut req = Vec::new();
+            let _ = conn.read_to_end(&mut req);
+            let mut reply = b"ok:".to_vec();
+            reply.extend_from_slice(&req);
+            let _ = conn.write_all(&reply);
+        }
+    });
+    let client_entry = EntryDescriptor::new("127.0.0.1", server_port, "tcp").unwrap();
+    let mut stream = connect_tcp(&client_entry, Duration::from_secs(5)).expect("connect");
+    stream.write_all(b"ping").unwrap();
+    shutdown_write(&stream).unwrap();
+    let mut reply = String::new();
+    stream.read_to_string(&mut reply).unwrap();
+    assert_eq!(reply, "ok:ping");
 }
 
 #[test]
-fn tcp_rejects_non_tcp_transport() {
-    let (host, port, transport, expect, _) = load_case("tcp-rejects-non-tcp-transport");
-    let entry = EntryDescriptor::new(host, port, transport).expect("should accept");
-    let error = connect_tcp(&entry, std::time::Duration::from_millis(200)).expect_err("should reject");
-    assert_eq!(code_of(&error), expect);
+fn udp_mismatch_oversized_and_roundtrip() {
+    let (host, port, _, transport, expect, _) = load_case("udp-rejects-non-udp-transport");
+    let entry = EntryDescriptor::new(host, port, transport).expect("accept");
+    assert_eq!(code_of(&bind_udp(&entry).expect_err("reject")), expect);
+
+    let (_, _, size, _, expect, _) = load_case("udp-rejects-oversized-datagram");
+    let udp_entry = EntryDescriptor::new("127.0.0.1", 20001, "udp").unwrap();
+    let sock = bind_udp(&udp_entry).unwrap();
+    let oversized = vec![1u8; size];
+    assert_eq!(code_of(&send_udp(&sock, &oversized).expect_err("reject")), expect);
+
+    let srv = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let srv_port = srv.local_addr().unwrap().port();
+    thread::spawn(move || {
+        let mut buf = [0u8; 64];
+        if let Ok((n, peer)) = srv.recv_from(&mut buf) {
+            let _ = srv.send_to(buf[..n].to_ascii_uppercase().as_slice(), peer);
+        }
+    });
+    let client = bind_udp(&EntryDescriptor::new("127.0.0.1", srv_port, "udp").unwrap()).unwrap();
+    client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    send_udp(&client, b"ping").unwrap();
+    let mut buf = [0u8; 64];
+    let n = client.recv(&mut buf).unwrap();
+    assert_eq!(&buf[..n], b"PING");
+}
+
+#[test]
+fn discovery_conformance_timeout_and_profile_disambiguation() {
+    let (_, port, _, _, expect, _) = load_case("discovery-rejects-invalid-dashboard-port");
+    assert_eq!(code_of(&discover_mapping("c", "ch", port).expect_err("reject")), expect);
+
+    let (_, port, _, _, expect, _) = load_case("discovery-unreachable-agent");
+    assert_eq!(code_of(&discover_mapping("c", "ch", port).expect_err("reject")), expect);
+
+    // Timeout case: verify classify maps TimedOut -> TIMEOUT (not ENTRY_UNAVAILABLE).
+    if cfg!(windows) {
+        let closed_probe = TcpListener::bind("127.0.0.1:0").unwrap();
+        let closed_port = closed_probe.local_addr().unwrap().port();
+        drop(closed_probe);
+        let timeout_err = connect_tcp(
+            &EntryDescriptor::new("127.0.0.1", closed_port, "tcp").unwrap(),
+            Duration::from_millis(20),
+        )
+        .expect_err("20ms on closed loopback port times out on Windows before 2s RST");
+        assert_eq!(code_of(&timeout_err), TIMEOUT);
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    thread::spawn(move || {
+        let json = r#"{
+            "servers": [
+                {
+                    "profileId": "east",
+                    "mappings": [
+                        { "enabled": false, "targetClientId": "v", "targetChannelId": "u", "localAddress": "127.0.0.1:20999", "transportProtocol": "udp" },
+                        { "enabled": true, "targetClientId": "v", "targetChannelId": "dup", "localAddress": "127.0.0.1:21001", "transportProtocol": "tcp" }
+                    ]
+                },
+                {
+                    "profileId": "west",
+                    "mappings": [
+                        { "enabled": true, "targetClientId": "v", "targetChannelId": "u", "localAddress": "[::1]:20002", "transportProtocol": "udp" },
+                        { "enabled": true, "targetClientId": "v", "targetChannelId": "dup", "localAddress": "127.0.0.1:22002", "transportProtocol": "tcp" }
+                    ]
+                }
+            ]
+        }"#;
+        for step in 0..4 {
+            let Ok((mut conn, _)) = listener.accept() else { break };
+            let mut req = [0u8; 512];
+            let _ = conn.read(&mut req);
+            let body = if step < 3 { json } else { "{corrupt" };
+            let resp = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+            let _ = conn.write_all(resp.as_bytes());
+        }
+    });
+
+    let udp = discover_mapping("v", "u", port).expect("discover udp");
+    assert_eq!(udp.transport, "udp");
+    assert_eq!(udp.host, "::1");
+    assert_eq!(udp.port, 20002);
+    assert_eq!(udp.endpoint(), "[::1]:20002");
+
+    let west = discover_mapping_for_profile("v", "dup", port, Some("west")).expect("discover west");
+    assert_eq!(west.port, 22002);
+
+    assert_eq!(code_of(&discover_mapping("v", "missing", port).expect_err("not found")), ENTRY_NOT_FOUND);
+    assert_eq!(code_of(&discover_mapping("v", "u", port).expect_err("bad json")), CONFIGURATION_DRIFT);
 }

@@ -42,6 +42,16 @@
       }
     },
     "schemas": {
+      "Envelope": {
+        "type": "object",
+        "required": ["requestId", "data"],
+        "properties": {
+          "requestId": { "type": "string" },
+          "auditStatus": { "type": "string" },
+          "operationId": { "type": "string" },
+          "data": {}
+        }
+      },
       "Error": {
         "type": "object",
         "required": ["error"],
@@ -84,7 +94,11 @@
           "subject": { "type": "string", "minLength": 1, "maxLength": 128 },
           "platform": { "type": "string" },
           "cliVersion": { "type": "string" },
-          "scopes": { "type": "array", "items": { "type": "string" } },
+          "scopes": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "可选 scope：server.read, clients.read, clients.write, channels.read, channels.write, mappings.read, mappings.write, security.read, security.write, audit.read, history.read, changes.read, changes.write, credentials.delete。注意：audit.read、history.read 与 credentials.delete 当前为预留枚举（无对应自动化路由或已禁用的申请类型，写凭据始终仅在管理页面完成）；未列出的 scope 一律返回 400 invalid_input。"
+          },
           "devicePublicKey": { "type": "string", "description": "P-256 EC 公钥的 JWK（JSON 字符串）。" }
         }
       },
@@ -139,7 +153,19 @@
         "summary": "匿名能力探测",
         "description": "不要求证明。返回接口版本与服务端实例标识。版本信息只用于选择行为，不用于任何安全决策——配对前的证书无法固定校验。",
         "responses": {
-          "200": { "description": "能力信息", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Info" } } } }
+          "200": {
+            "description": "能力信息",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/Envelope" },
+                    { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/Info" } } }
+                  ]
+                }
+              }
+            }
+          }
         }
       }
     },
@@ -152,7 +178,19 @@
           "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PairingRequest" } } }
         },
         "responses": {
-          "200": { "description": "已创建，返回用户码", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PairingCreated" } } } },
+          "200": {
+            "description": "已创建，返回用户码",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/Envelope" },
+                    { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/PairingCreated" } } }
+                  ]
+                }
+              }
+            }
+          },
           "400": { "description": "字段不合法", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
           "429": { "description": "限流或待批准容量已满", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
         }
@@ -163,75 +201,120 @@
         "summary": "查询配对状态",
         "description": "需要设备签名证明与正确用户码（body 或 proof.userCodeDigest）。注意：本次证明的 jti 会被消耗，不能用同一证明再换取令牌。",
         "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
+        "security": [{ "deviceProof": [] }],
         "responses": {
-          "200": { "description": "当前状态" },
-          "401": { "description": "证明无效", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+          "200": { "description": "当前状态", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Envelope" } } } },
+          "401": { "description": "证明无效", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "403": { "description": "请求被拒绝或已锁定", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "409": { "description": "已换取过", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "410": { "description": "已过期", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
         }
       }
     },
     "/api/v1/automation/pairing/requests/{id}/token": {
       "post": {
         "summary": "换取令牌",
-        "description": "需要设备签名证明与正确用户码。在单事务内完成「查状态 → 作废 → 签发」，避免并发双签发。成功后该 requestId 立即作废。",
+        "description": "需要设备签名证明（含 htm/htu/instanceId/requestId/userCodeDigest）与正确用户码。在单事务内完成「查状态 → 作废 → 签发」，避免并发双签发。",
         "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
+        "security": [{ "deviceProof": [] }],
         "responses": {
-          "200": { "description": "令牌与授权范围" },
+          "200": { "description": "令牌与授权范围", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Envelope" } } } },
           "401": { "description": "证明无效", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
-          "403": { "description": "被拒绝、被锁定或尚未批准", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
-          "409": { "description": "已换取过", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+          "403": { "description": "被拒绝或被锁定", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "409": { "description": "尚未批准或已换取过", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "410": { "description": "已过期", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "429": { "description": "有效授权数量已达上限", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
         }
       }
     },
     "/api/v1/automation/pairing/requests/{id}": {
       "delete": {
         "summary": "取消自己的配对请求",
-        "description": "需要设备签名证明。只有待批准的请求可以取消。",
+        "description": "需要设备签名证明并消耗 jti。只有待批准的请求可以取消。",
         "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
-        "responses": { "200": { "description": "已取消" } }
+        "security": [{ "deviceProof": [] }],
+        "responses": {
+          "200": { "description": "已取消", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Envelope" } } } },
+          "401": { "description": "证明无效", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "409": { "description": "当前状态不可取消", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
       }
     },
     "/api/v1/automation/whoami": {
       "get": {
         "summary": "令牌自检",
         "description": "不要求 scope，只回显当前令牌的主体、scope 与到期时间。",
-        "security": [{ "deviceToken": [] }, { "deviceProof": [] }],
-        "responses": { "200": { "description": "令牌信息" }, "401": { "description": "未授权" } }
+        "security": [{ "deviceToken": [], "deviceProof": [] }],
+        "responses": {
+          "200": { "description": "令牌信息", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Envelope" } } } },
+          "401": { "description": "未授权", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      }
+    },
+    "/api/v1/automation/health": {
+      "get": {
+        "summary": "服务端健康就绪检查",
+        "description": "需要 server.read scope。",
+        "security": [{ "deviceToken": [], "deviceProof": [] }],
+        "responses": {
+          "200": { "description": "就绪状态与启动时间", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Envelope" } } } },
+          "401": { "description": "未授权", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "403": { "description": "缺少 server.read", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
       }
     },
     "/api/v1/automation/version": {
       "get": {
-        "summary": "服务端版本（新增端点，既有服务端没有）",
-        "security": [{ "deviceToken": [] }],
-        "responses": { "200": { "description": "版本与实例标识" }, "401": { "description": "未授权" } }
+        "summary": "服务端版本",
+        "description": "需要 server.read scope。",
+        "security": [{ "deviceToken": [], "deviceProof": [] }],
+        "responses": {
+          "200": { "description": "版本与实例标识", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Envelope" } } } },
+          "401": { "description": "未授权", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "403": { "description": "缺少 server.read", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
       }
     },
     "/api/v1/automation/overview": {
       "get": {
         "summary": "聚合总览",
-        "security": [{ "deviceToken": [] }],
-        "responses": { "200": { "description": "总览" }, "403": { "description": "scope 不足" } }
+        "description": "需要 server.read scope。",
+        "security": [{ "deviceToken": [], "deviceProof": [] }],
+        "responses": {
+          "200": { "description": "总览", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Envelope" } } } },
+          "403": { "description": "scope 不足", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
       }
     },
     "/api/v1/automation/clients": {
       "get": {
         "summary": "客户端列表",
-        "security": [{ "deviceToken": [] }],
-        "responses": { "200": { "description": "客户端数组" }, "403": { "description": "缺少 clients.read" } }
+        "description": "需要 clients.read scope。",
+        "security": [{ "deviceToken": [], "deviceProof": [] }],
+        "responses": {
+          "200": { "description": "客户端数组", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Envelope" } } } },
+          "403": { "description": "缺少 clients.read", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
       }
     },
     "/api/v1/automation/clients/{clientId}/channels": {
       "get": {
         "summary": "通道列表",
-        "security": [{ "deviceToken": [] }],
+        "description": "需要 channels.read scope。",
+        "security": [{ "deviceToken": [], "deviceProof": [] }],
         "parameters": [{ "name": "clientId", "in": "path", "required": true, "schema": { "type": "string" } }],
-        "responses": { "200": { "description": "通道数组" }, "404": { "description": "客户端不存在" } }
+        "responses": {
+          "200": { "description": "通道数组", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Envelope" } } } },
+          "403": { "description": "缺少 channels.read", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "404": { "description": "客户端不存在", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
       }
     },
     "/api/v1/automation/clients/{clientId}/channels/{channelId}": {
       "patch": {
         "summary": "B 类通道受控写入",
-        "description": "字段白名单写入，逐次审计。目标是当前自动化接入通道时返回 conflict，避免自断管理面。",
-        "security": [{ "deviceToken": [] }],
+        "description": "需要 channels.write scope。字段白名单写入，逐次审计；目标是当前自动化接入通道时返回 conflict。",
+        "security": [{ "deviceToken": [], "deviceProof": [] }],
         "parameters": [
           { "name": "clientId", "in": "path", "required": true, "schema": { "type": "string" } },
           { "name": "channelId", "in": "path", "required": true, "schema": { "type": "string" } },
@@ -242,54 +325,77 @@
           "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ChannelPatch" } } }
         },
         "responses": {
-          "200": { "description": "已保存并下发" },
+          "200": { "description": "已保存并下发", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Envelope" } } } },
           "400": { "description": "未知字段或缺少幂等键", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
-          "409": { "description": "目标是自动化接入通道", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+          "403": { "description": "缺少 channels.write", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "409": { "description": "目标是自动化接入通道或 Idempotency-Key 冲突", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "503": { "description": "审计存储不可用", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
         }
       }
     },
     "/api/v1/automation/clients/{clientId}/mappings": {
       "get": {
         "summary": "访问映射列表",
-        "security": [{ "deviceToken": [] }],
+        "description": "需要 mappings.read scope。",
+        "security": [{ "deviceToken": [], "deviceProof": [] }],
         "parameters": [{ "name": "clientId", "in": "path", "required": true, "schema": { "type": "string" } }],
-        "responses": { "200": { "description": "映射数组" } }
+        "responses": {
+          "200": { "description": "映射数组", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Envelope" } } } },
+          "403": { "description": "缺少 mappings.read", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "404": { "description": "客户端不存在", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
       }
     },
     "/api/v1/automation/change-requests": {
       "post": {
         "summary": "C 类结构性变更申请",
-        "description": "只生成申请，不产生配置变更。批准与执行只在管理页面进行。",
-        "security": [{ "deviceToken": [] }],
+        "description": "需要 changes.write scope。只生成申请，不产生配置变更。批准与执行只在管理页面进行。",
+        "security": [{ "deviceToken": [], "deviceProof": [] }],
         "parameters": [{ "$ref": "#/components/parameters/IdempotencyKey" }],
         "requestBody": {
           "required": true,
           "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ChangeRequest" } } }
         },
         "responses": {
-          "200": { "description": "已提交，状态为 pending" },
+          "200": { "description": "已提交，状态为 pending", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Envelope" } } } },
           "400": { "description": "字段不合法", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
-          "409": { "description": "同一目标已有未完成申请", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+          "403": { "description": "缺少 changes.write", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "409": { "description": "同一目标已有未完成申请", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "503": { "description": "审计存储不可用", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
         }
       },
       "get": {
-        "summary": "变更申请列表",
-        "security": [{ "deviceToken": [] }],
-        "responses": { "200": { "description": "申请数组" } }
+        "summary": "当前设备提交的变更申请列表",
+        "description": "需要 changes.read scope，按当前设备公钥指纹隔离过滤。",
+        "security": [{ "deviceToken": [], "deviceProof": [] }],
+        "responses": {
+          "200": { "description": "申请数组", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Envelope" } } } },
+          "403": { "description": "缺少 changes.read", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
       }
     },
     "/api/v1/automation/change-requests/{id}": {
       "get": {
         "summary": "单条变更申请",
-        "security": [{ "deviceToken": [] }],
+        "description": "需要 changes.read scope 且仅限当前设备提交的申请。",
+        "security": [{ "deviceToken": [], "deviceProof": [] }],
         "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
-        "responses": { "200": { "description": "申请详情" }, "404": { "description": "不存在" } }
+        "responses": {
+          "200": { "description": "申请详情", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Envelope" } } } },
+          "404": { "description": "不存在或不属于当前设备", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
       },
       "delete": {
         "summary": "撤销自己提交的待批准申请",
-        "security": [{ "deviceToken": [] }],
+        "description": "需要 changes.write scope 且仅限当前设备提交的申请，执行前校验审计可用并记录撤销事件。",
+        "security": [{ "deviceToken": [], "deviceProof": [] }],
         "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
-        "responses": { "200": { "description": "已撤销" }, "409": { "description": "已不在待批准状态" } }
+        "responses": {
+          "200": { "description": "已撤销", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Envelope" } } } },
+          "404": { "description": "不存在或不属于当前设备", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "409": { "description": "已不在待批准状态或已过期", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "503": { "description": "审计存储不可用", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
       }
     }
   }

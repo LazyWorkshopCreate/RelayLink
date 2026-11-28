@@ -6,8 +6,19 @@ import { App } from './main';
 const ok = (body: unknown, status = 200) =>
     new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 
-function fakeApi(withMapping = false, mappingAccessUrl?: string) {
+function fakeApi(
+    withMapping = false,
+    mappingAccessUrl?: string,
+    options?: {
+        automationEnabled?: boolean;
+        automationSessionLifetimeMinutes?: number;
+        failAgentConfig?: boolean;
+        problemDetail?: string;
+    },
+) {
     let authenticated = false;
+    const automationEnabled = options?.automationEnabled ?? false;
+    const automationSessionLifetimeMinutes = options?.automationSessionLifetimeMinutes ?? 60;
     const clients: Record<string, unknown>[] = [
         {
             clientId: 'node-a',
@@ -44,6 +55,34 @@ function fakeApi(withMapping = false, mappingAccessUrl?: string) {
     };
     const mappingSets: Record<string, Record<string, unknown>[]> = { 'node-a': [], 'node-b': [] };
     const securityGroups: { id: string; name: string; entries: string[] }[] = [];
+    const pairings = [
+        {
+            requestId: 'req-1',
+            subject: 'claude-code',
+            platform: 'windows',
+            cliVersion: '1.0.0',
+            scopes: ['channels.write', 'server.read'],
+            deviceKeyThumbprint: 'thumb-1234',
+            userCode: 'ABCD-1234',
+            state: 'pending',
+            createdAtUtc: '2026-11-25T10:00:00Z',
+            expiresAtUtc: '2026-11-25T10:10:00Z',
+        },
+    ];
+    const grants: Record<string, unknown>[] = [];
+    const changeRequests = [
+        {
+            changeRequestId: 'chg-1',
+            type: 'channel.create',
+            targetKey: 'node-a/auto-ch',
+            payload: '{"channelId":"auto-ch"}',
+            reason: '需要开放自动创建测试通道',
+            requestedBy: 'automation:claude-code',
+            state: 'approved',
+            createdAtUtc: '2026-11-25T10:00:00Z',
+            expiresAtUtc: '2026-11-26T10:00:00Z',
+        },
+    ];
     const connections = [
         {
             connectionId: '11111111-1111-1111-1111-111111111111',
@@ -85,16 +124,42 @@ function fakeApi(withMapping = false, mappingAccessUrl?: string) {
         calls.push({ path, method, csrf: headers.get('X-RelayLink-CSRF'), body });
         if (path === '/api/v1/admin/session' && method === 'POST') {
             authenticated = true;
-            return ok({ authenticated: true, csrfToken: 'test-csrf' });
+            return ok({
+                authenticated: true,
+                csrfToken: 'test-csrf',
+                automationEnabled,
+                automationSessionLifetimeMinutes,
+            });
+        }
+        if (path === '/api/v1/admin/session' && method === 'DELETE') {
+            authenticated = false;
+            return new Response(null, { status: 204 });
         }
         if (path === '/api/v1/admin/session')
-            return ok({ authenticated, csrfToken: authenticated ? 'test-csrf' : undefined });
+            return ok({
+                authenticated,
+                csrfToken: authenticated ? 'test-csrf' : undefined,
+                automationEnabled,
+                automationSessionLifetimeMinutes,
+            });
         if (path === '/api/v1/admin/agent-defaults')
             return ok({ serverHost: 'tunnel.example.com', serverPort: 7443, useTls: true });
+        if (path === '/api/v1/admin/clients/node-a/agent-config' && method === 'GET') {
+            if (options?.failAgentConfig) {
+                return ok({ detail: '未找到客户端 TLS 信任材料。' }, 400);
+            }
+            return new Response(JSON.stringify({ servers: [{ clientId: 'node-a' }] }), {
+                status: 200,
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Content-Disposition': 'attachment; filename="relaylink-agent-node-a.json"',
+                },
+            });
+        }
         if (path.startsWith('/api/v1/admin/audit?'))
             return authenticated
                 ? ok({
-                      total: 1,
+                      total: 2,
                       events: [
                           {
                               eventId: 'e1',
@@ -105,9 +170,59 @@ function fakeApi(withMapping = false, mappingAccessUrl?: string) {
                               bytesToTarget: 0,
                               bytesToCaller: 0,
                           },
+                          {
+                              eventId: 'e2',
+                              occurredAtUtc: '2026-09-16T10:02:00Z',
+                              eventType: 'automation_change_applied',
+                              outcome: 'applied',
+                              actor: 'admin:abc',
+                              clientId: 'node-a',
+                              channelId: 'auto-ch',
+                              bytesToTarget: 0,
+                              bytesToCaller: 0,
+                          },
                       ],
                   })
                 : ok({ error: 'Unauthorized' }, 401);
+        if (path === '/api/v1/admin/automation/pairings?state=pending' && method === 'GET')
+            return ok({ pairings });
+        if (path === '/api/v1/admin/automation/pairings/req-1/approve' && method === 'POST') {
+            pairings.splice(0);
+            grants.push({
+                grantId: 'grant-1',
+                subject: 'claude-code',
+                platform: 'windows',
+                deviceKeyThumbprint: 'thumb-1234',
+                scopes: (body as { approvedScopes: string[] }).approvedScopes,
+                createdAtUtc: '2026-11-25T10:01:00Z',
+                expiresAtUtc: '2026-11-25T10:31:00Z',
+            });
+            return new Response(null, { status: 204 });
+        }
+        if (path === '/api/v1/admin/automation/grants' && method === 'GET') return ok({ grants });
+        if (path === '/api/v1/admin/automation/change-requests' && method === 'GET')
+            return ok({ changeRequests });
+        if (path === '/api/v1/admin/automation/change-requests/chg-1/execute' && method === 'POST') {
+            changeRequests[0].state = 'applied';
+            channelSets['node-a'].push({
+                channelId: 'auto-ch',
+                displayName: '自动化通道',
+                tags: [],
+                enabled: true,
+                available: false,
+                listenAddress: '0.0.0.0',
+                listenPort: 19005,
+                targetHost: '127.0.0.1',
+                targetPort: 19006,
+                maxConnections: 10,
+                targetConnectTimeoutSeconds: 5,
+                pendingConnections: 0,
+                activeConnections: 0,
+                bytesToTarget: 0,
+                bytesToCaller: 0,
+            });
+            return ok({ state: 'applied' });
+        }
         if (path === '/api/v1/admin/security-groups' && method === 'GET') return ok({ securityGroups });
         if (path === '/api/v1/admin/security-groups' && method === 'POST') {
             securityGroups.push(body as { id: string; name: string; entries: string[] });
@@ -126,6 +241,9 @@ function fakeApi(withMapping = false, mappingAccessUrl?: string) {
             return new Response(null, { status: 204 });
         }
         if (path.startsWith('/api/v1/admin/next-channel-port')) {
+            if (options?.problemDetail) {
+                return ok({ title: 'Service Unavailable', detail: options.problemDetail }, 503);
+            }
             const used = new Set(
                 Object.values(channelSets)
                     .flat()
@@ -639,5 +757,81 @@ describe('管理控制台', () => {
             targetClientId: 'node-a',
             targetChannelId: 'private',
         });
+    });
+
+    it('automationEnabled=false 时隐藏自动化授权；开启后支持缩权批准、执行刷新、Problem 错误与退出携带 CSRF', async () => {
+        fakeApi(false, undefined, { automationEnabled: false });
+        const user = userEvent.setup();
+        render(<App />);
+        await screen.findByText('测试节点');
+        await user.click(screen.getByRole('button', { name: /未登录/ }));
+        await user.type(screen.getByRole('textbox', { name: '用户名' }), 'admin');
+        await user.type(screen.getByLabelText('密码'), 'test-password');
+        await user.click(screen.getByRole('button', { name: '登录' }));
+        await screen.findByRole('button', { name: '安全组' });
+        expect(screen.queryByRole('button', { name: '自动化授权' })).toBeNull();
+        cleanup();
+
+        const calls = fakeApi(false, undefined, {
+            automationEnabled: true,
+            automationSessionLifetimeMinutes: 60,
+        });
+        render(<App />);
+        await screen.findByText('测试节点');
+        await user.click(screen.getByRole('button', { name: /未登录/ }));
+        await user.type(screen.getByRole('textbox', { name: '用户名' }), 'admin');
+        await user.type(screen.getByLabelText('密码'), 'test-password');
+        await user.click(screen.getByRole('button', { name: '登录' }));
+        await user.click(await screen.findByRole('button', { name: '自动化授权' }));
+        await screen.findByText('ABCD-1234');
+        expect(screen.getByText('需要开放自动创建测试通道')).toBeTruthy();
+
+        const dialog = screen.getByRole('dialog');
+        await user.click(within(dialog).getByRole('checkbox', { name: 'channels.write' }));
+        await user.click(within(dialog).getByRole('checkbox', { name: 'channels.read' }));
+        const lifetimeInput = within(dialog).getByRole('spinbutton', { name: /有效期/ });
+        await user.clear(lifetimeInput);
+        await user.type(lifetimeInput, '30');
+        await user.click(within(dialog).getByRole('button', { name: '批准' }));
+
+        const approveCall = calls.find((c) => c.path.includes('/pairings/req-1/approve'));
+        expect(approveCall?.body).toEqual({
+            approvedScopes: ['server.read', 'channels.read'],
+            lifetimeMinutes: 30,
+        });
+        expect(approveCall?.csrf).toBe('test-csrf');
+
+        await user.click(within(dialog).getByRole('button', { name: '执行' }));
+        await waitFor(() => expect(screen.getByText('自动化通道')).toBeTruthy());
+
+        await user.click(within(dialog).getByRole('button', { name: '关闭' }));
+        await user.click(screen.getByRole('button', { name: '审计日志' }));
+        expect(await screen.findByRole('cell', { name: '自动化变更已生效' })).toBeTruthy();
+        await user.click(screen.getByRole('button', { name: '关闭' }));
+
+        await user.click(screen.getByRole('button', { name: /退出/ }));
+        const logoutCall = calls.find((c) => c.path === '/api/v1/admin/session' && c.method === 'DELETE');
+        expect(logoutCall?.csrf).toBe('test-csrf');
+        await screen.findByRole('button', { name: /未登录/ });
+    });
+
+    it('显示 Problem detail 错误且下载配置失败时不离开页面', async () => {
+        fakeApi(false, undefined, {
+            problemDetail: 'No available cloud listener port.',
+            failAgentConfig: true,
+        });
+        const user = userEvent.setup();
+        render(<App />);
+        await screen.findByText('测试节点');
+        await user.click(screen.getByRole('button', { name: /未登录/ }));
+        await user.type(screen.getByRole('textbox', { name: '用户名' }), 'admin');
+        await user.type(screen.getByLabelText('密码'), 'test-password');
+        await user.click(screen.getByRole('button', { name: '登录' }));
+
+        await user.click(await screen.findByRole('button', { name: '添加通道' }));
+        await screen.findByText('No available cloud listener port.');
+
+        await user.click(screen.getByRole('button', { name: '下载配置' }));
+        await screen.findByText('未找到客户端 TLS 信任材料。');
     });
 });

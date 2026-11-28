@@ -3,7 +3,10 @@ using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging.Abstractions;
+using RelayLink.AutomationClient;
+using RelayLink.Cli;
 using RelayLink.Server.Automation;
 using RelayLink.Server.Configuration;
 using RelayLink.Server.Runtime;
@@ -581,4 +584,236 @@ public sealed class AuditUnavailableTests
     {
         Audit = new AuditConfiguration(auditPath, 90)
     };
+}
+
+public sealed class Wave3AutomationRegressionTests
+{
+    [Fact]
+    public void AutomationScopes_TryNormalize_reports_unknown_and_IsSubsetOf_allows_write_to_read_narrowing()
+    {
+        Assert.False(AutomationScopes.TryNormalize(["clients.write", "bogus.scope"], out var normalized, out var unknown));
+        Assert.Equal([AutomationScopes.ClientsWrite], normalized);
+        Assert.Equal(["bogus.scope"], unknown);
+        Assert.True(AutomationScopes.IsSubsetOf([AutomationScopes.ClientsRead], [AutomationScopes.ClientsWrite]));
+        Assert.False(AutomationScopes.IsSubsetOf([AutomationScopes.ClientsWrite], [AutomationScopes.ClientsRead]));
+    }
+
+    [Fact]
+    public void AutomationClient_computes_spki_sha256_and_rejects_http_scheme()
+    {
+        using var ecdsa = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var req = new CertificateRequest("CN=127.0.0.1", ecdsa, HashAlgorithmName.SHA256);
+        using var cert = req.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-5), DateTimeOffset.UtcNow.AddDays(1));
+
+        var expected = System.Buffers.Text.Base64Url.EncodeToString(
+            SHA256.HashData(cert.PublicKey.ExportSubjectPublicKeyInfo()));
+        Assert.Equal(expected, AutomationClient.AutomationClient.ComputeSpkiSha256(cert));
+        Assert.Throws<ArgumentException>(() => new AutomationClient.AutomationClient("http://127.0.0.1:18082", acceptAny: true));
+    }
+
+    [Fact]
+    public void CliStorage_rejects_traversal_profile_names_and_roundtrips_credentials()
+    {
+        Assert.False(CliStorage.IsValidProfileName("../escape"));
+        Assert.False(CliStorage.IsValidProfileName("a/b"));
+        Assert.False(CliStorage.IsValidProfileName(".hidden"));
+        Assert.False(CliStorage.IsValidProfileName(""));
+        Assert.True(CliStorage.IsValidProfileName("prod.east_1-ok"));
+
+        using var home = new TestDirectory("relaylink-cli-storage-");
+        var previous = Environment.GetEnvironmentVariable("RELAYLINK_HOME");
+        Environment.SetEnvironmentVariable("RELAYLINK_HOME", home.Path);
+        try
+        {
+            Assert.True(CliStorage.TrySaveCredential("prod-1", "private-key-jwk", "bearer-token-value", out _));
+            var loaded = CliStorage.LoadCredential("prod-1");
+            Assert.Equal("private-key-jwk", loaded.DevicePrivateKey);
+            Assert.Equal("bearer-token-value", loaded.Token);
+            CliStorage.DeleteCredential("prod-1");
+            var deleted = CliStorage.LoadCredential("prod-1");
+            Assert.Null(deleted.DevicePrivateKey);
+            Assert.Null(deleted.Token);
+            Assert.Throws<ArgumentException>(() => CliStorage.CredentialPathFor("../escape"));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("RELAYLINK_HOME", previous);
+        }
+    }
+
+    [Fact]
+    public async Task AutomationChangeService_covers_rollback_expiry_mismatch_tags_default_host_and_reconcile()
+    {
+        using var directory = new TestDirectory("relaylink-change-svc-");
+        var clientsDir = Path.Combine(directory.Path, "clients");
+        Directory.CreateDirectory(clientsDir);
+        var secret = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
+        var echoPort = FreeTcpPort();
+        var clientPath = Path.Combine(clientsDir, "agent.json");
+        await File.WriteAllTextAsync(clientPath, JsonSerializer.Serialize(new
+        {
+            schemaVersion = 1,
+            clientId = "agent",
+            displayName = "Agent",
+            enabled = true,
+            secret,
+            maxConnections = 10,
+            maxPendingConnections = 5,
+            channels = new[]
+            {
+                new
+                {
+                    channelId = "echo",
+                    displayName = "Echo",
+                    enabled = true,
+                    listenAddress = "127.0.0.1",
+                    listenPort = echoPort,
+                    targetHost = "127.0.0.1",
+                    targetPort = 9,
+                    maxConnections = 2,
+                    targetConnectTimeoutSeconds = 5,
+                    authorizedClientsOnly = false,
+                    endToEndEncryptionEnabled = false,
+                    tags = new[] { "prod", "db" }
+                }
+            }
+        }));
+
+        var serverPath = Path.Combine(directory.Path, "server.json");
+        await File.WriteAllTextAsync(serverPath, JsonSerializer.Serialize(new
+        {
+            schemaVersion = 1,
+            tunnel = new
+            {
+                listenAddress = "127.0.0.1",
+                port = FreeTcpPort(),
+                dataPort = FreeTcpPort(),
+                tlsEnabled = false,
+                certificatePemPath = "",
+                privateKeyPemPath = "",
+                agentServerHost = "relay.example.com",
+                handshakeTimeoutSeconds = 10,
+                heartbeatIntervalSeconds = 15,
+                heartbeatTimeoutSeconds = 45
+            },
+            dashboard = new
+            {
+                listenAddress = "127.0.0.1",
+                port = FreeTcpPort(),
+                refreshSeconds = 5,
+                admin = new { username = "admin", passwordHash = "PBKDF2-SHA256$100000$AA==$AA==", sessionLifetimeMinutes = 60 }
+            },
+            clientsDirectory = clientsDir,
+            limits = new { maxConnections = 200, maxPendingConnections = 20, maxUnauthenticatedConnections = 10, maxChannelsPerClient = 20, openTimeoutSeconds = 10, blockedWriteTimeoutSeconds = 120, halfCloseDrainTimeoutSeconds = 30 }
+        }));
+
+        var loader = new ConfigurationLoader();
+        var loaded = loader.Load(serverPath);
+        var runtime = new ServerRuntime(loaded, new SessionRegistry());
+        var audit = new AuditService(runtime, NullLogger<AuditService>.Instance);
+        await audit.StartAsync(CancellationToken.None);
+        var metrics = new MetricsRegistry(loaded);
+        var proxy = new ProxyListenerService(runtime, new PendingConnectionRegistry(), metrics, audit, NullLogger<ProxyListenerService>.Instance);
+        await proxy.ApplyConfigurationAsync(loaded, CancellationToken.None);
+        var relays = new PeerRelayRegistry(runtime, metrics, audit, NullLogger<PeerRelayRegistry>.Instance);
+        var writeLock = new ConfigurationWriteLock();
+        var channelEditor = new ChannelConfigurationEditor(serverPath, loader, runtime, proxy, relays, runtime.Sessions, writeLock);
+        var clientEditor = new ClientConfigurationEditor(serverPath, loader, runtime, proxy, relays, runtime.Sessions, writeLock);
+        await using var store = new AutomationStore(serverPath);
+        var service = new AutomationChangeService(store, channelEditor, clientEditor, runtime, writeLock, audit, NullLogger<AutomationChangeService>.Instance);
+
+        try
+        {
+            // 1. target vs payload ID mismatch rejected.
+            using var mismatchTarget = JsonDocument.Parse("""{"clientId":"agent","channelId":"ch1"}""");
+            using var mismatchPayload = JsonDocument.Parse("""{"channelId":"ch2","listenPort":19111,"targetHost":"127.0.0.1","targetPort":9}""");
+            var mismatch = await service.SubmitAsync("channel.create", mismatchTarget.RootElement, mismatchPayload.RootElement, null,
+                "device-a", Guid.NewGuid().ToString(), CancellationToken.None, "thumb-a");
+            Assert.False(mismatch.Ok);
+            Assert.Equal(AutomationErrors.ValidationFailed, mismatch.ErrorCode);
+
+            // 2. ClientUpdateException inside ExecuteAsync rolls Applying back to Approved (no stuck Applying).
+            using var dupTarget = JsonDocument.Parse("""{"clientId":"agent"}""");
+            using var dupPayload = JsonDocument.Parse("""{"clientId":"agent","displayName":"Dup"}""");
+            var dupSub = await service.SubmitAsync("client.create", dupTarget.RootElement, dupPayload.RootElement, null,
+                "device-a", Guid.NewGuid().ToString(), CancellationToken.None, "thumb-a");
+            Assert.True(dupSub.Ok);
+            Assert.True((await service.ApproveAsync(dupSub.Request!.ChangeRequestId, "admin", CancellationToken.None)).Ok);
+            var dupExec = await service.ExecuteAsync(dupSub.Request.ChangeRequestId, "admin", CancellationToken.None);
+            Assert.False(dupExec.Ok);
+            Assert.Equal(ChangeState.Approved, dupExec.State);
+            var storedDup = await store.GetChangeAsync(dupSub.Request.ChangeRequestId, CancellationToken.None);
+            Assert.Equal(ChangeState.Approved, storedDup!.State);
+            Assert.False(string.IsNullOrWhiteSpace(storedDup.FailureReason));
+
+            // 3. Expired (>24h) approval is rejected.
+            using var expTarget = JsonDocument.Parse("""{"clientId":"exp-client"}""");
+            using var expPayload = JsonDocument.Parse("""{"clientId":"exp-client","displayName":"Exp"}""");
+            var expSub = await service.SubmitAsync("client.create", expTarget.RootElement, expPayload.RootElement, null,
+                "device-a", Guid.NewGuid().ToString(), CancellationToken.None, "thumb-a");
+            Assert.True(expSub.Ok);
+            await using (var conn = new SqliteConnection($"Data Source={store.DatabasePath}"))
+            {
+                await conn.OpenAsync();
+                await using var cmd = conn.CreateCommand();
+                cmd.CommandText = "UPDATE change_request SET expires_at_utc = $past WHERE change_request_id = $id";
+                cmd.Parameters.AddWithValue("$past", DateTimeOffset.UtcNow.AddHours(-1).ToUnixTimeSeconds());
+                cmd.Parameters.AddWithValue("$id", expSub.Request!.ChangeRequestId.ToString());
+                await cmd.ExecuteNonQueryAsync();
+            }
+            var expApprove = await service.ApproveAsync(expSub.Request.ChangeRequestId, "admin", CancellationToken.None);
+            Assert.False(expApprove.Ok);
+            Assert.Equal(AutomationErrors.Conflict, expApprove.ErrorCode);
+
+            // 4. channel.security preserves Tags.
+            using var secTarget = JsonDocument.Parse("""{"clientId":"agent","channelId":"echo"}""");
+            using var secPayload = JsonDocument.Parse("""{"channelId":"echo","endToEndEncryptionEnabled":true}""");
+            var secSub = await service.SubmitAsync("channel.security", secTarget.RootElement, secPayload.RootElement, null,
+                "device-a", Guid.NewGuid().ToString(), CancellationToken.None, "thumb-a");
+            Assert.True(secSub.Ok);
+            Assert.True((await service.ApproveAsync(secSub.Request!.ChangeRequestId, "admin", CancellationToken.None)).Ok);
+            var secExec = await service.ExecuteAsync(secSub.Request.ChangeRequestId, "admin", CancellationToken.None);
+            Assert.True(secExec.Ok);
+            Assert.Equal(["prod", "db"], runtime.Configuration.Clients["agent"].Channels.Single(c => c.ChannelId == "echo").Tags);
+
+            // 5. client.create defaults agentServerHost to DefaultAgentServerHost.
+            using var newTarget = JsonDocument.Parse("""{"clientId":"new-agent"}""");
+            using var newPayload = JsonDocument.Parse("""{"clientId":"new-agent","displayName":"New Agent"}""");
+            var newSub = await service.SubmitAsync("client.create", newTarget.RootElement, newPayload.RootElement, null,
+                "device-a", Guid.NewGuid().ToString(), CancellationToken.None, "thumb-a");
+            Assert.True(newSub.Ok);
+            Assert.True((await service.ApproveAsync(newSub.Request!.ChangeRequestId, "admin", CancellationToken.None)).Ok);
+            Assert.True((await service.ExecuteAsync(newSub.Request.ChangeRequestId, "admin", CancellationToken.None)).Ok);
+            Assert.Equal("relay.example.com", runtime.Configuration.Clients["new-agent"].AgentServerHost);
+
+            // 6. channel.delete in Applying reconciles to Applied if parent client is missing.
+            using var delTarget = JsonDocument.Parse("""{"clientId":"gone-client","channelId":"echo"}""");
+            using var delPayload = JsonDocument.Parse("""{"channelId":"echo"}""");
+            var delSub = await service.SubmitAsync("channel.delete", delTarget.RootElement, delPayload.RootElement, null,
+                "device-a", Guid.NewGuid().ToString(), CancellationToken.None, "thumb-a");
+            Assert.True(delSub.Ok);
+            Assert.True(await store.TransitionChangeAsync(delSub.Request!.ChangeRequestId, ChangeState.Approved, [ChangeState.Pending],
+                "admin", null, DateTimeOffset.UtcNow, CancellationToken.None));
+            Assert.True(await store.TransitionChangeAsync(delSub.Request.ChangeRequestId, ChangeState.Applying, [ChangeState.Approved],
+                "admin", null, DateTimeOffset.UtcNow, CancellationToken.None));
+            await service.ReconcileAsync(CancellationToken.None);
+            var delStored = await store.GetChangeAsync(delSub.Request.ChangeRequestId, CancellationToken.None);
+            Assert.Equal(ChangeState.Applied, delStored!.State);
+        }
+        finally
+        {
+            await proxy.StopAsync(CancellationToken.None);
+            proxy.Dispose();
+            SqliteConnection.ClearAllPools();
+        }
+    }
+
+    private static int FreeTcpPort()
+    {
+        var listener = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        listener.Stop();
+        return port;
+    }
 }

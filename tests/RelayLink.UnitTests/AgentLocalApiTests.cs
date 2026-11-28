@@ -63,6 +63,22 @@ public sealed class AgentLocalApiTests
                 using var foreignSession = await http.SendAsync(foreignSessionRequest, deadline.Token);
                 Assert.Equal(HttpStatusCode.Forbidden, foreignSession.StatusCode);
             }
+            using (var crossSiteFetchRequest = new HttpRequestMessage(HttpMethod.Get, "/api/v2/admin/session"))
+            {
+                crossSiteFetchRequest.Headers.TryAddWithoutValidation("Sec-Fetch-Site", "cross-site");
+                crossSiteFetchRequest.Headers.TryAddWithoutValidation("Sec-Fetch-Dest", "document");
+                using var crossSiteFetch = await http.SendAsync(crossSiteFetchRequest, deadline.Token);
+                Assert.Equal(HttpStatusCode.Forbidden, crossSiteFetch.StatusCode);
+            }
+            Assert.True(sessionJson.RootElement.TryGetProperty("expiresAtUtc", out _));
+            await Task.Delay(25, deadline.Token);
+            using (var renewedSession = await http.GetAsync("/api/v2/admin/session", deadline.Token))
+            {
+                renewedSession.EnsureSuccessStatusCode();
+                using var renewedJson = JsonDocument.Parse(await renewedSession.Content.ReadAsStringAsync(deadline.Token));
+                Assert.True(renewedJson.RootElement.GetProperty("expiresAtUtc").GetDateTimeOffset() >
+                    sessionJson.RootElement.GetProperty("expiresAtUtc").GetDateTimeOffset());
+            }
             using (var noConfirmation = await SendAsync(http, HttpMethod.Post, "/api/v2/admin/servers", origin, csrf, new { version, server = profile, confirmExistingState = false }))
             {
                 Assert.Equal(HttpStatusCode.BadRequest, noConfirmation.StatusCode);
@@ -365,6 +381,27 @@ public sealed class AgentLocalApiTests
         {
             directory.Delete(recursive: true);
         }
+    }
+
+    [Fact]
+    public void AgentConfigurationFactory_exports_client_connection_limits()
+    {
+        var server = new RelayLink.Server.Configuration.ServerConfiguration(
+            1,
+            new RelayLink.Server.Configuration.TunnelConfiguration("0.0.0.0", 7443, false, "", "", 10, 15, 45)
+            { AgentServerHost = "relay.example.com" },
+            new RelayLink.Server.Configuration.DashboardConfiguration("127.0.0.1", 18080, 5,
+                new RelayLink.Server.Configuration.DashboardAdminConfiguration("admin", "PBKDF2-SHA256$100000$AA==$AA==", 60)),
+            "clients",
+            new RelayLink.Server.Configuration.LimitsConfiguration(3000, 100, 10, 10, 20, 120, 300),
+            null);
+        var client = new RelayLink.Server.Configuration.ClientConfiguration(
+            1, "agent", "Agent", true, Convert.ToBase64String(new byte[32]), 2500, 150, []);
+        var exported = RelayLink.Server.Runtime.AgentConfigurationFactory.Create(server, client);
+        using var doc = JsonDocument.Parse(exported);
+        Assert.Equal(2500, doc.RootElement.GetProperty("maxConnections").GetInt32());
+        Assert.Equal(2500, doc.RootElement.GetProperty("servers")[0].GetProperty("maxConnections").GetInt32());
+        Assert.Equal(150, doc.RootElement.GetProperty("servers")[0].GetProperty("maxPendingConnections").GetInt32());
     }
 
     private static int GetFreePort()

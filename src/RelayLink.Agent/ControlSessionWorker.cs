@@ -66,23 +66,26 @@ public sealed class ControlSessionWorker(AgentConfiguration configuration, Agent
 
     private async Task RunSessionAsync(CancellationToken stoppingToken)
     {
+        using var handshakeTimeout = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+        handshakeTimeout.CancelAfter(TimeSpan.FromSeconds(30));
         using var tcpClient = new TcpClient();
-        await tcpClient.ConnectAsync(configuration.ServerHost, configuration.ServerPort, stoppingToken);
+        await tcpClient.ConnectAsync(configuration.ServerHost, configuration.ServerPort, handshakeTimeout.Token);
         tcpClient.NoDelay = true;
-        await using Stream tls = await CreateTransportStreamAsync(tcpClient, stoppingToken);
+        TcpKeepAlive.Enable(tcpClient.Client);
+        await using Stream tls = await CreateTransportStreamAsync(tcpClient, handshakeTimeout.Token);
 
         var reader = new FrameReader(tls);
         var writer = new FrameWriter(tls);
-        await writer.WriteAsync(new Frame(FrameType.Register, JsonProtocolSerializer.Serialize(new RegisterMessage(configuration.ClientId, configuration.Secret, GetType().Assembly.GetName().Version?.ToString() ?? "0.0.0", identity.Fingerprint))), stoppingToken);
-        var accepted = await reader.ReadAsync(ProtocolConstants.MaxControlPayloadLength, stoppingToken);
+        await writer.WriteAsync(new Frame(FrameType.Register, JsonProtocolSerializer.Serialize(new RegisterMessage(configuration.ClientId, configuration.Secret, GetType().Assembly.GetName().Version?.ToString() ?? "0.0.0", identity.Fingerprint))), handshakeTimeout.Token);
+        var accepted = await reader.ReadAsync(ProtocolConstants.MaxControlPayloadLength, handshakeTimeout.Token);
         if (accepted?.Type == FrameType.Error) throw AgentPermanentException.FromServerError(accepted, "registration");
         if (accepted?.Type != FrameType.RegisterAccepted) throw new ProtocolException("Expected RegisterAccepted.");
         var registration = JsonProtocolSerializer.Deserialize<RegisterAcceptedMessage>(accepted.Payload.Span);
         ValidateSnapshot(configuration.ClientId, registration);
         halfCloseDrainTimeout = TimeSpan.FromSeconds(registration.HalfCloseDrainTimeoutSeconds < 1 ? 300 : registration.HalfCloseDrainTimeoutSeconds);
         tcpIdleTimeout = TimeSpan.FromSeconds(Math.Max(0, registration.TcpIdleTimeoutSeconds));
-        await writer.WriteAsync(new Frame(FrameType.ConfigAck, JsonProtocolSerializer.Serialize(new ConfigAckMessage(registration.SessionId, registration.ConfigVersion))), stoppingToken);
-        var ready = await reader.ReadAsync(ProtocolConstants.MaxControlPayloadLength, stoppingToken);
+        await writer.WriteAsync(new Frame(FrameType.ConfigAck, JsonProtocolSerializer.Serialize(new ConfigAckMessage(registration.SessionId, registration.ConfigVersion))), handshakeTimeout.Token);
+        var ready = await reader.ReadAsync(ProtocolConstants.MaxControlPayloadLength, handshakeTimeout.Token);
         if (ready?.Type == FrameType.Error) throw AgentPermanentException.FromServerError(ready, "configuration acknowledgement");
         if (ready?.Type != FrameType.Ready || JsonProtocolSerializer.Deserialize<ReadyMessage>(ready.Payload.Span).SessionId != registration.SessionId) throw new ProtocolException("Expected Ready for the current session.");
 
@@ -440,19 +443,20 @@ public sealed class ControlSessionWorker(AgentConfiguration configuration, Agent
     {
         if (!configuration.UseTls) return client.GetStream();
         var stream = new SslStream(client.GetStream(), leaveInnerStreamOpen: false);
-        await stream.AuthenticateAsClientAsync(new SslClientAuthenticationOptions { TargetHost = configuration.ServerHost, EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13, CertificateRevocationCheckMode = X509RevocationMode.Online, RemoteCertificateValidationCallback = ValidateServerCertificate }, cancellationToken);
+        var chainPolicy = new X509ChainPolicy
+        {
+            TrustMode = X509ChainTrustMode.CustomRootTrust,
+            RevocationMode = X509RevocationMode.NoCheck
+        };
+        chainPolicy.CustomTrustStore.AddRange(trustedRoots!);
+        await stream.AuthenticateAsClientAsync(new SslClientAuthenticationOptions
+        {
+            TargetHost = configuration.ServerHost,
+            EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
+            CertificateRevocationCheckMode = X509RevocationMode.NoCheck,
+            CertificateChainPolicy = chainPolicy
+        }, cancellationToken);
         return stream;
-    }
-
-    private bool ValidateServerCertificate(object? sender, X509Certificate? certificate, X509Chain? chain, SslPolicyErrors errors)
-    {
-        if (certificate is null || (errors & SslPolicyErrors.RemoteCertificateNameMismatch) != 0) return false;
-        using var leaf = new X509Certificate2(certificate);
-        using var customChain = new X509Chain();
-        customChain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
-        customChain.ChainPolicy.CustomTrustStore.AddRange(trustedRoots!);
-        customChain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
-        return customChain.Build(leaf);
     }
 }
 

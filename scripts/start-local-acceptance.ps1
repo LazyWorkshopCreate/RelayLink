@@ -7,7 +7,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $runDirectory = Join-Path $repositoryRoot ('.local\local-acceptance\' + [guid]::NewGuid().ToString('N'))
-New-Item -ItemType Directory -Path (Join-Path $runDirectory 'clients') -Force | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $runDirectory 'clients'), (Join-Path $runDirectory 'agent-a'), (Join-Path $runDirectory 'agent-b') -Force | Out-Null
 $reservedPorts = [System.Collections.Generic.HashSet[int]]::new()
 function Get-FreePort {
     do {
@@ -73,8 +73,8 @@ $secretB = New-Secret
 $reconnect = @{ initialDelaySeconds = 1; maxDelaySeconds = 2; permanentErrorDelaySeconds = 2 }
 $historyPath = Join-Path $runDirectory 'traffic-history.db'
 $serverPath = Join-Path $runDirectory 'server.json'
-$agentAPath = Join-Path $runDirectory 'agent-a.json'
-$agentBPath = Join-Path $runDirectory 'agent-b.json'
+$agentAPath = Join-Path $runDirectory 'agent-a\agent.json'
+$agentBPath = Join-Path $runDirectory 'agent-b\agent.json'
 Save-Json @{
     schemaVersion = 1
     tunnel = @{ listenAddress = '127.0.0.1'; port = $controlPort; dataPort = $dataPort; tlsEnabled = $false; certificatePemPath = ''; privateKeyPemPath = ''; handshakeTimeoutSeconds = 10; heartbeatIntervalSeconds = 5; heartbeatTimeoutSeconds = 20 }
@@ -91,8 +91,20 @@ $channelsA = @(
 $channelsB = @(@{ channelId = 'gamma'; displayName = 'Gamma'; enabled = $true; listenAddress = '127.0.0.1'; listenPort = $proxyPorts[2]; targetHost = '127.0.0.1'; targetPort = $targetPorts[2]; maxConnections = 100; targetConnectTimeoutSeconds = 5 })
 Save-Json @{ schemaVersion = 1; clientId = 'accept-a'; displayName = 'Acceptance A'; enabled = $true; secret = $secretA; maxConnections = 100; maxPendingConnections = 100; channels = $channelsA; outboundMappings = @() } (Join-Path $runDirectory 'clients\accept-a.json')
 Save-Json @{ schemaVersion = 1; clientId = 'accept-b'; displayName = 'Acceptance B'; enabled = $true; secret = $secretB; maxConnections = 100; maxPendingConnections = 100; channels = $channelsB; outboundMappings = @() } (Join-Path $runDirectory 'clients\accept-b.json')
-Save-Json @{ serverHost = '127.0.0.1'; serverPort = $controlPort; dataPort = $dataPort; useTls = $false; clientId = 'accept-a'; secret = $secretA; dashboardPort = 0; reconnect = $reconnect } $agentAPath
-Save-Json @{ serverHost = '127.0.0.1'; serverPort = $controlPort; dataPort = $dataPort; useTls = $false; clientId = 'accept-b'; secret = $secretB; dashboardPort = 0; reconnect = $reconnect } $agentBPath
+Save-Json @{
+    schemaVersion = 1
+    dashboardPort = 0
+    outboundPortRangeStart = 20000
+    outboundPortRangeEnd = 59999
+    servers = @(@{ profileId = 'primary'; enabled = $true; serverHost = '127.0.0.1'; serverPort = $controlPort; dataPort = $dataPort; useTls = $false; clientId = 'accept-a'; secret = $secretA; reconnect = $reconnect })
+} $agentAPath
+Save-Json @{
+    schemaVersion = 1
+    dashboardPort = 0
+    outboundPortRangeStart = 20000
+    outboundPortRangeEnd = 59999
+    servers = @(@{ profileId = 'primary'; enabled = $true; serverHost = '127.0.0.1'; serverPort = $controlPort; dataPort = $dataPort; useTls = $false; clientId = 'accept-b'; secret = $secretB; reconnect = $reconnect })
+} $agentBPath
 
 $processes = @()
 try {

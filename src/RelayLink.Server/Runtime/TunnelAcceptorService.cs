@@ -73,11 +73,12 @@ public sealed class TunnelAcceptorService(
         var slotReleased = false;
         try
         {
+            TcpKeepAlive.Enable(client.Client);
             using (client)
-            await using (Stream stream = await CreateTransportStreamAsync(client, serverStoppingToken))
             using (var handshakeTimeout = CancellationTokenSource.CreateLinkedTokenSource(serverStoppingToken))
             {
                 handshakeTimeout.CancelAfter(TimeSpan.FromSeconds(runtime.Configuration.Server.Tunnel.HandshakeTimeoutSeconds));
+                await using Stream stream = await CreateTransportStreamAsync(client, handshakeTimeout.Token);
                 var reader = new FrameReader(stream);
                 var first = await reader.ReadAsync(ProtocolConstants.MaxInitialPayloadLength, handshakeTimeout.Token);
                 var writer = new FrameWriter(stream, protocolVersion: reader.ProtocolVersion ?? ProtocolConstants.Version);
@@ -89,6 +90,12 @@ public sealed class TunnelAcceptorService(
                 }
 
                 var register = JsonProtocolSerializer.Deserialize<RegisterMessage>(first.Payload.Span);
+                if (register is null)
+                {
+                    await RecordRejectionAsync(null, "invalid_first_frame", ErrorCode.ProtocolError, ControlRejectionReason.InvalidFirstFrame);
+                    await TryWriteErrorAsync(writer, ErrorCode.ProtocolError, handshakeTimeout.Token, ControlRejectionReason.InvalidFirstFrame);
+                    return;
+                }
                 if (!authentication.TryAuthenticate(register.ClientId, register.Secret, out var clientConfiguration, out var authenticationReason))
                 {
                     var auditReason = authenticationReason switch
@@ -149,7 +156,14 @@ public sealed class TunnelAcceptorService(
                     session.AgentVersion = register.AgentVersion;
                     session.ProtocolVersion = writer.ProtocolVersion;
                     session.AttachControlWriter(writer);
-                    var (snapshot, configVersion) = ConfigurationSnapshotFactory.Create(clientConfiguration!, runtime.Configuration, session.ProtocolVersion);
+                    if (!runtime.Configuration.Clients.TryGetValue(session.ClientId, out var currentConfig) || !currentConfig.Enabled)
+                    {
+                        await RecordRejectionAsync(register.ClientId, "client_configuration_changed", ErrorCode.AuthFailed, ControlRejectionReason.ClientConfigurationChanged);
+                        await TryWriteErrorAsync(writer, ErrorCode.AuthFailed, handshakeTimeout.Token, ControlRejectionReason.ClientConfigurationChanged);
+                        return;
+                    }
+                    clientConfiguration = currentConfig;
+                    var (snapshot, configVersion) = ConfigurationSnapshotFactory.Create(clientConfiguration, runtime.Configuration, session.ProtocolVersion);
                     await writer.WriteAsync(new Frame(FrameType.RegisterAccepted, JsonProtocolSerializer.Serialize(new RegisterAcceptedMessage(session.SessionId, configVersion, snapshot, runtime.Configuration.Server.Tunnel.HeartbeatIntervalSeconds, runtime.Configuration.Server.Tunnel.HeartbeatTimeoutSeconds)
                     {
                         HalfCloseDrainTimeoutSeconds = runtime.Configuration.Server.Limits.HalfCloseDrainTimeoutSeconds,
@@ -164,7 +178,7 @@ public sealed class TunnelAcceptorService(
                     }
 
                     var ack = JsonProtocolSerializer.Deserialize<ConfigAckMessage>(acknowledgement.Payload.Span);
-                    if (ack.SessionId != session.SessionId || ack.ConfigVersion is null || ack.ConfigVersion.Length != 64 || !ack.ConfigVersion.All(Uri.IsHexDigit) ||
+                    if (ack is null || ack.SessionId != session.SessionId || ack.ConfigVersion is null || ack.ConfigVersion.Length != 64 || !ack.ConfigVersion.All(Uri.IsHexDigit) ||
                         !CryptographicOperations.FixedTimeEquals(Convert.FromHexString(ack.ConfigVersion), Convert.FromHexString(configVersion)))
                     {
                         await RecordRejectionAsync(register.ClientId, "configuration_mismatch", ErrorCode.ConfigurationMismatch, ControlRejectionReason.ConfigurationMismatch);
@@ -186,6 +200,16 @@ public sealed class TunnelAcceptorService(
                     sessionReadyAudited = true;
                     await writer.WriteAsync(new Frame(FrameType.Ready, JsonProtocolSerializer.Serialize(new ReadyMessage(session.SessionId))), serverStoppingToken);
                     session.MarkReady();
+                    if (!runtime.Configuration.Clients.TryGetValue(session.ClientId, out var postReadyClient) || !postReadyClient.Enabled)
+                    {
+                        session.Close();
+                        return;
+                    }
+                    var (postSnapshot, postVersion) = ConfigurationSnapshotFactory.Create(postReadyClient, runtime.Configuration, session.ProtocolVersion);
+                    if (!string.Equals(postVersion, configVersion, StringComparison.Ordinal))
+                    {
+                        await session.SendConfigurationUpdateAsync(postSnapshot, postVersion, serverStoppingToken);
+                    }
                     logger.LogInformation("Client {ClientId} session {SessionId} is online.", session.ClientId, session.SessionId);
                     await RunControlSessionAsync(reader, writer, session, serverStoppingToken);
                 }
@@ -207,7 +231,7 @@ public sealed class TunnelAcceptorService(
         catch (OperationCanceledException) when (serverStoppingToken.IsCancellationRequested)
         {
         }
-        catch (Exception exception) when (exception is IOException or AuthenticationException or ProtocolException or OperationCanceledException)
+        catch (Exception exception) when (exception is IOException or AuthenticationException or ProtocolException or OperationCanceledException or TimeoutException)
         {
             logger.LogWarning(exception, "Tunnel connection closed before or during session establishment.");
         }
@@ -254,8 +278,8 @@ public sealed class TunnelAcceptorService(
         finally
         {
             sessionCancellation.Cancel();
-            try { await heartbeatTask; } catch (OperationCanceledException) { }
-            try { await readTask; } catch (OperationCanceledException) { }
+            try { await heartbeatTask; } catch (Exception) { }
+            try { await readTask; } catch (Exception) { }
         }
     }
 
@@ -284,14 +308,16 @@ public sealed class TunnelAcceptorService(
             if (frame is null) return;
             if (frame.Type == FrameType.Pong)
             {
-                var pong = JsonProtocolSerializer.Deserialize<PongMessage>(frame.Payload.Span);
+                var pong = JsonProtocolSerializer.Deserialize<PongMessage>(frame.Payload.Span)
+                    ?? throw new ProtocolException("Invalid Pong frame.");
                 session.TryMarkPong(pong.Sequence, Stopwatch.GetTimestamp());
                 continue;
             }
 
             if (frame.Type == FrameType.OpenFailed)
             {
-                var failed = JsonProtocolSerializer.Deserialize<OpenFailedMessage>(frame.Payload.Span);
+                var failed = JsonProtocolSerializer.Deserialize<OpenFailedMessage>(frame.Payload.Span)
+                    ?? throw new ProtocolException("Invalid OpenFailed frame.");
                 if (failed.SessionId != session.SessionId) throw new ProtocolException("OpenFailed session mismatch.");
                 if (pendingConnections.TryGet(failed.ConnectionId, out var pending) && pending is not null)
                 {
@@ -304,11 +330,13 @@ public sealed class TunnelAcceptorService(
             if (frame.Type == FrameType.HttpStatus)
             {
                 var http = JsonProtocolSerializer.Deserialize<HttpStatusMessage>(frame.Payload.Span);
-                if (session.ProtocolVersion < 5 || http.SessionId != session.SessionId || http.ConfigVersion != session.ConfigVersion ||
+                if (http is null || session.ProtocolVersion < 5 || http.SessionId != session.SessionId || http.ConfigVersion != session.ConfigVersion ||
                     http.Channels is null || http.Channels.Count > runtime.Configuration.Server.Limits.MaxChannelsPerClient ||
+                    http.Channels.Any(item => item is null) ||
                     http.Channels.Select(item => item.ChannelId).Distinct().Count() != http.Channels.Count ||
                     http.Channels.Any(item => item.State is not ("ready" or "restart_required" or "resource_unavailable") ||
-                        !runtime.Configuration.Clients[session.ClientId].Channels.Any(channel => channel.ChannelId == item.ChannelId && channel.ApplicationProtocol == "http" &&
+                        !runtime.Configuration.Clients.TryGetValue(session.ClientId, out var httpClient) ||
+                        !httpClient.Channels.Any(channel => channel.ChannelId == item.ChannelId && channel.ApplicationProtocol == "http" &&
                             item.PolicyHash == HttpProxyPolicy.Hash(ConfigurationSnapshotFactory.ToHttpSnapshot(channel)))))
                     throw new ProtocolException("Invalid HTTP status.");
                 session.SetHttpStates(http.Channels);
@@ -317,7 +345,7 @@ public sealed class TunnelAcceptorService(
             if (frame.Type == FrameType.HttpIngressReady)
             {
                 var ready = JsonProtocolSerializer.Deserialize<HttpIngressReadyMessage>(frame.Payload.Span);
-                if (session.ProtocolVersion < 5 || !pendingConnections.TryGet(ready.ConnectionId, out var pending) || pending is null ||
+                if (ready is null || session.ProtocolVersion < 5 || !pendingConnections.TryGet(ready.ConnectionId, out var pending) || pending is null ||
                     pending.SessionId != session.SessionId || pending.Channel.ApplicationProtocol != "http" || !session.IsHttpReady(pending.Channel) || !pending.TrySetTargetReady(0))
                     throw new ProtocolException("HTTP readiness did not match a bound connection.");
                 metrics.For(session.ClientId, pending.Channel.ChannelId).MarkHttpIngressReady();
@@ -326,7 +354,7 @@ public sealed class TunnelAcceptorService(
             if (frame.Type == FrameType.TargetReady)
             {
                 var ready = JsonProtocolSerializer.Deserialize<TargetReadyMessage>(frame.Payload.Span);
-                if (!pendingConnections.TryGet(ready.ConnectionId, out var pending) || pending is null ||
+                if (ready is null || !pendingConnections.TryGet(ready.ConnectionId, out var pending) || pending is null ||
                     pending.SessionId != session.SessionId || pending.Channel.ApplicationProtocol == "http" || !pending.TrySetTargetReady(ready.TargetConnectDurationMs))
                     throw new ProtocolException("TargetReady did not match a bound connection in this control session.");
                 metrics.For(session.ClientId, pending.Channel.ChannelId).MarkTargetSuccess();
@@ -336,7 +364,7 @@ public sealed class TunnelAcceptorService(
             if (frame.Type == FrameType.ConfigAck)
             {
                 var acknowledgement = JsonProtocolSerializer.Deserialize<ConfigAckMessage>(frame.Payload.Span);
-                if (acknowledgement.SessionId != session.SessionId) throw new ProtocolException("Configuration acknowledgement session mismatch.");
+                if (acknowledgement is null || acknowledgement.SessionId != session.SessionId) throw new ProtocolException("Configuration acknowledgement session mismatch.");
                 session.ConfirmConfiguration(acknowledgement.ConfigVersion);
                 continue;
             }
@@ -344,8 +372,9 @@ public sealed class TunnelAcceptorService(
             if (frame.Type == FrameType.PeerMappingStatus)
             {
                 var status = JsonProtocolSerializer.Deserialize<PeerMappingStatusMessage>(frame.Payload.Span);
-                if (status.SessionId != session.SessionId || !string.Equals(status.ConfigVersion, session.ConfigVersion, StringComparison.Ordinal) ||
+                if (status is null || status.SessionId != session.SessionId || !string.Equals(status.ConfigVersion, session.ConfigVersion, StringComparison.Ordinal) ||
                     status.Addresses is null || status.Addresses.Count > runtime.Configuration.Server.Limits.MaxChannelsPerClient ||
+                    status.Addresses.Any(address => address is null) ||
                     !runtime.Configuration.Clients.TryGetValue(session.ClientId, out var client) ||
                     status.Addresses.Any(address => address.LocalAddress != "127.0.0.1" || address.LocalPort is < 1 or > 65535 ||
                         !client.OutboundMappings.Any(mapping => mapping.Enabled && mapping.MappingId == address.MappingId)) ||
@@ -358,7 +387,9 @@ public sealed class TunnelAcceptorService(
 
             if (frame.Type == FrameType.PeerOpenRequest)
             {
-                await peerRelays.RequestAsync(session, JsonProtocolSerializer.Deserialize<PeerOpenRequestMessage>(frame.Payload.Span), cancellationToken);
+                var peerRequest = JsonProtocolSerializer.Deserialize<PeerOpenRequestMessage>(frame.Payload.Span)
+                    ?? throw new ProtocolException("Invalid PeerOpenRequest frame.");
+                await peerRelays.RequestAsync(session, peerRequest, cancellationToken);
                 continue;
             }
 

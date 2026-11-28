@@ -18,7 +18,7 @@ public sealed class TrafficHistoryService(ServerRuntime runtime, MetricsRegistry
         var settings = Settings;
         if (settings is null) return;
         await EnsureInitializedAsync(settings, stoppingToken);
-        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(Math.Min(settings.SampleIntervalSeconds, 5)));
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(Math.Clamp(settings.SampleIntervalSeconds, 1, 3600)));
         while (await timer.WaitForNextTickAsync(stoppingToken))
         {
             try { await RecordAsync(stoppingToken); }
@@ -74,9 +74,10 @@ public sealed class TrafficHistoryService(ServerRuntime runtime, MetricsRegistry
         var settings = Settings;
         if (settings is null) return [];
         await EnsureInitializedAsync(settings, cancellationToken);
-        await using var connection = await OpenAsync(settings, cancellationToken);
+        await using var connection = await OpenReadOnlyAsync(settings, cancellationToken);
         await using var command = connection.CreateCommand();
-        var bucketSeconds = hours <= 24 ? 60 : hours <= 168 ? 900 : 3600;
+        var bucketSeconds = hours <= 24 ? 60L : hours <= 168 ? 900L : 3600L;
+        var since = (DateTimeOffset.UtcNow.AddHours(-hours).ToUnixTimeSeconds() / bucketSeconds) * bucketSeconds;
         command.CommandText = """
             SELECT (minute_utc / $bucket) * $bucket, client_id, channel_id,
                    SUM(direct_to_target + peer_to_target), SUM(direct_to_caller + peer_to_caller),
@@ -86,9 +87,10 @@ public sealed class TrafficHistoryService(ServerRuntime runtime, MetricsRegistry
               AND ($channel IS NULL OR channel_id = $channel)
             GROUP BY 1, client_id, channel_id
             ORDER BY 1, client_id, channel_id
+            LIMIT 50000
             """;
         command.Parameters.AddWithValue("$bucket", bucketSeconds);
-        command.Parameters.AddWithValue("$since", DateTimeOffset.UtcNow.AddHours(-hours).ToUnixTimeSeconds() / 60 * 60);
+        command.Parameters.AddWithValue("$since", since);
         command.Parameters.AddWithValue("$client", (object?)clientId ?? DBNull.Value);
         command.Parameters.AddWithValue("$channel", (object?)channelId ?? DBNull.Value);
         var samples = new List<TrafficHistorySample>();
@@ -116,6 +118,10 @@ public sealed class TrafficHistoryService(ServerRuntime runtime, MetricsRegistry
     private async Task InitializeAsync(SqliteConnection connection, HistoryConfiguration settings, CancellationToken cancellationToken)
     {
         if (initialized) return;
+        await using var pragma = connection.CreateCommand();
+        pragma.CommandText = "PRAGMA journal_mode=WAL";
+        await pragma.ExecuteNonQueryAsync(cancellationToken);
+        SecretFilePermissions.RestrictDatabase(DatabasePath(settings.FilePath));
         await using var schema = connection.CreateCommand();
         schema.CommandText = """
             CREATE TABLE IF NOT EXISTS traffic_minute (
@@ -207,10 +213,22 @@ public sealed class TrafficHistoryService(ServerRuntime runtime, MetricsRegistry
         {
             await connection.OpenAsync(cancellationToken);
             SecretFilePermissions.RestrictDatabase(path);
-            await using var pragma = connection.CreateCommand();
-            pragma.CommandText = "PRAGMA journal_mode=WAL";
-            await pragma.ExecuteNonQueryAsync(cancellationToken);
-            SecretFilePermissions.RestrictDatabase(path);
+            return connection;
+        }
+        catch
+        {
+            await connection.DisposeAsync();
+            throw;
+        }
+    }
+
+    private static async Task<SqliteConnection> OpenReadOnlyAsync(HistoryConfiguration settings, CancellationToken cancellationToken)
+    {
+        var path = SecretFilePermissions.ResolveDatabaseFile(DatabasePath(settings.FilePath));
+        var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = path, Mode = SqliteOpenMode.ReadOnly, DefaultTimeout = 10 }.ToString());
+        try
+        {
+            await connection.OpenAsync(cancellationToken);
             return connection;
         }
         catch

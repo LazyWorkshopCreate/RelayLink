@@ -12,7 +12,7 @@
 采用 **.NET 10 / C# + Socket + 可选 SslStream + ASP.NET Core** 实现专用反向 TCP / UDP 代理。控制连接默认启用 TLS；普通数据连接为独立端口上的原始 TCP，安全取舍见 [ADR-0008](../adr/0008-separated-control-and-raw-data.md)。
 
 - Linux 或 Windows 服务端分别提供控制端口与数据端口；只有已认证控制会话能授权建立数据连接。
-- 当前 Windows/Linux/macOS Agent 按 `servers[]` 配置项分别保持控制连接；每条业务 TCP 连接按需建立一条独立数据 TCP 连接。多服务端 Agent 的拟议扩展见[多服务端技术设计](multi-server-agent.md)，各服务端分别保持自己的控制会话与数据连接。
+- 当前 Windows/Linux/macOS Agent 已实现多服务端 `servers[]` 配置（[多服务端技术设计](multi-server-agent.md)），各服务端分别保持自己的控制会话、数据连接、独立状态目录与身份文件。
 - 通道及每客户端密钥保存在服务端每客户端一个 JSON 文件中；启动加载、认证后及管理保存后下发快照。
 - Agent 注册时上报本机端到端证书指纹，服务端首次认证并确认配置后固定到对应客户端 JSON；授权通道不保存指纹，访问映射引用目标客户端固定身份。后续变化拒绝自动覆盖；旧通道级字段不兼容，加载时拒绝，见 [ADR-0011](../adr/0011-client-level-e2e-identity.md)。
 - 普通代理在数据连接绑定、目标就绪后直接双向复制 TCP 字节；互访默认使用端到端 TLS，也可按目标通道关闭后在访问证明成功时直接复制，并分别保留半关闭语义。不实现多业务连接在同一 TCP 上的复用。
@@ -75,14 +75,18 @@ flowchart LR
 ## 4. 工程结构与职责
 
 ```text
-RelayLink.sln
+RelayLink.slnx
   src/RelayLink.Protocol/         帧编解码、DTO、错误码、协议版本
   src/RelayLink.Transport/        TLS、帧读写、双向转发、超时和计数
   src/RelayLink.Logging/          Serilog 文件日志、级别分流与保留策略
-  src/RelayLink.Server/           ASP.NET Core Host、后台监听与仪表盘
-  src/RelayLink.Agent/            Generic Host、Windows Service/systemd/launchd、目标连接
-  tests/RelayLink.UnitTests/      状态机、配置、令牌及帧边界
-  tests/RelayLink.IntegrationTests/ 真实 TCP/TLS、故障及 SQL 接入
+  src/RelayLink.Server/                ASP.NET Core Host、后台监听、仪表盘与回环自动化面
+  src/RelayLink.Agent/                 Generic Host、Windows Service/systemd/launchd、目标连接与 YARP HTTP 宿主
+  src/RelayLink.Agent.ConfigMigrator/  Agent 启动前配置转换器
+  src/RelayLink.AutomationClient/      CLI 共用的自动化 HTTP/ECDSA 证明客户端
+  src/RelayLink.Cli/                   运维命令行工具（relaylink）
+  src/RelayLink.Sdk/                   C#/.NET 多目标数据面 SDK
+  tests/RelayLink.UnitTests/           状态机、配置、令牌、帧边界与 SDK 测试
+  tests/RelayLink.IntegrationTests/    真实 TCP/TLS、HTTP、CLI、故障及 SQL 接入测试
 ```
 
 | 服务端组件 | 职责 |

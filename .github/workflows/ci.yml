@@ -16,7 +16,7 @@ concurrency:
 jobs:
   website:
     name: Verify website
-    if: github.repository_owner == 'LazyWorkshopCreate'
+    if: ${{ !github.event.repository.private }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -32,7 +32,7 @@ jobs:
 
   verify:
     name: Verify (${{ matrix.os }})
-    if: github.repository_owner == 'LazyWorkshopCreate'
+    if: ${{ !github.event.repository.private }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
@@ -66,22 +66,53 @@ jobs:
         run: pnpm --dir src/RelayLink.AdminWeb typecheck
       - name: Test frontend
         run: pnpm --dir src/RelayLink.AdminWeb test
+      - name: Build frontend
+        run: pnpm --dir src/RelayLink.AdminWeb build
       - name: Check frontend formatting
         run: pnpm --dir src/RelayLink.AdminWeb format:check
       - name: Check Agent frontend
+        shell: bash
         run: pnpm --dir src/RelayLink.AgentWeb build && pnpm --dir src/RelayLink.AgentWeb format:check && pnpm --dir src/RelayLink.AgentWeb test
+      - name: Verify Skill wrapper syntax
+        run: node --check skills/relaylink-admin/scripts/relaylink.mjs
+      - name: Install TypeScript SDK dependencies
+        run: npm --prefix sdk/typescript ci
+      - name: Verify TypeScript SDK
+        run: npm --prefix sdk/typescript test
+      - name: Verify Python SDK
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            python -m unittest discover -s sdk/python/tests -v
+          else
+            python3 -m unittest discover -s sdk/python/tests -v
+          fi
+      - name: Verify Go SDK
+        shell: bash
+        run: (cd sdk/go && go vet ./... && go test -v ./...)
+      - name: Verify Rust SDK
+        shell: bash
+        run: cargo test --manifest-path sdk/rust/Cargo.toml
+      - name: Verify Java SDK
+        shell: bash
+        run: |
+          jtmp="$(mktemp -d)"
+          trap 'rm -rf "$jtmp"' EXIT
+          javac -encoding UTF-8 -d "$jtmp" sdk/java/src/main/java/com/relaylink/sdk/*.java sdk/java/src/test/java/com/relaylink/sdk/ConformanceRunner.java
+          java -cp "$jtmp" com.relaylink.sdk.ConformanceRunner
       - name: Restore .NET projects
         run: dotnet restore RelayLink.slnx --configfile NuGet.Config
+      - name: Build multi-target .NET SDK
+        run: dotnet build src/RelayLink.Sdk/RelayLink.Sdk.csproj --configuration Release --no-restore
       - name: Run .NET unit tests
-        shell: bash
-        run: bash .github/scripts/run-with-retry.sh 4 dotnet test tests/RelayLink.UnitTests/RelayLink.UnitTests.csproj --configuration Release --no-restore -p:SkipAdminWebBuild=true
+        run: dotnet test tests/RelayLink.UnitTests/RelayLink.UnitTests.csproj --configuration Release --no-restore -p:SkipAdminWebBuild=true
       - name: Run .NET integration tests (including peer TLS tests)
         shell: bash
         run: bash .github/scripts/run-with-retry.sh 2 dotnet test tests/RelayLink.IntegrationTests/RelayLink.IntegrationTests.csproj --configuration Release --no-restore -p:EnablePeerTlsTests=true -p:SkipAdminWebBuild=true
 
   verify-macos-agent:
     name: Verify macOS Agent (${{ matrix.architecture }})
-    if: github.repository_owner == 'LazyWorkshopCreate'
+    if: ${{ !github.event.repository.private }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     strategy:

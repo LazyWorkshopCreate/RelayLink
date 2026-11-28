@@ -17,6 +17,7 @@ public static class ChannelPortSuggestion
             configuration.Server.Tunnel.EffectiveDataPort,
             configuration.Server.Dashboard.Port
         };
+        if (configuration.Server.Automation is { } automation) reserved.Add(automation.Port);
         if (transportProtocol == "udp") reserved.Clear();
         foreach (var channel in configuration.Clients.Values.SelectMany(client => client.Channels))
         {

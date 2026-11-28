@@ -55,38 +55,58 @@ try
     builder.Logging.ClearProviders();
     builder.Services.AddSerilog(logger, dispose: false);
     builder.Services.Configure<HostOptions>(options => options.ShutdownTimeout = TimeSpan.FromSeconds(40));
+
+    // 自动化入口：提前加载并校验 TLS 证书与有效期。证书缺失、权限拒绝或过期时失败关闭。
+    X509Certificate2? automationCertificate = null;
+    if (loaded.Server.Automation is { Enabled: true } automationConfig)
+    {
+        try
+        {
+            using var pem = X509Certificate2.CreateFromPemFile(
+                automationConfig.ResolvedCertificatePath!, automationConfig.ResolvedPrivateKeyPath!);
+            var imported = X509CertificateLoader.LoadPkcs12(
+                pem.Export(X509ContentType.Pfx), password: null, keyStorageFlags: X509KeyStorageFlags.Exportable);
+            try
+            {
+                if (!imported.HasPrivateKey)
+                    throw new CryptographicException("Certificate did not load a private key.");
+                var nowUtc = DateTimeOffset.UtcNow;
+                var notBefore = new DateTimeOffset(imported.NotBefore.ToUniversalTime(), TimeSpan.Zero);
+                var notAfter = new DateTimeOffset(imported.NotAfter.ToUniversalTime(), TimeSpan.Zero);
+                if (nowUtc < notBefore || nowUtc > notAfter)
+                    throw new CryptographicException($"Automation certificate is outside its validity window ({notBefore:u} to {notAfter:u}).");
+                if (notAfter - nowUtc < TimeSpan.FromDays(30))
+                {
+                    logger.Warning("SECURITY: automation certificate expires in less than 30 days ({NotAfter:u}).", notAfter);
+                    Console.Error.WriteLine($"SECURITY: automation certificate expires in less than 30 days ({notAfter:u}).");
+                }
+                automationCertificate = imported;
+            }
+            catch
+            {
+                imported.Dispose();
+                throw;
+            }
+        }
+        catch (Exception exception) when (exception is CryptographicException or IOException or ArgumentException or UnauthorizedAccessException or System.Security.SecurityException)
+        {
+            logger!.Error("SECURITY: automation endpoint is disabled because its certificate could not be loaded: {Reason}", exception.Message);
+            Console.Error.WriteLine($"SECURITY: automation endpoint disabled: {exception.Message}");
+            automationCertificate?.Dispose();
+            automationCertificate = null;
+        }
+    }
+    using var ownedAutomationCertificate = automationCertificate;
+    var automationListenerActive = ownedAutomationCertificate is not null;
+    var automationPort = automationListenerActive ? loaded.Server.Automation!.Port : 0;
+
     builder.WebHost.ConfigureKestrel(kestrel =>
     {
         kestrel.Limits.MaxRequestBodySize = 1024 * 1024;
         kestrel.Listen(IPAddress.Parse(loaded.Server.Dashboard.ListenAddress), loaded.Server.Dashboard.Port);
-        // 自动化入口：只绑 loopback、只提供 TLS。证书缺失时失败关闭，不阻止其余功能启动。
-        if (loaded.Server.Automation is { Enabled: true } automation)
+        if (automationListenerActive)
         {
-            X509Certificate2? automationCertificate = null;
-            try
-            {
-                // CreateFromPemFile 在 Windows 上返回的证书带有「临时密钥」标记，
-                // Kestrel 用它做 TLS 握手会失败（客户端收到 EOF）。必须再导出为 PFX
-                // 并重新导入，才能让 Schannel 取得可用私钥句柄。
-                using var pem = X509Certificate2.CreateFromPemFile(
-                    automation.ResolvedCertificatePath!, automation.ResolvedPrivateKeyPath!);
-                automationCertificate = X509CertificateLoader.LoadPkcs12(
-                    pem.Export(X509ContentType.Pfx), password: null, keyStorageFlags: X509KeyStorageFlags.Exportable);
-                if (!automationCertificate.HasPrivateKey)
-                    throw new CryptographicException("Certificate did not load a private key.");
-            }
-            catch (Exception exception) when (exception is CryptographicException or IOException or ArgumentException)
-            {
-                logger!.Error("SECURITY: automation endpoint is disabled because its certificate could not be loaded: {Reason}", exception.Message);
-                Console.Error.WriteLine($"SECURITY: automation endpoint disabled: {exception.Message}");
-                automationCertificate?.Dispose();
-                automationCertificate = null;
-            }
-
-            if (automationCertificate is not null)
-            {
-                kestrel.Listen(IPAddress.Loopback, automation.Port, listen => listen.UseHttps(automationCertificate));
-            }
+            kestrel.Listen(IPAddress.Loopback, automationPort, listen => listen.UseHttps(ownedAutomationCertificate!));
         }
     });
     builder.Services.AddSingleton(loaded);
@@ -114,6 +134,8 @@ try
     builder.Services.AddSingleton<AutomationChangeService>();
     builder.Services.AddSingleton<IdempotencyCache>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<AuditService>());
+    if (automationListenerActive)
+        builder.Services.AddHostedService<AutomationStartupReconcileService>();
     builder.Services.AddHostedService<TunnelAcceptorService>();
     builder.Services.AddHostedService<DataAcceptorService>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<ProxyListenerService>());
@@ -122,6 +144,19 @@ try
     var app = builder.Build();
     app.Use(async (context, next) =>
     {
+        var isAutomationPath = context.Request.Path.StartsWithSegments("/api/v1/automation", StringComparison.OrdinalIgnoreCase);
+        var onAutomationPort = automationListenerActive && context.Connection.LocalPort == automationPort;
+        if (onAutomationPort && (!context.Request.IsHttps || !isAutomationPath))
+        {
+            context.Response.StatusCode = StatusCodes.Status404NotFound;
+            return;
+        }
+        if (isAutomationPath && (!automationListenerActive || !context.Request.IsHttps || context.Connection.LocalPort != automationPort))
+        {
+            context.Response.StatusCode = StatusCodes.Status404NotFound;
+            return;
+        }
+
         context.Response.Headers.ContentSecurityPolicy = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'";
         context.Response.Headers.XContentTypeOptions = "nosniff";
         context.Response.Headers.XFrameOptions = "DENY";
@@ -135,22 +170,10 @@ try
     app.UseDefaultFiles();
     app.UseStaticFiles();
 
-    // 自动化端点只在显式启用时注册；未启用时这些路由在进程内不存在。
-    if (loaded.Server.Automation is { Enabled: true })
+    // 自动化端点只在证书有效且监听启用时注册；证书失效时整体 fail-closed。
+    if (automationListenerActive)
     {
         AutomationEndpoints.Map(app);
-        // 启动对账：applying 状态的变更申请按 (type,target) 复查后落地或回退。
-        _ = Task.Run(async () =>
-        {
-            try
-            {
-                await app.Services.GetRequiredService<AutomationChangeService>().ReconcileAsync(CancellationToken.None);
-            }
-            catch (Exception exception)
-            {
-                logger?.Error(exception, "Automation change reconciliation failed.");
-            }
-        });
     }
 
     app.MapGet("/health/live", () => Results.Ok(new { status = "live" }));
@@ -159,9 +182,10 @@ try
         : Results.StatusCode(StatusCodes.Status503ServiceUnavailable));
     app.MapGet("/api/v1/admin/session", (HttpRequest request, AdminSessionService sessions) =>
     {
+        int? automationSessionLifetimeMinutes = automationListenerActive ? loaded.Server.Automation!.SessionLifetimeMinutes : null;
         return sessions.TryAuthorize(request, requireCsrf: false, out var session)
-            ? Results.Ok(new { authenticated = true, csrfToken = session!.CsrfToken, expiresAtUtc = session.ExpiresAtUtc })
-            : Results.Ok(new { authenticated = false });
+            ? Results.Ok(new { authenticated = true, csrfToken = session!.CsrfToken, expiresAtUtc = session.ExpiresAtUtc, automationEnabled = automationListenerActive, automationSessionLifetimeMinutes })
+            : Results.Ok(new { authenticated = false, automationEnabled = automationListenerActive, automationSessionLifetimeMinutes });
     });
     app.MapGet("/api/v1/admin/agent-defaults", (HttpRequest request, AdminSessionService sessions, ServerRuntime runtime) =>
     {
@@ -239,15 +263,14 @@ try
         catch (AuditUnavailableException) { return Results.Problem("Audit storage is unavailable.", statusCode: 503); }
         sessions.CommitLogin(session!);
         response.Cookies.Append(AdminSessionService.CookieName, session!.Id, AdminSessionService.CreateCookieOptions(request.IsHttps, session.ExpiresAtUtc - DateTimeOffset.UtcNow));
-        return Results.Ok(new { authenticated = true, csrfToken = session.CsrfToken, expiresAtUtc = session.ExpiresAtUtc });
+        int? automationSessionLifetimeMinutes = automationListenerActive ? loaded.Server.Automation!.SessionLifetimeMinutes : null;
+        return Results.Ok(new { authenticated = true, csrfToken = session.CsrfToken, expiresAtUtc = session.ExpiresAtUtc, automationEnabled = automationListenerActive, automationSessionLifetimeMinutes });
     });
     app.MapDelete("/api/v1/admin/session", async (HttpRequest request, HttpResponse response, AdminSessionService sessions, AuditService audit, CancellationToken cancellationToken) =>
     {
-        if (sessions.TryAuthorize(request, requireCsrf: false, out _))
-        {
-            try { await audit.RecordAsync(new AuditEvent("admin_logout", "success") { RemoteIp = request.HttpContext.Connection.RemoteIpAddress?.ToString() }, cancellationToken); }
-            catch (AuditUnavailableException) { /* AuditService logged the fault; logout still revokes the session. */ }
-        }
+        if (!sessions.TryAuthorize(request, requireCsrf: true, out _)) return Results.Unauthorized();
+        try { await audit.RecordAsync(new AuditEvent("admin_logout", "success") { RemoteIp = request.HttpContext.Connection.RemoteIpAddress?.ToString() }, cancellationToken); }
+        catch (AuditUnavailableException) { /* AuditService logged the fault; logout still revokes the session. */ }
         sessions.Logout(request);
         response.Cookies.Delete(AdminSessionService.CookieName, AdminSessionService.CreateCookieOptions(request.IsHttps));
         return Results.NoContent();
@@ -287,8 +310,8 @@ try
         halfCloseDrainTimeoutSeconds = runtime.Configuration.Server.Limits.HalfCloseDrainTimeoutSeconds
         });
     });
-    app.MapGet("/api/v1/dashboard/snapshot", (HttpRequest request, ServerRuntime runtime, MetricsRegistry metrics) =>
-        GetDashboardSnapshot(request, runtime, metrics));
+    app.MapGet("/api/v1/dashboard/snapshot", (HttpRequest request, ServerRuntime runtime, MetricsRegistry metrics, ProxyListenerService proxy) =>
+        GetDashboardSnapshot(request, runtime, metrics, proxy));
     app.MapGet("/api/v1/clients", (HttpRequest request, ServerRuntime runtime) =>
     {
         var query = request.Query["query"].ToString();
@@ -312,7 +335,7 @@ try
             .ToArray();
         return Results.Ok(new { snapshotTimeUtc = DateTimeOffset.UtcNow, page, pageSize, total = matches.Length, clients });
     });
-    app.MapGet("/api/v1/clients/{id}/channels", (string id, ServerRuntime runtime, MetricsRegistry metrics) =>
+    app.MapGet("/api/v1/clients/{id}/channels", (string id, ServerRuntime runtime, MetricsRegistry metrics, ProxyListenerService proxy) =>
     {
         if (!runtime.Configuration.Clients.TryGetValue(id, out var client)) return Results.NotFound();
         var online = runtime.Sessions.TryGet(id, out var channelSession);
@@ -322,7 +345,7 @@ try
             channels = client.Channels.Select(channel =>
             {
                 var metric = metrics.For(client.ClientId, channel.ChannelId).Snapshot();
-                return new { channelId = channel.ChannelId, displayName = channel.DisplayName, tags = channel.Tags, listenAddress = channel.ListenAddress, listenPort = channel.ListenPort, securityGroupId = channel.SecurityGroupId, targetHost = channel.TargetHost, targetPort = channel.TargetPort, enabled = channel.Enabled, authorizedClientsOnly = channel.AuthorizedClientsOnly, endToEndEncryptionEnabled = channel.EndToEndEncryptionEnabled, maxConnections = channel.MaxConnections, targetConnectTimeoutSeconds = channel.TargetConnectTimeoutSeconds, applicationProtocol = channel.ApplicationProtocol, httpState = channelSession?.HttpStates.FirstOrDefault(state => state.ChannelId == channel.ChannelId)?.State, entryScheme = channel.Http is null ? null : channel.AuthorizedClientsOnly ? channel.Http.PeerEntryScheme : channel.Http.PublicEntryScheme, transportProtocol = channel.TransportProtocol, udpIdleTimeoutSeconds = channel.UdpIdleTimeoutSeconds, listenerState = channel.AuthorizedClientsOnly ? "peer-only" : channel.Enabled ? "listening" : "stopped", available = ChannelAvailability.IsPublicChannelAvailable(channel, channelSession), pendingConnections = channel.AuthorizedClientsOnly ? metric.PeerPendingConnections : metric.PendingConnections, activeConnections = channel.AuthorizedClientsOnly ? metric.PeerActiveConnections : metric.ActiveConnections, acceptedTotal = channel.AuthorizedClientsOnly ? metric.PeerAcceptedTotal : metric.AcceptedTotal, openedTotal = channel.AuthorizedClientsOnly ? metric.PeerOpenedTotal : metric.OpenedTotal, openFailedTotal = channel.AuthorizedClientsOnly ? metric.PeerOpenFailedTotal : metric.OpenFailedTotal, metric.NormalClosedTotal, metric.AbortedTotal, metric.BytesToTarget, metric.BytesToCaller, metric.PeerCiphertextToTarget, metric.PeerCiphertextToCaller, udpDroppedTotal = metric.UdpDroppedTotal, targetLastResult = metric.TargetLastResult?.Result, targetLastResultTimeUtc = metric.TargetLastResult?.TimeUtc };
+                return new { channelId = channel.ChannelId, displayName = channel.DisplayName, tags = channel.Tags, listenAddress = channel.ListenAddress, listenPort = channel.ListenPort, securityGroupId = channel.SecurityGroupId, targetHost = channel.TargetHost, targetPort = channel.TargetPort, enabled = channel.Enabled, authorizedClientsOnly = channel.AuthorizedClientsOnly, endToEndEncryptionEnabled = channel.EndToEndEncryptionEnabled, maxConnections = channel.MaxConnections, targetConnectTimeoutSeconds = channel.TargetConnectTimeoutSeconds, applicationProtocol = channel.ApplicationProtocol, httpState = channelSession?.HttpStates.FirstOrDefault(state => state.ChannelId == channel.ChannelId)?.State, entryScheme = channel.Http is null ? null : channel.AuthorizedClientsOnly ? channel.Http.PeerEntryScheme : channel.Http.PublicEntryScheme, transportProtocol = channel.TransportProtocol, udpIdleTimeoutSeconds = channel.UdpIdleTimeoutSeconds, listenerState = proxy.GetListenerState(client.ClientId, channel), available = ChannelAvailability.IsPublicChannelAvailable(channel, channelSession), pendingConnections = channel.AuthorizedClientsOnly ? metric.PeerPendingConnections : metric.PendingConnections, activeConnections = channel.AuthorizedClientsOnly ? metric.PeerActiveConnections : metric.ActiveConnections, acceptedTotal = channel.AuthorizedClientsOnly ? metric.PeerAcceptedTotal : metric.AcceptedTotal, openedTotal = channel.AuthorizedClientsOnly ? metric.PeerOpenedTotal : metric.OpenedTotal, openFailedTotal = channel.AuthorizedClientsOnly ? metric.PeerOpenFailedTotal : metric.OpenFailedTotal, metric.NormalClosedTotal, metric.AbortedTotal, metric.BytesToTarget, metric.BytesToCaller, metric.PeerCiphertextToTarget, metric.PeerCiphertextToCaller, udpDroppedTotal = metric.UdpDroppedTotal, targetLastResult = metric.TargetLastResult?.Result, targetLastResultTimeUtc = metric.TargetLastResult?.TimeUtc };
             }).ToArray()
         });
     });
@@ -343,8 +366,15 @@ try
         var clientId = request.Query["clientId"].ToString();
         var channelId = request.Query["channelId"].ToString();
         if (!TryPositiveQuery(request, "hours", 24, 24 * 365, out var hours)) return Results.BadRequest(new { error = "Invalid hours." });
-        var samples = await history.ReadAsync(string.IsNullOrEmpty(clientId) ? null : clientId, string.IsNullOrEmpty(channelId) ? null : channelId, hours, cancellationToken);
-        return Results.Ok(new { samples });
+        try
+        {
+            var samples = await history.ReadAsync(string.IsNullOrEmpty(clientId) ? null : clientId, string.IsNullOrEmpty(channelId) ? null : channelId, hours, cancellationToken);
+            return Results.Ok(new { samples });
+        }
+        catch (Exception exception) when (exception is SqliteException or IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            return Results.Problem("History storage is unavailable.", statusCode: 503);
+        }
     });
     app.MapPost("/api/v1/admin/clients", async (ClientCreateRequest create, HttpRequest request, AdminSessionService sessions, ClientConfigurationEditor editor, ServerRuntime runtime, CancellationToken cancellationToken) =>
     {
@@ -482,13 +512,14 @@ static IResult GetMappingStatus(string id, ServerRuntime runtime)
     return Results.Ok(new { mappings = client.OutboundMappings.Select(mapping =>
     {
         var address = agentSession?.PeerAddresses.FirstOrDefault(item => item.MappingId == mapping.MappingId);
-        var target = runtime.Configuration.Clients.GetValueOrDefault(mapping.TargetClientId)?.Channels.SingleOrDefault(c => c.ChannelId == mapping.TargetChannelId);
+        var targetClient = runtime.Configuration.Clients.GetValueOrDefault(mapping.TargetClientId);
+        var target = targetClient is { Enabled: true } ? targetClient.Channels.SingleOrDefault(c => c.ChannelId == mapping.TargetChannelId) : null;
         runtime.Sessions.TryGet(mapping.TargetClientId, out var targetSession);
         return new { mapping.MappingId, mapping.Enabled, localAddress = address?.LocalAddress, localPort = address?.LocalPort, available = ChannelAvailability.IsOutboundMappingAvailable(mapping, address, target, agentSession, targetSession), applicationProtocol = target?.ApplicationProtocol ?? "raw", accessUrl = address is not null && target?.Http is not null ? $"{target.Http.PeerEntryScheme}://{target.Http.PeerAuthorityHost}:{address.LocalPort}" : null, mapping.TargetClientId, mapping.TargetChannelId, transportProtocol = runtime.Configuration.Clients.GetValueOrDefault(mapping.TargetClientId)?.Channels.SingleOrDefault(c => c.ChannelId == mapping.TargetChannelId)?.TransportProtocol ?? "tcp" };
     }).ToArray() });
 }
 
-static IResult GetDashboardSnapshot(HttpRequest request, ServerRuntime runtime, MetricsRegistry metrics)
+static IResult GetDashboardSnapshot(HttpRequest request, ServerRuntime runtime, MetricsRegistry metrics, ProxyListenerService proxy)
 {
     if (!TryPositiveQuery(request, "page", 1, int.MaxValue, out var page) ||
         !TryPositiveQuery(request, "pageSize", 100, 100, out var pageSize))
@@ -528,7 +559,7 @@ static IResult GetDashboardSnapshot(HttpRequest request, ServerRuntime runtime, 
                     endToEndEncryptionEnabled = channel.EndToEndEncryptionEnabled,
                     maxConnections = channel.MaxConnections,
                     targetConnectTimeoutSeconds = channel.TargetConnectTimeoutSeconds,
-                    listenerState = channel.AuthorizedClientsOnly ? "peer-only" : channel.Enabled ? "listening" : "stopped",
+                    listenerState = proxy.GetListenerState(client.ClientId, channel),
                     available = ChannelAvailability.IsPublicChannelAvailable(channel, session),
                     pendingConnections = channel.AuthorizedClientsOnly ? metric.PeerPendingConnections : metric.PendingConnections,
                     activeConnections = channel.AuthorizedClientsOnly ? metric.PeerActiveConnections : metric.ActiveConnections,
@@ -549,7 +580,8 @@ static IResult GetDashboardSnapshot(HttpRequest request, ServerRuntime runtime, 
             var mappings = client.OutboundMappings.Select(mapping =>
             {
                 var address = session?.PeerAddresses.FirstOrDefault(item => item.MappingId == mapping.MappingId);
-                var target = runtime.Configuration.Clients.GetValueOrDefault(mapping.TargetClientId)?.Channels.SingleOrDefault(c => c.ChannelId == mapping.TargetChannelId);
+                var targetClient = runtime.Configuration.Clients.GetValueOrDefault(mapping.TargetClientId);
+        var target = targetClient is { Enabled: true } ? targetClient.Channels.SingleOrDefault(c => c.ChannelId == mapping.TargetChannelId) : null;
                 runtime.Sessions.TryGet(mapping.TargetClientId, out var targetSession);
                 return new
                 {
@@ -562,7 +594,7 @@ static IResult GetDashboardSnapshot(HttpRequest request, ServerRuntime runtime, 
                     accessUrl = address is not null && target?.Http is not null ? $"{target.Http.PeerEntryScheme}://{target.Http.PeerAuthorityHost}:{address.LocalPort}" : null,
                     mapping.TargetClientId,
                     mapping.TargetChannelId,
-                    transportProtocol = runtime.Configuration.Clients.GetValueOrDefault(mapping.TargetClientId)?.Channels.SingleOrDefault(c => c.ChannelId == mapping.TargetChannelId)?.TransportProtocol ?? "tcp"
+                    transportProtocol = target?.TransportProtocol ?? "tcp"
                 };
             }).ToArray();
             return new
@@ -653,3 +685,14 @@ static bool TryPositiveQuery(HttpRequest request, string name, int defaultValue,
 }
 
 sealed record AdminLoginRequest(string Username, string Password);
+
+internal sealed class AutomationStartupReconcileService(AutomationChangeService changes, ILogger<AutomationStartupReconcileService> logger) : IHostedService
+{
+    public async Task StartAsync(CancellationToken cancellationToken)
+    {
+        await changes.ReconcileAsync(cancellationToken);
+        logger.LogInformation("Automation startup change reconciliation completed.");
+    }
+
+    public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+}

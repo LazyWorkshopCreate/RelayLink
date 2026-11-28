@@ -2,14 +2,14 @@
 
 文档 ID：DEV-003\
 状态：Active\
-版本：v1.16.0\
-更新日期：2026-11-23
+版本：v1.17.0\
+更新日期：2026-11-28
 
-流水线分为[日常校验](../../.github/workflows/ci.yml)、[tag 发行](../../.github/workflows/release.yml)和 [GitHub Pages 站点部署](../../.github/workflows/pages.yml)三部分。公开仓库和 tag 发行使用 GitHub-hosted runner 执行同一组检查。推送到 `main` 或提交 Pull Request 时，在 Linux 与 Windows 上检查服务端前端的类型、组件测试和格式，以及 Agent 前端的构建和格式，再执行 .NET 单元和集成测试（包括 Agent 互访 TLS 测试）。同时在 GitHub 托管的 `macos-15-intel` 与 `macos-15` runner 上构建 Agent 前端，原生执行含互访 TLS 的集成测试，再发布并运行 `osx-x64`、`osx-arm64` Agent，检查 Mach-O 架构、配置、最小文件权限、launchd 启动与异常退出重启、只读状态页和端到端身份复用；测试脚本拒绝在非 GitHub-hosted runner 上操作系统目录。日常校验不创建 GitHub Release。.NET 测试自身仍会编译测试所需代码，但跳过前端的重复构建。
+流水线分为[日常校验](../../.github/workflows/ci.yml)、[tag 发行](../../.github/workflows/release.yml)和 [GitHub Pages 站点部署](../../.github/workflows/pages.yml)三部分。公开仓库和 tag 发行使用 GitHub-hosted runner 执行同一组检查。推送到 `main` 或提交 Pull Request 时，在 Linux 与 Windows 上检查服务端前端的类型、组件测试和格式，以及 Agent 前端的构建和格式，同时检查管理 Skill 与六语言 SDK，执行 .NET 单元和集成测试（包括 Agent 互访 TLS 测试）。同时在 GitHub 托管的 `macos-15-intel` 与 `macos-15` runner 上构建 Agent 前端，原生执行含互访 TLS 的集成测试，再发布并运行 `osx-x64`、`osx-arm64` Agent，检查 Mach-O 架构、配置、最小文件权限、launchd 启动与异常退出重启、只读状态页和端到端身份复用；测试脚本拒绝在非 GitHub-hosted runner 上操作系统目录。日常校验不创建 GitHub Release。.NET 测试自身仍会编译测试所需代码，但跳过前端的重复构建。
 
 只有推送 `v1.2.3` 或 `v1.2.3-rc.1` 形式的版本 tag 才会创建或更新 GitHub Release。工作流先检查同名的 `docs/releases/<tag>.md` 是否存在且非空，然后并行执行日常校验和各平台打包。发布需要两者全部成功。打包生成 Linux 和 Windows Server 自包含压缩包、Linux Agent 自包含压缩包、Windows Agent 自包含及框架依赖各一份程序压缩包和安装包，以及 macOS Intel 和 Apple Silicon Agent 自包含压缩包。
 
-汇总作业按打包作业返回的 artifact ID 下载产物，校验九个包的完整文件名、版本和非空状态，再生成 `SHA256SUMS`。发布作业重新下载汇总后的包集并复核校验和，以仓库内对应发布说明作为正文。带预发布后缀的 tag 标记为预发布版。重复运行同一 tag 时更新说明并覆盖旧资产。临时产物保留 7 天，上传失败时当场重试一次。
+汇总作业按打包作业返回的 artifact ID 下载产物，校验九个包的完整文件名、版本和非空状态，再生成 `SHA256SUMS`。发布作业重新下载汇总后的包集并复核校验和，以仓库内对应发布说明作为正文。带预发布后缀的 tag 标记为预发布版。重复运行同一 tag 时更新说明并覆盖旧资产。临时产物保留 7 天，上传失败时重试一次，下载失败时在新的临时目录重试一次。
 
 手动运行 Release 并指定已有发布说明的版本号，可演练源码校验、打包和产物汇总。macOS 打包在 Apple Silicon runner 上生成两个架构的包，校验 Mach-O 架构、随包脚本、前端和配置预检。Intel 包的配置预检需要 Rosetta，Intel runner 的原生校验仍由日常校验负责。商业使用 Inno Setup 的许可要求见 [官方说明](https://jrsoftware.org/isorder.php)。
 
@@ -17,9 +17,9 @@
 
 Windows Agent 安装包目前未签名，macOS 包也未做 Developer ID 签名、公证或 stapling。仓库没有代码签名证书或公证密钥，因此流水线不包含签名步骤，也不能把通过的构建说成已签名产物。以后补签名时，证书和公证密钥只放在仓库或环境密钥中，由 `publish` 之前的独立作业读取；在该作业真正替换产物之前，本文和发布说明继续写明“未签名”。不能把流水线通过视为目标机安装、Gatekeeper、跨网络连通或容量验收。运行结果和失败日志以 GitHub Actions 为准；部署环境验收仍记录在[验证状态](../testing/verification-status.md)。
 
-推送 `v*` tag 时，Pages 流水线先调用同一份 CI 工作流，全部成功后才从该 tag 对应的提交构建并部署网站，不因普通 `main` 提交更新。构建前校验版本 tag 格式及非空的对应发布说明；构建脚本同时要求每份发布说明都有英文翻译，否则停止部署。构建产物上传到 Pages，中文位于站点根路径，英文位于 `/en/`。Pages 与 GitHub Release 都会运行 CI；网站不再在测试失败时单独更新。首次运行前须在仓库设置中选择 GitHub Actions 作为 Pages 发布来源，并确认 `github-pages` 环境允许 `v*` tag 部署。Pages 作业只使用内置 `GITHUB_TOKEN` 的仓库读取、Pages 写入和 OIDC 权限，不需额外部署密钥。本站点部署不代表安装包发布或运行环境验收。
+版本标签触发的 `Release` 工作流成功后，Pages 才检出同一标签、构建中英文网站并部署。公开仓库维护者也可手动指定已有发布标签重新部署。构建前校验标签格式、同名发布说明及其英文翻译。中文位于站点根路径，英文位于 `/en/`。首次部署须在仓库设置中选择 GitHub Actions 作为 Pages 来源。构建作业使用仓库读取与 Pages 配置权限，部署作业使用 Pages 写入和 OIDC 权限。
 
-产品网站另设独立日常校验作业，在 Node.js 24 下通过 `npm --prefix website ci` 安装锁定依赖，执行 `node scripts/build-website.mjs` 和 `npm --prefix website test`。Pages 流水线复用相同安装、构建与检查，再上传静态多页产物；部署仍仅由版本 tag 触发。站点结构与维护见 [网站维护说明](website.md)。
+产品网站另设独立日常校验作业，在 Node.js 24 下通过 `npm --prefix website ci` 安装锁定依赖，执行 `node scripts/build-website.mjs` 和 `npm --prefix website test`。Pages 流水线复用相同安装、构建与检查，再上传静态多页产物；部署跟随成功的标签发行或手动指定的既有标签。站点结构与维护见 [网站维护说明](website.md)。
 
 ## 本地 v3 发行包兼容验证
 

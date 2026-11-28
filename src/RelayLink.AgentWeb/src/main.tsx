@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
     Activity,
@@ -71,15 +71,15 @@ type Profile = {
     secret: string;
     useTls: boolean;
     trustedCaPemBase64: string | null;
-    maxConnections: number;
-    maxPendingConnections: number;
+    maxConnections?: number;
+    maxPendingConnections?: number;
     reconnect: {
         initialDelaySeconds: number;
         maxDelaySeconds: number;
         permanentErrorDelaySeconds: number;
     };
 };
-type Session = { csrfToken: string; version: string };
+type Session = { csrfToken: string; version: string; expiresAtUtc?: string };
 
 function mappingPresence(mapping: Mapping): "online" | "offline" | "disabled" {
     if (!mapping.enabled) return "disabled";
@@ -216,6 +216,15 @@ function MappingAddress({
     );
 }
 
+class HttpError extends Error {
+    readonly status: number;
+
+    constructor(status: number, message: string) {
+        super(message);
+        this.status = status;
+    }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
     const response = await fetch(path, {
         cache: "no-store",
@@ -224,7 +233,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     });
     if (!response.ok) {
         const body = await response.json().catch(() => ({}));
-        throw new Error(
+        throw new HttpError(
+            response.status,
             body.message || body.detail || `请求失败 (${response.status})`,
         );
     }
@@ -250,6 +260,7 @@ function App() {
     const [confirmExistingState, setConfirmExistingState] = useState(false);
     const [insecureConfirmation, setInsecureConfirmation] = useState("");
     const [busy, setBusy] = useState(false);
+    const refreshErrorRef = useRef(false);
 
     function writeHeaders(csrf: string): HeadersInit {
         return {
@@ -257,6 +268,42 @@ function App() {
             "X-RelayLink-CSRF": csrf,
         };
     }
+
+    const loadSession = useCallback(async (): Promise<Session | null> => {
+        try {
+            const nextSession = await request<Session>("/api/v2/admin/session");
+            setSession(nextSession);
+            return nextSession;
+        } catch {
+            refreshErrorRef.current = false;
+            setError("无法取得本机管理会话。");
+            return null;
+        }
+    }, []);
+
+    const withFreshSessionRetry = useCallback(
+        async <T,>(
+            activeSession: Session,
+            action: (targetSession: Session) => Promise<T>,
+        ): Promise<T> => {
+            try {
+                return await action(activeSession);
+            } catch (cause) {
+                if (
+                    cause instanceof HttpError &&
+                    (cause.status === 401 || cause.status === 403)
+                ) {
+                    const renewed = await loadSession();
+                    if (!renewed) {
+                        throw new Error("本机管理会话已失效，请刷新页面。");
+                    }
+                    return await action(renewed);
+                }
+                throw cause;
+            }
+        },
+        [loadSession],
+    );
 
     const refresh = useCallback(async () => {
         try {
@@ -267,7 +314,12 @@ function App() {
             setServers(status.servers);
             setSupportsRdp(status.supportsRdpLaunch === true);
             setLastRefresh(new Date());
+            if (refreshErrorRef.current) {
+                refreshErrorRef.current = false;
+                setError("");
+            }
         } catch (cause) {
+            refreshErrorRef.current = true;
             setError(
                 cause instanceof Error
                     ? cause.message
@@ -278,12 +330,25 @@ function App() {
 
     useEffect(() => {
         void refresh();
-        void request<Session>("/api/v2/admin/session")
-            .then(setSession)
-            .catch(() => setError("无法取得本机管理会话。"));
+        void loadSession();
         const timer = window.setInterval(() => void refresh(), 5000);
         return () => window.clearInterval(timer);
-    }, [refresh]);
+    }, [refresh, loadSession]);
+
+    useEffect(() => {
+        if (!session) return;
+        const expiresMs = session.expiresAtUtc
+            ? Date.parse(session.expiresAtUtc)
+            : Number.NaN;
+        const leadMs = Number.isFinite(expiresMs)
+            ? expiresMs - Date.now() - 5 * 60_000
+            : 15 * 60_000;
+        const delayMs = Math.min(15 * 60_000, Math.max(60_000, leadMs));
+        const timer = window.setTimeout(() => {
+            void loadSession();
+        }, delayMs);
+        return () => window.clearTimeout(timer);
+    }, [session, loadSession]);
 
     function openEditor(profileId: string | null) {
         setEditorId(profileId);
@@ -291,14 +356,27 @@ function App() {
         setFileName("");
         setConfirmExistingState(false);
         setInsecureConfirmation("");
+        refreshErrorRef.current = false;
         setError("");
     }
 
-    function closeEditor() {
+    const closeEditor = useCallback(() => {
         setProfile(null);
         setFileName("");
         setEditorId(undefined);
-    }
+    }, []);
+
+    useEffect(() => {
+        if (editorId === undefined && !removeId && !disableId) return;
+        const onKeyDown = (event: KeyboardEvent) => {
+            if (event.key !== "Escape" || busy) return;
+            if (disableId) setDisableId(null);
+            else if (removeId) setRemoveId(null);
+            else if (editorId !== undefined) closeEditor();
+        };
+        window.addEventListener("keydown", onKeyDown);
+        return () => window.removeEventListener("keydown", onKeyDown);
+    }, [editorId, removeId, disableId, busy, closeEditor]);
 
     async function importJson(file?: File) {
         if (!file) return;
@@ -353,10 +431,12 @@ function App() {
             });
             setFileName(file.name);
             setNotice("");
+            refreshErrorRef.current = false;
             setError("");
         } catch (cause) {
             setProfile(null);
             setFileName("");
+            refreshErrorRef.current = false;
             setError(
                 cause instanceof Error ? cause.message : "配置文件无法读取。",
             );
@@ -366,40 +446,46 @@ function App() {
     async function saveImport() {
         if (!session || !profile || editorId === undefined || busy) return;
         setBusy(true);
+        refreshErrorRef.current = false;
         setError("");
         try {
             const updating = editorId !== null;
-            const result = await request<{ version: string }>(
-                updating
-                    ? `/api/v2/admin/servers/${encodeURIComponent(editorId)}`
-                    : "/api/v2/admin/servers",
-                {
-                    method: updating ? "PUT" : "POST",
-                    headers: writeHeaders(session.csrfToken),
-                    body: JSON.stringify({
-                        version: session.version,
-                        server: profile,
-                        ...(updating ? {} : { confirmExistingState }),
-                        ...(profile.useTls
-                            ? {}
-                            : {
-                                  confirmInsecureTransport:
-                                      insecureConfirmation.trim(),
-                              }),
-                    }),
-                },
+            const result = await withFreshSessionRetry(
+                session,
+                (activeSession) =>
+                    request<{ version: string }>(
+                        updating
+                            ? `/api/v2/admin/servers/${encodeURIComponent(editorId)}`
+                            : "/api/v2/admin/servers",
+                        {
+                            method: updating ? "PUT" : "POST",
+                            headers: writeHeaders(activeSession.csrfToken),
+                            body: JSON.stringify({
+                                version: activeSession.version,
+                                server: profile,
+                                ...(updating ? {} : { confirmExistingState }),
+                                ...(profile.useTls
+                                    ? {}
+                                    : {
+                                          confirmInsecureTransport:
+                                              insecureConfirmation.trim(),
+                                      }),
+                            }),
+                        },
+                    ),
             );
-            setSession({ ...session, version: result.version });
+            setSession((current) =>
+                current ? { ...current, version: result.version } : current,
+            );
             closeEditor();
             setNotice(
                 `${profile.profileId} 已${updating ? "更新" : "新增"}，Agent 将重新连接。`,
             );
             await refresh();
         } catch (cause) {
+            refreshErrorRef.current = false;
             setError(cause instanceof Error ? cause.message : "保存失败。");
         } finally {
-            setProfile(null);
-            setFileName("");
             setBusy(false);
         }
     }
@@ -407,21 +493,31 @@ function App() {
     async function remove() {
         if (!session || !removeId || busy) return;
         setBusy(true);
+        refreshErrorRef.current = false;
         setError("");
         try {
-            const result = await request<{ version: string }>(
-                `/api/v2/admin/servers/${encodeURIComponent(removeId)}`,
-                {
-                    method: "DELETE",
-                    headers: writeHeaders(session.csrfToken),
-                    body: JSON.stringify({ version: session.version }),
-                },
+            const result = await withFreshSessionRetry(
+                session,
+                (activeSession) =>
+                    request<{ version: string }>(
+                        `/api/v2/admin/servers/${encodeURIComponent(removeId)}`,
+                        {
+                            method: "DELETE",
+                            headers: writeHeaders(activeSession.csrfToken),
+                            body: JSON.stringify({
+                                version: activeSession.version,
+                            }),
+                        },
+                    ),
             );
-            setSession({ ...session, version: result.version });
+            setSession((current) =>
+                current ? { ...current, version: result.version } : current,
+            );
             setNotice(`${removeId} 已从本机移除。`);
             setRemoveId(null);
             await refresh();
         } catch (cause) {
+            refreshErrorRef.current = false;
             setError(cause instanceof Error ? cause.message : "删除失败。");
         } finally {
             setBusy(false);
@@ -431,23 +527,34 @@ function App() {
     async function setEnabled(profileId: string, enabled: boolean) {
         if (!session || busy) return;
         setBusy(true);
+        refreshErrorRef.current = false;
         setError("");
         try {
-            const result = await request<{ version: string }>(
-                `/api/v2/admin/servers/${encodeURIComponent(profileId)}/enabled`,
-                {
-                    method: "PUT",
-                    headers: writeHeaders(session.csrfToken),
-                    body: JSON.stringify({ version: session.version, enabled }),
-                },
+            const result = await withFreshSessionRetry(
+                session,
+                (activeSession) =>
+                    request<{ version: string }>(
+                        `/api/v2/admin/servers/${encodeURIComponent(profileId)}/enabled`,
+                        {
+                            method: "PUT",
+                            headers: writeHeaders(activeSession.csrfToken),
+                            body: JSON.stringify({
+                                version: activeSession.version,
+                                enabled,
+                            }),
+                        },
+                    ),
             );
-            setSession({ ...session, version: result.version });
+            setSession((current) =>
+                current ? { ...current, version: result.version } : current,
+            );
             setDisableId(null);
             setNotice(
                 `${profileId} 已${enabled ? "启用，正在重新连接" : "停用并断开连接"}。`,
             );
             await refresh();
         } catch (cause) {
+            refreshErrorRef.current = false;
             setError(cause instanceof Error ? cause.message : "状态切换失败。");
         } finally {
             setBusy(false);
@@ -983,8 +1090,10 @@ function App() {
                                     <div>
                                         <dt>连接配额</dt>
                                         <dd>
-                                            {profile.maxConnections} / 待建立{" "}
-                                            {profile.maxPendingConnections}
+                                            {profile.maxConnections ?? "默认"} /
+                                            待建立{" "}
+                                            {profile.maxPendingConnections ??
+                                                "默认"}
                                         </dd>
                                     </div>
                                 </dl>
@@ -1063,7 +1172,13 @@ function App() {
                 </div>
             )}
             {removeId && (
-                <div className="agent-overlay">
+                <div
+                    className="agent-overlay"
+                    onMouseDown={(event) => {
+                        if (event.target === event.currentTarget && !busy)
+                            setRemoveId(null);
+                    }}
+                >
                     <div
                         className="agent-dialog agent-confirm"
                         role="alertdialog"
@@ -1104,7 +1219,13 @@ function App() {
                 </div>
             )}
             {disableId && (
-                <div className="agent-overlay">
+                <div
+                    className="agent-overlay"
+                    onMouseDown={(event) => {
+                        if (event.target === event.currentTarget && !busy)
+                            setDisableId(null);
+                    }}
+                >
                     <div
                         className="agent-dialog agent-confirm"
                         role="alertdialog"

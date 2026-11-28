@@ -32,7 +32,7 @@ public sealed record AgentServerProfile
 
 public static class AgentProcessConfigurationLoader
 {
-    private static readonly Regex Identifier = new("^[a-z0-9][a-z0-9_-]{0,63}$", RegexOptions.CultureInvariant | RegexOptions.Compiled);
+    private static readonly Regex Identifier = new("\\A[a-z0-9][a-z0-9_-]{0,63}\\z", RegexOptions.CultureInvariant | RegexOptions.Compiled);
     private static readonly JsonSerializerOptions Options = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -111,6 +111,8 @@ public static class AgentProcessConfigurationLoader
                 server.Reconnect.PermanentErrorDelaySeconds is < 1 or > 3600)
                 throw new AgentConfigurationException("Agent server profile contains invalid values or a duplicate profileId.");
             allocated += server.MaxConnections;
+            if (string.IsNullOrWhiteSpace(server.Secret))
+                throw new AgentConfigurationException("Agent server secret is required.");
             try
             {
                 if (Convert.FromBase64String(server.Secret).Length < 32)

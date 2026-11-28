@@ -22,8 +22,11 @@ public static class ChannelAvailability
     public static bool IsOutboundMappingAvailable(OutboundMappingConfiguration mapping, PeerMappingAddress? address, ChannelConfiguration? target, Session? caller, Session? targetSession) =>
         mapping.Enabled &&
         address is not null &&
-        (target?.ApplicationProtocol != "http" || (target is not null && targetSession?.IsHttpReady(target) == true)) &&
-        (target?.TransportProtocol != "udp" || (caller?.ProtocolVersion >= 4 && targetSession?.ProtocolVersion >= 4));
+        target is { Enabled: true } &&
+        caller is not null && !caller.LifetimeToken.IsCancellationRequested &&
+        targetSession is not null && !targetSession.LifetimeToken.IsCancellationRequested &&
+        (target.ApplicationProtocol != "http" || targetSession.IsHttpReady(target)) &&
+        (target.TransportProtocol != "udp" || (caller.ProtocolVersion >= 4 && targetSession.ProtocolVersion >= 4));
 
     public static bool SupportsTransport(string transportProtocol, byte protocolVersion) =>
         transportProtocol == "tcp" || protocolVersion >= 4;

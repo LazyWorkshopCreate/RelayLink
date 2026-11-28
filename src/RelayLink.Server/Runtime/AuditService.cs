@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Microsoft.Data.Sqlite;
 using RelayLink.Server.Configuration;
 
@@ -40,7 +41,12 @@ public sealed class AuditService(ServerRuntime runtime, ILogger<AuditService> lo
 {
     private readonly SemaphoreSlim writer = new(1, 1);
     private readonly SemaphoreSlim capacity = new(1024, 1024);
+    private readonly SemaphoreSlim rejectionCapacity = new(256, 256);
+    private readonly ConcurrentDictionary<string, long> recentRejections = new(StringComparer.Ordinal);
+    private long lastOverflowWarningTick;
     private DateOnly lastTrimDate;
+    private const long RejectionCoalesceWindowMs = 5_000;
+    private const int MaxTrackedRejections = 2048;
     private string FilePath => runtime.Configuration.Server.Audit!.FilePath;
 
     public async Task StartAsync(CancellationToken cancellationToken)
@@ -86,12 +92,16 @@ public sealed class AuditService(ServerRuntime runtime, ILogger<AuditService> lo
                     mapping_id, caller_client_id, target_client_id, actor, remote_ip,
                     MAX(0, $now - occurred_at_utc), 0, 0, $instance
                 FROM audit_event AS opened
-                WHERE event_type IN ('proxy_connection_opened', 'peer_connection_opened', 'agent_session_ready')
+                WHERE opened.event_type IN ('proxy_connection_opened', 'peer_connection_opened', 'agent_session_ready')
                   AND NOT EXISTS (SELECT 1 FROM audit_event AS closed
-                    WHERE ((opened.connection_id IS NOT NULL AND closed.connection_id = opened.connection_id
-                      AND closed.event_type IN ('proxy_connection_closed', 'peer_connection_closed'))
-                      OR (opened.session_id IS NOT NULL AND closed.session_id = opened.session_id
-                      AND closed.event_type = 'agent_session_closed')));
+                    WHERE (
+                        (opened.event_type = 'proxy_connection_opened' AND opened.connection_id IS NOT NULL
+                         AND closed.connection_id = opened.connection_id AND closed.event_type = 'proxy_connection_closed')
+                     OR (opened.event_type = 'peer_connection_opened' AND opened.connection_id IS NOT NULL
+                         AND closed.connection_id = opened.connection_id AND closed.event_type = 'peer_connection_closed')
+                     OR (opened.event_type = 'agent_session_ready' AND opened.session_id IS NOT NULL
+                         AND closed.session_id = opened.session_id AND closed.event_type = 'agent_session_closed')
+                    ));
                 """;
             recover.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
             recover.Parameters.AddWithValue("$instance", runtime.InstanceId.ToString());
@@ -102,9 +112,43 @@ public sealed class AuditService(ServerRuntime runtime, ILogger<AuditService> lo
 
     public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 
+    public async Task CheckAvailableAsync(CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            await writer.WaitAsync(cancellationToken);
+            try
+            {
+                await using var connection = await OpenAsync(cancellationToken);
+                await using var probe = connection.CreateCommand();
+                probe.CommandText = "BEGIN IMMEDIATE; ROLLBACK;";
+                await probe.ExecuteNonQueryAsync(cancellationToken);
+            }
+            finally { writer.Release(); }
+        }
+        catch (Exception exception) when (exception is SqliteException or IOException or UnauthorizedAccessException)
+        {
+            logger.LogWarning(exception, "Audit storage health probe failed.");
+            throw new AuditUnavailableException("Audit storage is unavailable.", exception);
+        }
+    }
+
     public async Task RecordAsync(AuditEvent value, CancellationToken cancellationToken = default)
     {
-        if (!await capacity.WaitAsync(0, cancellationToken)) throw new AuditUnavailableException("Audit writer capacity exceeded.");
+        var isRejection = IsHighFrequencyRejection(value);
+        if (isRejection && !ShouldRecordRejection(value))
+            return;
+
+        var quota = isRejection ? rejectionCapacity : capacity;
+        if (!await quota.WaitAsync(0, cancellationToken))
+        {
+            if (isRejection)
+            {
+                LogCoalescedWarning("High-frequency audit rejection capacity exceeded; dropping {EventType} ({ReasonCode}).", value.EventType, value.ReasonCode);
+                return;
+            }
+            throw new AuditUnavailableException("Audit writer capacity exceeded.");
+        }
         try
         {
             await writer.WaitAsync(cancellationToken);
@@ -157,10 +201,56 @@ public sealed class AuditService(ServerRuntime runtime, ILogger<AuditService> lo
         }
         catch (Exception exception) when (exception is SqliteException or IOException or UnauthorizedAccessException)
         {
-            logger.LogError(exception, "Audit event {EventType} could not be persisted.", value.EventType);
+            if (isRejection)
+            {
+                LogCoalescedWarning("Audit storage unavailable while recording rejection {EventType} ({ReasonCode}).", value.EventType, value.ReasonCode);
+            }
+            else
+            {
+                logger.LogError(exception, "Audit event {EventType} could not be persisted.", value.EventType);
+            }
             throw new AuditUnavailableException("Audit storage is unavailable.", exception);
         }
-        finally { capacity.Release(); }
+        finally { quota.Release(); }
+    }
+
+    private static bool IsHighFrequencyRejection(AuditEvent value) =>
+        (value.EventType is "proxy_connection_rejected" or "peer_connection_rejected" &&
+         value.ReasonCode is "security_group_denied" or "agent_offline" or "channel_unavailable" or "udp_not_supported" or "http_unavailable") ||
+        (value.EventType == "admin_login_failure" && value.ReasonCode is "rate_limited" or "login_state_full");
+
+    private bool ShouldRecordRejection(AuditEvent value)
+    {
+        var now = Environment.TickCount64;
+        if (recentRejections.Count >= MaxTrackedRejections)
+        {
+            foreach (var entry in recentRejections.ToArray())
+            {
+                if (now - entry.Value >= RejectionCoalesceWindowMs) recentRejections.TryRemove(entry.Key, out _);
+            }
+            if (recentRejections.Count >= MaxTrackedRejections)
+            {
+                LogCoalescedWarning("High-frequency audit rejection table is full; coalescing {EventType} ({ReasonCode}).", value.EventType, value.ReasonCode);
+                return false;
+            }
+        }
+
+        var key = $"{value.EventType}\0{value.ReasonCode}\0{value.ClientId}\0{value.ChannelId}\0{value.Actor}\0{value.RemoteIp}";
+        while (true)
+        {
+            if (recentRejections.TryAdd(key, now)) return true;
+            if (!recentRejections.TryGetValue(key, out var previous)) continue;
+            if (now - previous < RejectionCoalesceWindowMs) return false;
+            if (recentRejections.TryUpdate(key, now, previous)) return true;
+        }
+    }
+
+    private void LogCoalescedWarning(string template, string eventType, string? reasonCode)
+    {
+        var now = Environment.TickCount64;
+        var prior = Volatile.Read(ref lastOverflowWarningTick);
+        if (now - prior >= 10_000 && Interlocked.CompareExchange(ref lastOverflowWarningTick, now, prior) == prior)
+            logger.LogWarning(template, eventType, reasonCode);
     }
 
     public async Task<AuditPage> ReadAsync(DateTimeOffset since, DateTimeOffset until, string? eventType, string? clientId,

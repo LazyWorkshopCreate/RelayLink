@@ -6,7 +6,14 @@ services:
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile
+    # Dynamic proxy listener ports and host-loopback dashboard access require host networking on Linux Docker Engine.
+    # For static bridge networking without dynamic listener ports, combine with deploy/docker/compose.bridge.yaml.
     network_mode: host
+    user: "${RELAYLINK_UID:-10001}:${RELAYLINK_GID:-10001}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     init: true
     restart: unless-stopped
     read_only: true

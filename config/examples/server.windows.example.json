@@ -2,6 +2,8 @@
   "schemaVersion": 1,
   "tunnel": {
     "listenAddress": "0.0.0.0",
+    "agentServerHost": "tunnel.example.com",
+    "trustedCaPemPath": "C:\\ProgramData\\RelayLink\\tls\\root-ca.pem",
     "port": 7443,
     "dataPort": 7444,
     "tlsEnabled": true,
@@ -48,5 +50,15 @@
     "blockedWriteTimeoutSeconds": 120,
     "halfCloseDrainTimeoutSeconds": 300,
     "tcpIdleTimeoutSeconds": 900
+  },
+  "automation": {
+    "enabled": false,
+    "listenAddress": "127.0.0.1",
+    "port": 18082,
+    "certificatePemPath": "C:\\ProgramData\\RelayLink\\tls\\automation-cert.pem",
+    "privateKeyPemPath": "C:\\ProgramData\\RelayLink\\tls\\automation-key.pem",
+    "sessionLifetimeMinutes": 120,
+    "maxPendingPairings": 8,
+    "maxAuthorizations": 16
   }
 }

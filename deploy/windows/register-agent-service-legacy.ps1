@@ -52,7 +52,7 @@ if ($existingService) {
     $deadline = [DateTime]::UtcNow.AddSeconds(30)
     do {
         Start-Sleep -Milliseconds 500
-        $remainingService = Get-WmiObject -Class Win32_Service -Filter "Name='$ServiceName'" -ErrorAction SilentlyContinue
+        $remainingService = Get-CimInstance -ClassName Win32_Service -Filter "Name='$ServiceName'" -ErrorAction SilentlyContinue
     } while ($remainingService -and [DateTime]::UtcNow -lt $deadline)
     if ($remainingService) {
         throw "Service '$ServiceName' is still pending deletion. Reboot Windows, then run the script again."
@@ -60,20 +60,16 @@ if ($existingService) {
 }
 
 $binaryPath = '"' + $resolvedExecutable + '" --config "' + $resolvedConfiguration + '"'
-$serviceClass = Get-WmiObject -List -Class Win32_Service
-$createResult = $serviceClass.Create(
-    $ServiceName,
-    'RelayLink Agent',
-    $binaryPath,
-    16,
-    1,
-    'Automatic',
-    $false,
-    'NT AUTHORITY\LocalService',
-    $null,
-    $null,
-    $null,
-    $null)
+$createResult = Invoke-CimMethod -ClassName Win32_Service -MethodName Create -Arguments @{
+    Name = $ServiceName
+    DisplayName = 'RelayLink Agent'
+    PathName = $binaryPath
+    ServiceType = [uint32]16
+    ErrorControl = [uint32]1
+    StartMode = 'Automatic'
+    DesktopInteract = $false
+    StartName = 'NT AUTHORITY\LocalService'
+}
 if ($createResult.ReturnValue -ne 0) {
     $createMeaning = switch ([int]$createResult.ReturnValue) {
         2 { 'Access denied' }

@@ -57,7 +57,7 @@ internal sealed class HttpProxyRuntime(AgentConfiguration configuration, ILogger
                     host = await HttpProxyHost.CreateAsync(channel, Path.Combine(Path.GetDirectoryName(configuration.E2eIdentityPath)!, "http-resources"), token, logger);
                     created.Add(host);
                 }
-                catch (Exception exception) when (exception is IOException or ArgumentException or System.Security.Cryptography.CryptographicException or InvalidOperationException)
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or System.Security.Cryptography.CryptographicException or InvalidOperationException)
                 { /* Report unavailable without exposing resource paths or credentials. */ }
                 newHosts[channel.ChannelId] = (HttpProxyPolicy.Hash(channel), host);
             }
@@ -356,13 +356,36 @@ internal sealed class HttpProxyHost : IAsyncDisposable
         using (linked)
         {
             var connection = new VirtualHttpConnection(stream, ingress, connectionId);
+            var enqueueFailed = false;
             try
             {
-                if (!transport.TryEnqueue(connection)) { await connection.DisposeAsync(); throw new IOException("HTTP ingress queue is full."); }
+                if (!transport.TryEnqueue(connection))
+                {
+                    enqueueFailed = true;
+                    connection.TryClaimUnaccepted();
+                    await connection.DisposeAsync();
+                    throw new IOException("HTTP ingress queue is full.");
+                }
                 await connection.Completion.WaitAsync(linked.Token);
             }
             catch (ObjectDisposedException) { throw new IOException("HTTP ingress is unavailable."); }
-            finally { connection.Abort(); await connection.DisposeAsync(); }
+            finally
+            {
+                if (!enqueueFailed)
+                {
+                    if (connection.TryClaimUnaccepted())
+                    {
+                        connection.Abort();
+                        await connection.DisposeAsync();
+                    }
+                    else if (!connection.Completion.IsCompleted)
+                    {
+                        connection.Abort();
+                        try { await connection.Completion.WaitAsync(TimeSpan.FromSeconds(5)); }
+                        catch (Exception exception) when (exception is TimeoutException or OperationCanceledException or ObjectDisposedException or IOException) { }
+                    }
+                }
+            }
         }
     }
 
@@ -378,6 +401,8 @@ internal sealed class HttpProxyHost : IAsyncDisposable
         var allowed = peer ? new[] { ingress.EntryAuthority ?? string.Empty } : options.PublicAllowedAuthorities;
         if (!allowed.Any(authority => SafeAuthority(authority, ingress.Scheme) == originalAuthority)) { context.Response.StatusCode = 421; return; }
         var isWebSocket = HttpProxyPolicy.IsWebSocketUpgrade(context.Request.Headers.Upgrade);
+        if (!isWebSocket && context.Request.Headers.Upgrade.Any(value => !string.IsNullOrWhiteSpace(value)))
+        { context.Response.StatusCode = 403; return; }
         var originValues = context.Request.Headers.Origin;
         if (originValues.Count > 1 || (isWebSocket && originValues.Count != 1)) { context.Response.StatusCode = 403; return; }
         if (originValues.Count == 1)
@@ -400,7 +425,8 @@ internal sealed class HttpProxyHost : IAsyncDisposable
             }
             if (!await requests.WaitAsync(0, context.RequestAborted)) { context.Response.StatusCode = 503; return; }
             requestSlot = true;
-            var transformer = new HttpIngressTransformer(options, ingress, context.Request.Host.Value ?? string.Empty);
+            var normalizedHost = HttpProxyPolicy.NormalizeHostHeader(context.Request.Host.Value ?? string.Empty, ingress.Scheme);
+            var transformer = new HttpIngressTransformer(options, ingress, normalizedHost);
             var config = new ForwarderRequestConfig { Version = HttpVersion.Version11, VersionPolicy = HttpVersionPolicy.RequestVersionExact,
                 ActivityTimeout = HttpProxyPolicy.ActivityTimeout(peer, isWebSocket, options.ActivityTimeoutSeconds, options.WebSocketActivityTimeoutSeconds) };
             var forwarder = context.RequestServices.GetRequiredService<IHttpForwarder>();
@@ -489,8 +515,12 @@ internal sealed class VirtualHttpConnection : ConnectionContext, IConnectionLife
     private readonly Stream stream;
     private readonly CancellationTokenSource closed = new();
     private readonly TaskCompletionSource completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private int state; // 0 = enqueued, 1 = acceptedByKestrel, 2 = claimedUnaccepted
+    private int aborted;
     private int disposed;
     public Task Completion => completion.Task;
+    public bool TryAccept() => Interlocked.CompareExchange(ref state, 1, 0) == 0;
+    public bool TryClaimUnaccepted() => Interlocked.CompareExchange(ref state, 2, 0) == 0;
     public override string ConnectionId { get; set; } = Guid.NewGuid().ToString();
     public override IFeatureCollection Features { get; } = new FeatureCollection();
     public override IDictionary<object, object?> Items { get; set; } = new Dictionary<object, object?>();
@@ -511,15 +541,33 @@ internal sealed class VirtualHttpConnection : ConnectionContext, IConnectionLife
     }
     public override void Abort(ConnectionAbortedException reason)
     {
+        Volatile.Write(ref aborted, 1);
         if (Volatile.Read(ref disposed) != 0) return;
         try { closed.Cancel(); } catch (ObjectDisposedException) { }
-        stream.Dispose();
+        try { stream.Dispose(); } catch (Exception exception) when (exception is IOException or SocketException or ObjectDisposedException) { }
     }
     public override async ValueTask DisposeAsync()
     {
         if (Interlocked.Exchange(ref disposed, 1) != 0) return;
-        try { closed.Cancel(); await Transport.Input.CompleteAsync(); await Transport.Output.CompleteAsync(); }
-        finally { stream.Dispose(); closed.Dispose(); completion.TrySetResult(); }
+        try
+        {
+            try { await Transport.Output.CompleteAsync(); }
+            catch (Exception exception) when (exception is IOException or SocketException or ObjectDisposedException or OperationCanceledException or InvalidOperationException) { }
+            if (Volatile.Read(ref aborted) == 0 && stream is Transport.PeerApplicationStream peerApp)
+            {
+                try { await peerApp.CompleteWritesAsync(); }
+                catch (Exception exception) when (exception is IOException or SocketException or ObjectDisposedException or OperationCanceledException or InvalidOperationException) { }
+            }
+            try { closed.Cancel(); } catch (ObjectDisposedException) { }
+            try { await Transport.Input.CompleteAsync(); }
+            catch (Exception exception) when (exception is IOException or SocketException or ObjectDisposedException or OperationCanceledException or InvalidOperationException) { }
+        }
+        finally
+        {
+            try { stream.Dispose(); } catch (Exception exception) when (exception is IOException or SocketException or ObjectDisposedException) { }
+            closed.Dispose();
+            completion.TrySetResult();
+        }
     }
 }
 
@@ -532,16 +580,27 @@ internal sealed class VirtualHttpTransport(int capacity) : IConnectionListenerFa
     public ValueTask<IConnectionListener> BindAsync(EndPoint endpoint, CancellationToken cancellationToken = default) => ValueTask.FromResult<IConnectionListener>(this);
     public async ValueTask<ConnectionContext?> AcceptAsync(CancellationToken token = default)
     {
-        if (!await queue.Reader.WaitToReadAsync(token)) return null;
-        if (!queue.Reader.TryRead(out var connection)) return await AcceptAsync(token);
-        active[connection.ConnectionId] = connection;
-        _ = connection.Completion.ContinueWith(_ => active.TryRemove(connection.ConnectionId, out var ignored), TaskScheduler.Default);
-        return connection;
+        while (await queue.Reader.WaitToReadAsync(token))
+        {
+            if (!queue.Reader.TryRead(out var connection)) continue;
+            if (!connection.TryAccept()) continue;
+            active[connection.ConnectionId] = connection;
+            _ = connection.Completion.ContinueWith(_ => active.TryRemove(connection.ConnectionId, out var ignored), TaskScheduler.Default);
+            return connection;
+        }
+        return null;
     }
     public void AbortAll()
     {
         queue.Writer.TryComplete();
-        while (queue.Reader.TryRead(out var pending)) { pending.Abort(); _ = pending.DisposeAsync(); }
+        while (queue.Reader.TryRead(out var pending))
+        {
+            if (pending.TryClaimUnaccepted())
+            {
+                pending.Abort();
+                _ = pending.DisposeAsync();
+            }
+        }
         foreach (var connection in active.Values) connection.Abort();
     }
     public ValueTask UnbindAsync(CancellationToken token = default) { AbortAll(); return ValueTask.CompletedTask; }

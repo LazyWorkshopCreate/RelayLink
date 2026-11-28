@@ -21,7 +21,10 @@ public enum ChangeState { Pending, Approved, Applying, Applied, Rejected, Cancel
 public sealed record ChangeRequest(
     Guid ChangeRequestId, string Type, string TargetKey, string PayloadJson, string? Reason, string RequestedBy,
     ChangeState State, DateTimeOffset CreatedAtUtc, DateTimeOffset ExpiresAtUtc, DateTimeOffset? DecidedAtUtc,
-    string? DecidedBy, string? FailureReason, string IdempotencyKey);
+    string? DecidedBy, string? FailureReason, string IdempotencyKey)
+{
+    public string? DeviceThumbprint { get; init; }
+}
 
 /// <summary>
 /// 自动化状态库。存放配对请求、授权记录、撤销标记、变更申请与持久化实例标识。
@@ -34,6 +37,7 @@ public sealed class AutomationStore : IAsyncDisposable
     private readonly SemaphoreSlim gate = new(1, 1);
     private string? connectionString;
     private bool initialized;
+    private Guid? cachedInstanceId;
 
     public AutomationStore(string serverConfigurationPath)
     {
@@ -49,8 +53,6 @@ public sealed class AutomationStore : IAsyncDisposable
         try
         {
             if (initialized) return;
-            var directory = Path.GetDirectoryName(databasePath)!;
-            Directory.CreateDirectory(directory);
             SecretFilePermissions.PrepareDatabase(databasePath);
             connectionString = new SqliteConnectionStringBuilder { DataSource = databasePath, Pooling = true }.ToString();
             await using var connection = new SqliteConnection(connectionString);
@@ -70,19 +72,23 @@ public sealed class AutomationStore : IAsyncDisposable
                     decided_at_utc INTEGER, decided_by TEXT, lifetime_minutes INTEGER, approved_scopes TEXT,
                     token_issued_at_utc INTEGER, token_hash TEXT, token_expires_at_utc INTEGER, grant_id TEXT);
                 CREATE INDEX IF NOT EXISTS ix_pairing_state ON pairing_request (state, expires_at_utc);
+                CREATE INDEX IF NOT EXISTS ix_pairing_token_hash ON pairing_request (token_hash);
                 CREATE TABLE IF NOT EXISTS automation_grant (
                     grant_id TEXT PRIMARY KEY, subject TEXT NOT NULL, platform TEXT NOT NULL,
                     device_thumbprint TEXT NOT NULL, scopes TEXT NOT NULL, created_at_utc INTEGER NOT NULL,
                     expires_at_utc INTEGER NOT NULL, revoked_at_utc INTEGER, revoked_by TEXT);
+                CREATE INDEX IF NOT EXISTS ix_grant_active ON automation_grant (revoked_at_utc, expires_at_utc);
                 CREATE TABLE IF NOT EXISTS change_request (
                     change_request_id TEXT PRIMARY KEY, type TEXT NOT NULL, target_key TEXT NOT NULL,
                     payload_json TEXT NOT NULL, reason TEXT, requested_by TEXT NOT NULL, state TEXT NOT NULL,
                     created_at_utc INTEGER NOT NULL, expires_at_utc INTEGER NOT NULL, decided_at_utc INTEGER,
-                    decided_by TEXT, failure_reason TEXT, idempotency_key TEXT NOT NULL);
+                    decided_by TEXT, failure_reason TEXT, idempotency_key TEXT NOT NULL, device_thumbprint TEXT);
                 CREATE UNIQUE INDEX IF NOT EXISTS ix_change_idempotency ON change_request (idempotency_key);
                 CREATE INDEX IF NOT EXISTS ix_change_open_target ON change_request (type, target_key, state);
                 """;
             await command.ExecuteNonQueryAsync(cancellationToken);
+            await AddColumnIfMissingAsync(connection, "change_request", "device_thumbprint", "TEXT", cancellationToken);
+            await PruneExpiredRecordsAsync(connection, cancellationToken);
             SecretFilePermissions.RestrictDatabase(databasePath);
             initialized = true;
         }
@@ -92,17 +98,46 @@ public sealed class AutomationStore : IAsyncDisposable
         }
     }
 
+    private static async Task AddColumnIfMissingAsync(SqliteConnection connection, string table, string column, string sqlType, CancellationToken cancellationToken)
+    {
+        await using (var probe = connection.CreateCommand())
+        {
+            probe.CommandText = $"SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = $name;";
+            probe.Parameters.AddWithValue("$name", column);
+            var exists = Convert.ToInt64(await probe.ExecuteScalarAsync(cancellationToken) ?? 0L);
+            if (exists > 0) return;
+        }
+
+        await using var alter = connection.CreateCommand();
+        alter.CommandText = $"ALTER TABLE {table} ADD COLUMN {column} {sqlType};";
+        await alter.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    private static async Task PruneExpiredRecordsAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        var cutoff = DateTimeOffset.UtcNow.AddDays(-30).ToUnixTimeSeconds();
+        await using var prune = connection.CreateCommand();
+        prune.CommandText = """
+            DELETE FROM pairing_request WHERE expires_at_utc < $cutoff AND state IN ('Denied', 'Expired', 'Locked', 'Pending', 'Approved');
+            DELETE FROM change_request WHERE expires_at_utc < $cutoff AND state IN ('Applied', 'Rejected', 'Cancelled', 'Expired');
+            """;
+        prune.Parameters.AddWithValue("$cutoff", cutoff);
+        await prune.ExecuteNonQueryAsync(cancellationToken);
+    }
+
     /// <summary>
-    /// 持久化实例标识。首次调用生成并落库，之后永不改变。
+    /// 持久化实例标识。首次调用生成并落库，之后缓存且永不改变。
     /// 不得复用 ServerRuntime.InstanceId：那个值是每进程 Guid.NewGuid()，重启即变，
     /// 会让令牌证明与 CLI 固定校验在每次重启后失效。
     /// </summary>
     public async Task<Guid> GetOrCreateInstanceIdAsync(CancellationToken cancellationToken)
     {
+        if (cachedInstanceId is { } existingId) return existingId;
         await InitializeAsync(cancellationToken);
         await gate.WaitAsync(cancellationToken);
         try
         {
+            if (cachedInstanceId is { } loadedId) return loadedId;
             await using var connection = await OpenAsync(cancellationToken);
             await using (var insert = connection.CreateCommand())
             {
@@ -118,7 +153,11 @@ public sealed class AutomationStore : IAsyncDisposable
             await using var read = connection.CreateCommand();
             read.CommandText = "SELECT instance_id FROM automation_instance WHERE id = 1;";
             var value = await read.ExecuteScalarAsync(cancellationToken);
-            return Guid.TryParse(value as string, out var instanceId) ? instanceId : throw new InvalidOperationException("Automation instance id could not be persisted.");
+            var instanceId = Guid.TryParse(value as string, out var parsed)
+                ? parsed
+                : throw new InvalidOperationException("Automation instance id could not be persisted.");
+            cachedInstanceId = instanceId;
+            return instanceId;
         }
         finally
         {
@@ -134,6 +173,70 @@ public sealed class AutomationStore : IAsyncDisposable
     }
 
     // ---------------- 配对 ----------------
+
+    public async Task<bool> TryCreatePairingAsync(PairingRequest request, int maxPendingPairings, int maxAuthorizations, CancellationToken cancellationToken)
+    {
+        await InitializeAsync(cancellationToken);
+        await gate.WaitAsync(cancellationToken);
+        try
+        {
+            var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            await using var connection = await OpenAsync(cancellationToken);
+            await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken);
+
+            await using (var pendingCount = connection.CreateCommand())
+            {
+                pendingCount.Transaction = transaction;
+                pendingCount.CommandText = "SELECT COUNT(*) FROM pairing_request WHERE state = 'Pending' AND expires_at_utc > $now;";
+                pendingCount.Parameters.AddWithValue("$now", now);
+                if (Convert.ToInt32(await pendingCount.ExecuteScalarAsync(cancellationToken)) >= maxPendingPairings)
+                {
+                    await transaction.RollbackAsync(cancellationToken);
+                    return false;
+                }
+            }
+
+            await using (var grantCount = connection.CreateCommand())
+            {
+                grantCount.Transaction = transaction;
+                grantCount.CommandText = "SELECT COUNT(*) FROM automation_grant WHERE revoked_at_utc IS NULL AND expires_at_utc > $now;";
+                grantCount.Parameters.AddWithValue("$now", now);
+                if (Convert.ToInt32(await grantCount.ExecuteScalarAsync(cancellationToken)) >= maxAuthorizations)
+                {
+                    await transaction.RollbackAsync(cancellationToken);
+                    return false;
+                }
+            }
+
+            await using (var command = connection.CreateCommand())
+            {
+                command.Transaction = transaction;
+                command.CommandText = """
+                    INSERT INTO pairing_request (request_id, subject, platform, cli_version, scopes, device_thumbprint,
+                        device_public_key, user_code_digest, user_code_display, state, failed_attempts, created_at_utc, expires_at_utc)
+                    VALUES ($id, $subject, $platform, $cli, $scopes, $thumb, $key, $digest, $display, $state, $attempts, $created, $expires);
+                    """;
+                command.Parameters.AddWithValue("$id", request.RequestId.ToString());
+                command.Parameters.AddWithValue("$subject", request.Subject);
+                command.Parameters.AddWithValue("$platform", request.Platform);
+                command.Parameters.AddWithValue("$cli", request.CliVersion);
+                command.Parameters.AddWithValue("$scopes", string.Join(',', request.Scopes));
+                command.Parameters.AddWithValue("$thumb", request.DeviceThumbprint);
+                command.Parameters.AddWithValue("$key", request.DevicePublicKeyJwk);
+                command.Parameters.AddWithValue("$digest", request.UserCodeDigest);
+                command.Parameters.AddWithValue("$display", request.UserCodeDisplay);
+                command.Parameters.AddWithValue("$state", request.State.ToString());
+                command.Parameters.AddWithValue("$attempts", request.FailedAttempts);
+                command.Parameters.AddWithValue("$created", request.CreatedAtUtc.ToUnixTimeSeconds());
+                command.Parameters.AddWithValue("$expires", request.ExpiresAtUtc.ToUnixTimeSeconds());
+                await command.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            await transaction.CommitAsync(cancellationToken);
+            return true;
+        }
+        finally { gate.Release(); }
+    }
 
     public async Task CreatePairingAsync(PairingRequest request, CancellationToken cancellationToken)
     {
@@ -211,8 +314,11 @@ public sealed class AutomationStore : IAsyncDisposable
         {
             await using var connection = await OpenAsync(cancellationToken);
             await using var command = connection.CreateCommand();
-            command.CommandText = "SELECT COUNT(*) FROM pairing_request WHERE state = $state;";
+            command.CommandText = state is PairingState.Pending or PairingState.Approved
+                ? "SELECT COUNT(*) FROM pairing_request WHERE state = $state AND expires_at_utc > $now;"
+                : "SELECT COUNT(*) FROM pairing_request WHERE state = $state;";
             command.Parameters.AddWithValue("$state", state.ToString());
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToUnixTimeSeconds());
             return Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken));
         }
         finally { gate.Release(); }
@@ -357,7 +463,7 @@ public sealed class AutomationStore : IAsyncDisposable
     /// 这保证两个不同 jti 的并发证明不会各自签发一枚令牌。
     /// </summary>
     public async Task<AutomationGrant?> CompletePairingAsync(Guid requestId, string tokenHash,
-        DateTimeOffset nowUtc, string[]? requestedScopes, CancellationToken cancellationToken)
+        DateTimeOffset nowUtc, string[]? requestedScopes, CancellationToken cancellationToken, int maxAuthorizations = int.MaxValue)
     {
         await InitializeAsync(cancellationToken);
         await gate.WaitAsync(cancellationToken);
@@ -365,6 +471,18 @@ public sealed class AutomationStore : IAsyncDisposable
         {
             await using var connection = await OpenAsync(cancellationToken);
             await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken);
+
+            await using (var grantCount = connection.CreateCommand())
+            {
+                grantCount.Transaction = transaction;
+                grantCount.CommandText = "SELECT COUNT(*) FROM automation_grant WHERE revoked_at_utc IS NULL AND expires_at_utc > $now;";
+                grantCount.Parameters.AddWithValue("$now", nowUtc.ToUnixTimeSeconds());
+                if (Convert.ToInt32(await grantCount.ExecuteScalarAsync(cancellationToken)) >= maxAuthorizations)
+                {
+                    await transaction.RollbackAsync(cancellationToken);
+                    return null;
+                }
+            }
 
             PairingRequest? current;
             await using (var read = connection.CreateCommand())
@@ -606,6 +724,90 @@ public sealed class AutomationStore : IAsyncDisposable
         finally { gate.Release(); }
     }
 
+    public async Task<(bool Created, ChangeRequest? ExistingIdempotent, ChangeRequest? ExistingOpen)> TrySubmitChangeAsync(ChangeRequest request, CancellationToken cancellationToken)
+    {
+        await InitializeAsync(cancellationToken);
+        await gate.WaitAsync(cancellationToken);
+        try
+        {
+            var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            await using var connection = await OpenAsync(cancellationToken);
+            await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken);
+
+            await ExpireStaleChangesAsync(connection, transaction, now, cancellationToken);
+
+            await using (var idem = connection.CreateCommand())
+            {
+                idem.Transaction = transaction;
+                idem.CommandText = SelectChangeSql + " WHERE idempotency_key = $key;";
+                idem.Parameters.AddWithValue("$key", request.IdempotencyKey);
+                await using var reader = await idem.ExecuteReaderAsync(cancellationToken);
+                if (await reader.ReadAsync(cancellationToken))
+                {
+                    var found = ReadChange(reader);
+                    await reader.DisposeAsync();
+                    await transaction.RollbackAsync(cancellationToken);
+                    return (false, found, null);
+                }
+            }
+
+            await using (var open = connection.CreateCommand())
+            {
+                open.Transaction = transaction;
+                open.CommandText = SelectChangeSql +
+                    " WHERE type = $type AND target_key = $target AND state IN ('Pending','Approved','Applying') LIMIT 1;";
+                open.Parameters.AddWithValue("$type", request.Type);
+                open.Parameters.AddWithValue("$target", request.TargetKey);
+                await using var reader = await open.ExecuteReaderAsync(cancellationToken);
+                if (await reader.ReadAsync(cancellationToken))
+                {
+                    var foundOpen = ReadChange(reader);
+                    await reader.DisposeAsync();
+                    await transaction.RollbackAsync(cancellationToken);
+                    return (false, null, foundOpen);
+                }
+            }
+
+            await using (var insert = connection.CreateCommand())
+            {
+                insert.Transaction = transaction;
+                insert.CommandText = """
+                    INSERT INTO change_request (change_request_id, type, target_key, payload_json, reason, requested_by,
+                        state, created_at_utc, expires_at_utc, idempotency_key, device_thumbprint)
+                    VALUES ($id, $type, $target, $payload, $reason, $by, $state, $created, $expires, $key, $thumb);
+                    """;
+                insert.Parameters.AddWithValue("$id", request.ChangeRequestId.ToString());
+                insert.Parameters.AddWithValue("$type", request.Type);
+                insert.Parameters.AddWithValue("$target", request.TargetKey);
+                insert.Parameters.AddWithValue("$payload", request.PayloadJson);
+                insert.Parameters.AddWithValue("$reason", (object?)request.Reason ?? DBNull.Value);
+                insert.Parameters.AddWithValue("$by", request.RequestedBy);
+                insert.Parameters.AddWithValue("$state", request.State.ToString());
+                insert.Parameters.AddWithValue("$created", request.CreatedAtUtc.ToUnixTimeSeconds());
+                insert.Parameters.AddWithValue("$expires", request.ExpiresAtUtc.ToUnixTimeSeconds());
+                insert.Parameters.AddWithValue("$key", request.IdempotencyKey);
+                insert.Parameters.AddWithValue("$thumb", (object?)request.DeviceThumbprint ?? DBNull.Value);
+                await insert.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            await transaction.CommitAsync(cancellationToken);
+            return (true, null, null);
+        }
+        finally { gate.Release(); }
+    }
+
+    private static async Task ExpireStaleChangesAsync(SqliteConnection connection, SqliteTransaction? transaction, long nowUnix, CancellationToken cancellationToken)
+    {
+        await using var expire = connection.CreateCommand();
+        expire.Transaction = transaction;
+        expire.CommandText = """
+            UPDATE change_request SET state = 'Expired'
+            WHERE state IN ('Pending', 'Approved') AND expires_at_utc <= $now;
+            """;
+        expire.Parameters.AddWithValue("$now", nowUnix);
+        await expire.ExecuteNonQueryAsync(cancellationToken);
+    }
+
     public async Task CreateChangeAsync(ChangeRequest request, CancellationToken cancellationToken)
     {
         await InitializeAsync(cancellationToken);
@@ -616,8 +818,8 @@ public sealed class AutomationStore : IAsyncDisposable
             await using var command = connection.CreateCommand();
             command.CommandText = """
                 INSERT INTO change_request (change_request_id, type, target_key, payload_json, reason, requested_by,
-                    state, created_at_utc, expires_at_utc, idempotency_key)
-                VALUES ($id, $type, $target, $payload, $reason, $by, $state, $created, $expires, $key);
+                    state, created_at_utc, expires_at_utc, idempotency_key, device_thumbprint)
+                VALUES ($id, $type, $target, $payload, $reason, $by, $state, $created, $expires, $key, $thumb);
                 """;
             command.Parameters.AddWithValue("$id", request.ChangeRequestId.ToString());
             command.Parameters.AddWithValue("$type", request.Type);
@@ -629,6 +831,7 @@ public sealed class AutomationStore : IAsyncDisposable
             command.Parameters.AddWithValue("$created", request.CreatedAtUtc.ToUnixTimeSeconds());
             command.Parameters.AddWithValue("$expires", request.ExpiresAtUtc.ToUnixTimeSeconds());
             command.Parameters.AddWithValue("$key", request.IdempotencyKey);
+            command.Parameters.AddWithValue("$thumb", (object?)request.DeviceThumbprint ?? DBNull.Value);
             await command.ExecuteNonQueryAsync(cancellationToken);
         }
         finally { gate.Release(); }
@@ -641,6 +844,7 @@ public sealed class AutomationStore : IAsyncDisposable
         try
         {
             await using var connection = await OpenAsync(cancellationToken);
+            await ExpireStaleChangesAsync(connection, null, DateTimeOffset.UtcNow.ToUnixTimeSeconds(), cancellationToken);
             await using var command = connection.CreateCommand();
             command.CommandText = SelectChangeSql + " WHERE change_request_id = $id;";
             command.Parameters.AddWithValue("$id", changeRequestId.ToString());
@@ -650,18 +854,19 @@ public sealed class AutomationStore : IAsyncDisposable
         finally { gate.Release(); }
     }
 
-    public async Task<IReadOnlyList<ChangeRequest>> ListChangesAsync(ChangeState? state, int limit, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<ChangeRequest>> ListChangesAsync(ChangeState? state, int limit, CancellationToken cancellationToken, string? deviceThumbprint = null)
     {
         await InitializeAsync(cancellationToken);
         await gate.WaitAsync(cancellationToken);
         try
         {
             await using var connection = await OpenAsync(cancellationToken);
+            await ExpireStaleChangesAsync(connection, null, DateTimeOffset.UtcNow.ToUnixTimeSeconds(), cancellationToken);
             await using var command = connection.CreateCommand();
-            command.CommandText = state is null
-                ? SelectChangeSql + " ORDER BY created_at_utc DESC LIMIT $limit;"
-                : SelectChangeSql + " WHERE state = $state ORDER BY created_at_utc DESC LIMIT $limit;";
-            if (state is not null) command.Parameters.AddWithValue("$state", state.Value.ToString());
+            command.CommandText = SelectChangeSql +
+                " WHERE ($state IS NULL OR state = $state) AND ($thumb IS NULL OR device_thumbprint = $thumb) ORDER BY created_at_utc DESC LIMIT $limit;";
+            command.Parameters.AddWithValue("$state", state is null ? DBNull.Value : state.Value.ToString());
+            command.Parameters.AddWithValue("$thumb", (object?)deviceThumbprint ?? DBNull.Value);
             command.Parameters.AddWithValue("$limit", limit);
             var results = new List<ChangeRequest>();
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -673,25 +878,30 @@ public sealed class AutomationStore : IAsyncDisposable
 
     /// <summary>状态迁移。仅当当前状态在 allowedFrom 中时生效，返回是否成功。</summary>
     public async Task<bool> TransitionChangeAsync(Guid changeRequestId, ChangeState to, ChangeState[] allowedFrom,
-        string? admin, string? failureReason, DateTimeOffset nowUtc, CancellationToken cancellationToken)
+        string? admin, string? failureReason, DateTimeOffset nowUtc, CancellationToken cancellationToken,
+        bool requireUnexpired = true, string? requiredDeviceThumbprint = null)
     {
         await InitializeAsync(cancellationToken);
         await gate.WaitAsync(cancellationToken);
         try
         {
             await using var connection = await OpenAsync(cancellationToken);
+            await ExpireStaleChangesAsync(connection, null, nowUtc.ToUnixTimeSeconds(), cancellationToken);
             await using var command = connection.CreateCommand();
             var placeholders = string.Join(',', allowedFrom.Select((_, index) => "$from" + index));
+            var expiryPredicate = requireUnexpired ? " AND expires_at_utc > $now" : string.Empty;
+            var ownerPredicate = requiredDeviceThumbprint is not null ? " AND device_thumbprint = $thumb" : string.Empty;
             command.CommandText = $"""
                 UPDATE change_request SET state = $to, decided_at_utc = COALESCE(decided_at_utc, $now),
                     decided_by = COALESCE($admin, decided_by), failure_reason = $failure
-                WHERE change_request_id = $id AND state IN ({placeholders});
+                WHERE change_request_id = $id AND state IN ({placeholders}){expiryPredicate}{ownerPredicate};
                 """;
             command.Parameters.AddWithValue("$to", to.ToString());
             command.Parameters.AddWithValue("$now", nowUtc.ToUnixTimeSeconds());
             command.Parameters.AddWithValue("$admin", (object?)admin ?? DBNull.Value);
             command.Parameters.AddWithValue("$failure", (object?)failureReason ?? DBNull.Value);
             command.Parameters.AddWithValue("$id", changeRequestId.ToString());
+            if (requiredDeviceThumbprint is not null) command.Parameters.AddWithValue("$thumb", requiredDeviceThumbprint);
             for (var index = 0; index < allowedFrom.Length; index++)
                 command.Parameters.AddWithValue("$from" + index, allowedFrom[index].ToString());
             return await command.ExecuteNonQueryAsync(cancellationToken) > 0;
@@ -705,7 +915,7 @@ public sealed class AutomationStore : IAsyncDisposable
 
     private const string SelectChangeSql = """
         SELECT change_request_id, type, target_key, payload_json, reason, requested_by, state, created_at_utc,
-            expires_at_utc, decided_at_utc, decided_by, failure_reason, idempotency_key
+            expires_at_utc, decided_at_utc, decided_by, failure_reason, idempotency_key, device_thumbprint
         FROM change_request
         """;
 
@@ -715,7 +925,10 @@ public sealed class AutomationStore : IAsyncDisposable
         DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(7)), DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(8)),
         reader.IsDBNull(9) ? null : DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(9)),
         reader.IsDBNull(10) ? null : reader.GetString(10), reader.IsDBNull(11) ? null : reader.GetString(11),
-        reader.GetString(12));
+        reader.GetString(12))
+    {
+        DeviceThumbprint = reader.IsDBNull(13) ? null : reader.GetString(13)
+    };
 
     public ValueTask DisposeAsync()
     {

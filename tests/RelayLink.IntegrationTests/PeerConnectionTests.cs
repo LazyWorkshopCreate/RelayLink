@@ -775,8 +775,82 @@ public sealed class PeerConnectionTests
     }
 #endif
 
+    [Fact]
+    public async Task Agent_control_tls_accepts_server_leaf_signed_by_intermediate_ca()
+    {
+        using var rootKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var rootReq = new CertificateRequest("CN=RelayLink Test Root CA", rootKey, HashAlgorithmName.SHA256);
+        rootReq.CertificateExtensions.Add(new X509BasicConstraintsExtension(true, false, 0, true));
+        rootReq.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.KeyCertSign, true));
+        using var root = rootReq.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-5), DateTimeOffset.UtcNow.AddDays(1));
+
+        using var interKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var interReq = new CertificateRequest("CN=RelayLink Intermediate CA", interKey, HashAlgorithmName.SHA256);
+        interReq.CertificateExtensions.Add(new X509BasicConstraintsExtension(true, false, 0, true));
+        interReq.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.KeyCertSign, true));
+        using var signedIntermediate = interReq.Create(root, DateTimeOffset.UtcNow.AddMinutes(-5), DateTimeOffset.UtcNow.AddHours(12), RandomNumberGenerator.GetBytes(16));
+        using var intermediate = signedIntermediate.CopyWithPrivateKey(interKey);
+
+        using var leafKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var leafReq = new CertificateRequest("CN=127.0.0.1", leafKey, HashAlgorithmName.SHA256);
+        var san = new SubjectAlternativeNameBuilder();
+        san.AddIpAddress(IPAddress.Loopback);
+        leafReq.CertificateExtensions.Add(san.Build());
+        leafReq.CertificateExtensions.Add(new X509BasicConstraintsExtension(false, false, 0, true));
+        leafReq.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.DigitalSignature, true));
+        leafReq.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension([new Oid("1.3.6.1.5.5.7.3.1")], true));
+        using var rawLeaf = leafReq.Create(intermediate, DateTimeOffset.UtcNow.AddMinutes(-5), DateTimeOffset.UtcNow.AddHours(4), RandomNumberGenerator.GetBytes(16));
+        using var leafWithKey = rawLeaf.CopyWithPrivateKey(leafKey);
+        using var serverLeaf = OperatingSystem.IsWindows()
+            ? X509CertificateLoader.LoadPkcs12(leafWithKey.Export(X509ContentType.Pkcs12), null, X509KeyStorageFlags.UserKeySet)
+            : X509CertificateLoader.LoadPkcs12(leafWithKey.Export(X509ContentType.Pkcs12), null, X509KeyStorageFlags.DefaultKeySet);
+
+        using var dir = new TestDirectory("relaylink-inter-ca-");
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+
+        var agent = new AgentConfiguration("127.0.0.1", port, "inter-agent", Convert.ToBase64String(new byte[32]), true, null,
+            new ReconnectConfiguration(1, 2, 3))
+        {
+            TrustedCaPemBase64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(root.ExportCertificatePem())),
+            E2eIdentityPath = Path.Combine(dir.Path, "identity.pfx"),
+            PortStatePath = Path.Combine(dir.Path, "ports.json"),
+            DataPort = port + 1
+        };
+
+        using var worker = new ControlSessionWorker(agent, new AgentStatus(agent), new AgentDiagnosticLog(agent),
+            new AgentConnectionQuota(10, 5), Microsoft.Extensions.Logging.Abstractions.NullLogger<ControlSessionWorker>.Instance);
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        await worker.StartAsync(deadline.Token);
+        try
+        {
+            using var accepted = await listener.AcceptTcpClientAsync(deadline.Token);
+            using var serverTls = new SslStream(accepted.GetStream(), false);
+            var intermediates = new X509Certificate2Collection(signedIntermediate);
+            var context = SslStreamCertificateContext.Create(serverLeaf, intermediates, offline: true);
+            await serverTls.AuthenticateAsServerAsync(new SslServerAuthenticationOptions
+            {
+                ServerCertificateContext = context,
+                EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
+                ClientCertificateRequired = false,
+                CertificateRevocationCheckMode = X509RevocationMode.NoCheck
+            }, deadline.Token);
+
+            var frame = await new FrameReader(serverTls).ReadAsync(ProtocolConstants.MaxControlPayloadLength, deadline.Token);
+            Assert.NotNull(frame);
+            Assert.Equal(FrameType.Register, frame!.Type);
+        }
+        finally
+        {
+            await worker.StopAsync(CancellationToken.None);
+        }
+    }
+
     internal sealed class Fixture : IDisposable
     {
+        // Leave headroom for fixture setup and extended soak runs.
+        private static readonly TimeSpan certificateLifetime = TimeSpan.FromDays(2);
         private readonly TestDirectory storage = new("relaylink-peer-");
         private string directory => storage.Path;
         private readonly TcpListener target = new(IPAddress.Loopback, 0);
@@ -1148,7 +1222,8 @@ public sealed class PeerConnectionTests
             request.CertificateExtensions.Add(new X509BasicConstraintsExtension(false, false, 0, true));
             request.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.DigitalSignature, true));
             request.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension([new System.Security.Cryptography.Oid("1.3.6.1.5.5.7.3.1")], true));
-            using var certificate = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-5), DateTimeOffset.UtcNow.AddHours(2));
+            var now = DateTimeOffset.UtcNow;
+            using var certificate = request.CreateSelfSigned(now.AddMinutes(-5), now.Add(certificateLifetime));
             File.WriteAllBytes(path, certificate.Export(X509ContentType.Pkcs12));
             return Convert.ToHexString(SHA256.HashData(certificate.RawData));
         }
@@ -1159,7 +1234,8 @@ public sealed class PeerConnectionTests
             var rootRequest = new CertificateRequest("CN=RelayLink Test Root", rootKey, HashAlgorithmName.SHA256);
             rootRequest.CertificateExtensions.Add(new X509BasicConstraintsExtension(true, false, 0, true));
             rootRequest.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.KeyCertSign | X509KeyUsageFlags.CrlSign, true));
-            using var root = rootRequest.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-5), DateTimeOffset.UtcNow.AddDays(1));
+            var now = DateTimeOffset.UtcNow;
+            using var root = rootRequest.CreateSelfSigned(now.AddMinutes(-5), now.Add(certificateLifetime).AddDays(1));
             File.WriteAllText(caPath, root.ExportCertificatePem());
             using var serverKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
             var serverRequest = new CertificateRequest("CN=127.0.0.1", serverKey, HashAlgorithmName.SHA256);
@@ -1169,7 +1245,7 @@ public sealed class PeerConnectionTests
             serverRequest.CertificateExtensions.Add(new X509BasicConstraintsExtension(false, false, 0, true));
             serverRequest.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.DigitalSignature, true));
             serverRequest.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension([new System.Security.Cryptography.Oid("1.3.6.1.5.5.7.3.1")], true));
-            using var server = serverRequest.Create(root, DateTimeOffset.UtcNow.AddMinutes(-5), DateTimeOffset.UtcNow.AddHours(2), RandomNumberGenerator.GetBytes(16));
+            using var server = serverRequest.Create(root, now.AddMinutes(-5), now.Add(certificateLifetime), RandomNumberGenerator.GetBytes(16));
             File.WriteAllText(certificatePath, server.ExportCertificatePem());
             File.WriteAllText(keyPath, serverKey.ExportPkcs8PrivateKeyPem());
         }

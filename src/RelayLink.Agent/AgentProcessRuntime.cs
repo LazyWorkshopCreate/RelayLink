@@ -17,6 +17,7 @@ public sealed class AgentProcessRuntime(AgentProcessConfiguration configuration,
     private readonly Dictionary<string, Context> contexts = new(StringComparer.Ordinal);
     private readonly object gate = new();
     private readonly SemaphoreSlim mutationGate = new(1, 1);
+    private readonly ILogger<AgentProcessRuntime> logger = loggerFactory.CreateLogger<AgentProcessRuntime>();
     private AgentProcessConfiguration current = configuration;
     private string version = ReadVersion(path.Value);
     private bool stopping;
@@ -180,6 +181,7 @@ public sealed class AgentProcessRuntime(AgentProcessConfiguration configuration,
                 contexts[profileId] = replacement;
             }
             try { await previous.Worker.StopAsync(CancellationToken.None); }
+            catch (Exception exception) { logger.LogWarning(exception, "Stopping previous worker for profile {ProfileId} failed during update.", profileId); }
             finally { previous.Worker.Dispose(); }
             if (profile.Enabled) await replacement.Worker.StartAsync(CancellationToken.None);
             return newVersion;
@@ -218,6 +220,7 @@ public sealed class AgentProcessRuntime(AgentProcessConfiguration configuration,
                 contexts[profileId] = replacement;
             }
             try { await previous.Worker.StopAsync(CancellationToken.None); }
+            catch (Exception exception) { logger.LogWarning(exception, "Stopping previous worker for profile {ProfileId} failed during state change.", profileId); }
             finally { previous.Worker.Dispose(); }
             if (enabled) await replacement.Worker.StartAsync(CancellationToken.None);
             return new AgentEnabledProfileChange(newVersion, profile);
@@ -246,7 +249,7 @@ public sealed class AgentProcessRuntime(AgentProcessConfiguration configuration,
                 stream.Flush(flushToDisk: true);
             }
             BeforeConfigurationCommit?.Invoke();
-            File.Move(temporary, fullPath, overwrite: true);
+            AgentPortAllocator.ReplacePortStateFile(temporary, fullPath);
             return Convert.ToHexString(SHA256.HashData(bytes));
         }
         finally { if (File.Exists(temporary)) File.Delete(temporary); }

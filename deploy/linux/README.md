@@ -14,7 +14,7 @@ sudo install -o relaylink -g relaylink -m 0600 ./server.json /etc/relaylink/serv
 部署前执行：
 
 ```bash
-/opt/relaylink/server/RelayLink.Server --config /etc/relaylink/server.json --check-config
+sudo -u relaylink /opt/relaylink/server/RelayLink.Server --config /etc/relaylink/server.json --check-config
 sudo install -m 0644 deploy/linux/relaylink-server.service /etc/systemd/system/relaylink-server.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now relaylink-server

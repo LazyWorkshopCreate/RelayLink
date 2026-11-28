@@ -128,9 +128,26 @@ public sealed class DatagramSession(IPEndPoint source, UdpClient listener) : IDi
 
 public sealed class DatagramListener(UdpClient listenerSocket)
 {
-    private readonly UdpClient socket = DatagramRelay.PrepareSocket(listenerSocket);
+    private readonly UdpClient socket = PrepareListenerSocket(listenerSocket);
     private int stopping;
     public int Port => ((IPEndPoint)socket.Client.LocalEndPoint!).Port;
+
+    private static UdpClient PrepareListenerSocket(UdpClient client)
+    {
+        var prepared = DatagramRelay.PrepareSocket(client);
+        if (OperatingSystem.IsWindows())
+        {
+            try
+            {
+                const int SioUdpConnReset = -1744830452;
+                prepared.Client.IOControl(SioUdpConnReset, new byte[] { 0, 0, 0, 0 }, null);
+            }
+            catch (Exception exception) when (exception is SocketException or PlatformNotSupportedException or ObjectDisposedException)
+            {
+            }
+        }
+        return prepared;
+    }
 
     public void Stop()
     {
@@ -145,6 +162,7 @@ public sealed class DatagramListener(UdpClient listenerSocket)
         using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1));
         var receive = socket.ReceiveAsync(lifetime.Token).AsTask();
         var tick = timer.WaitForNextTickAsync(lifetime.Token).AsTask();
+        var consecutiveReceiveErrors = 0;
         try
         {
             while (true)
@@ -162,8 +180,28 @@ public sealed class DatagramListener(UdpClient listenerSocket)
                     tick = timer.WaitForNextTickAsync(lifetime.Token).AsTask();
                     if (!receive.IsCompleted) continue;
                 }
-                var packet = await receive;
-                receive = socket.ReceiveAsync(lifetime.Token).AsTask();
+                UdpReceiveResult packet;
+                try
+                {
+                    packet = await receive;
+                    consecutiveReceiveErrors = 0;
+                    receive = socket.ReceiveAsync(lifetime.Token).AsTask();
+                }
+                catch (SocketException exception) when (!token.IsCancellationRequested && Volatile.Read(ref stopping) == 0 && socket.Client is not null)
+                {
+                    if (exception.SocketErrorCode is SocketError.ConnectionReset or SocketError.NetworkReset or SocketError.MessageSize)
+                    {
+                        receive = socket.ReceiveAsync(lifetime.Token).AsTask();
+                        continue;
+                    }
+                    if (++consecutiveReceiveErrors <= 3)
+                    {
+                        await Task.Delay(TimeSpan.FromMilliseconds(200L * consecutiveReceiveErrors), lifetime.Token);
+                        receive = socket.ReceiveAsync(lifetime.Token).AsTask();
+                        continue;
+                    }
+                    throw;
+                }
                 if (packet.Buffer.Length > DatagramRelay.MaxPayloadLength || !allowed(packet.RemoteEndPoint)) continue;
                 if (!sessions.TryGetValue(packet.RemoteEndPoint, out var current))
                 {

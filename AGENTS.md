@@ -7,9 +7,9 @@
 ## 范围与实现
 
 - 使用 C# / .NET；项目和命名空间前缀为 RelayLink。
-- 首期 TCP 基线保留；2026-10-05 明确扩展单播 UDP（REQ-001L）；每客户端独立密钥与服务端配置下发。当前平台范围以需求与 README 为准。
+- 首期 TCP 基线保留；已实现单播 UDP（REQ-001L）、HTTP/HTTPS 反向代理（REQ-001N）、可选回环自动化管理面 / CLI / Skill 与六语言数据面 SDK（REQ-001P）；每客户端独立密钥与服务端配置下发。当前平台范围以需求与 README 为准。
 - 网络 ACL 由安全组负责；保持设计中的 TLS、身份校验和资源限制。
-- 通道不在 Agent 本地维护，不引入热更新、写入型仪表盘或 SQL 重放。
+- 通道与映射不在 Agent 本地维护，不引入热更新、写入型公网仪表盘或 SQL 重放；Agent 本机仅通过导入服务端单服务端 JSON 管理连接项与本机状态页写会话（ADR-0022/0023/0034）。
 - 文档中的 Draft/Proposed 不是已批准或已实现的事实。遵从用户后续明确决策，改动时同步文档。
 - 不自行扩展需求；影响既有架构的决定记录 ADR，普通修复无需单独 ADR。
 
@@ -36,11 +36,18 @@ npm --prefix website ci
 dotnet restore RelayLink.slnx --configfile NuGet.Config
 pnpm --dir src/RelayLink.AdminWeb typecheck
 pnpm --dir src/RelayLink.AdminWeb test
+pnpm --dir src/RelayLink.AdminWeb build
 pnpm --dir src/RelayLink.AdminWeb format:check
 pnpm --dir src/RelayLink.AgentWeb build
+pnpm --dir src/RelayLink.AgentWeb test
 pnpm --dir src/RelayLink.AgentWeb format:check
 node scripts/build-website.mjs
 npm --prefix website test
+node --check skills/relaylink-admin/scripts/relaylink.mjs
+npm --prefix sdk/typescript ci
+npm --prefix sdk/typescript test
+python3 -m unittest discover -s sdk/python/tests -v
+dotnet build src/RelayLink.Sdk/RelayLink.Sdk.csproj --configuration Release --no-restore
 dotnet test tests/RelayLink.UnitTests/RelayLink.UnitTests.csproj --configuration Release -p:SkipAdminWebBuild=true
 dotnet test tests/RelayLink.IntegrationTests/RelayLink.IntegrationTests.csproj --configuration Release -p:EnablePeerTlsTests=true -p:SkipAdminWebBuild=true
 ```

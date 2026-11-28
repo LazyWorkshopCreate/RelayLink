@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using RelayLink.Server.Runtime;
 
 namespace RelayLink.Server.Automation;
@@ -12,9 +13,13 @@ public sealed class AutomationTokenService(
     AuditService audit,
     ILogger<AutomationTokenService> logger)
 {
+    private readonly ConcurrentDictionary<string, long> recentReadAudits = new(StringComparer.Ordinal);
+    private const long ReadAuditCoalesceWindowMs = 60_000;
+    private const int MaxTrackedReadAudits = 4096;
+
     public sealed record Authorized(AutomationGrant Grant, string TokenHash, Guid InstanceId);
 
-    public sealed record Denial(string Code, string Message, Authorized? Authorized);
+    public sealed record Denial(string Code, string Message, Authorized? Authorized, object? Details = null);
 
     public async Task<Denial> AuthorizeAsync(HttpRequest request, string? requiredScope, CancellationToken cancellationToken)
     {
@@ -37,6 +42,9 @@ public sealed class AutomationTokenService(
         var now = DateTimeOffset.UtcNow;
         if (grant.ExpiresAtUtc <= now)
             return new Denial(AutomationErrors.TokenExpired, "该令牌已过期，请重新配对。", null);
+
+        if (pairing.IsTokenRateLimited(grant.GrantId.ToString()))
+            return new Denial(AutomationErrors.RateLimited, "当前令牌请求过于频繁，请稍后重试。", null);
 
         var instanceId = await store.GetOrCreateInstanceIdAsync(cancellationToken);
 
@@ -70,19 +78,46 @@ public sealed class AutomationTokenService(
         if (requiredScope is not null && !AutomationScopes.Satisfies(grant.Scopes, requiredScope))
         {
             await TryAuditAsync("automation_request", "denied", grant, null, AutomationErrors.ScopeInsufficient, cancellationToken);
-            return new Denial(AutomationErrors.ScopeInsufficient, $"令牌不具备 {requiredScope} 权限。", null);
+            return new Denial(AutomationErrors.ScopeInsufficient, $"令牌不具备 {requiredScope} 权限。", null, new { required = requiredScope });
         }
 
         return new Denial(string.Empty, string.Empty, new Authorized(grant, tokenHash, instanceId));
     }
 
-    public async Task TryAuditAsync(string eventType, string outcome, AutomationGrant? grant, Guid? changeRequestId, string? reasonCode, CancellationToken cancellationToken)
+    public async Task TryAuditReadAsync(AutomationGrant grant, string method, string path, string? clientId, CancellationToken cancellationToken)
+    {
+        var now = Environment.TickCount64;
+        if (recentReadAudits.Count >= MaxTrackedReadAudits)
+        {
+            foreach (var entry in recentReadAudits.ToArray())
+            {
+                if (now - entry.Value >= ReadAuditCoalesceWindowMs) recentReadAudits.TryRemove(entry.Key, out _);
+            }
+            if (recentReadAudits.Count >= MaxTrackedReadAudits) return;
+        }
+
+        var key = $"{grant.GrantId}\0{method}\0{path}\0{clientId}";
+        var shouldAudit = false;
+        while (true)
+        {
+            if (recentReadAudits.TryAdd(key, now)) { shouldAudit = true; break; }
+            if (!recentReadAudits.TryGetValue(key, out var previous)) continue;
+            if (now - previous < ReadAuditCoalesceWindowMs) return;
+            if (recentReadAudits.TryUpdate(key, now, previous)) { shouldAudit = true; break; }
+        }
+
+        if (!shouldAudit) return;
+        await TryAuditAsync("automation_request", "accepted", grant, clientId, $"{method} {path}", cancellationToken);
+    }
+
+    public async Task TryAuditAsync(string eventType, string outcome, AutomationGrant? grant, string? clientId, string? reasonCode, CancellationToken cancellationToken)
     {
         try
         {
             await audit.RecordAsync(new AuditEvent(eventType, outcome)
             {
                 Actor = grant is null ? "automation" : $"automation:{grant.Subject}",
+                ClientId = clientId,
                 AutomationGrantId = grant?.GrantId,
                 DeviceKeyThumbprint = grant?.DeviceThumbprint,
                 ReasonCode = reasonCode
@@ -94,16 +129,22 @@ public sealed class AutomationTokenService(
         }
     }
 
+    public Task EnsureAuditAvailableAsync(CancellationToken cancellationToken) =>
+        audit.CheckAvailableAsync(cancellationToken);
+
     /// <summary>
-    /// 写操作前置审计闸门：审计存储不可用时抛出 AuditUnavailableException，
-    /// 由端点转成 audit_unavailable 且不执行任何配置变更（需求 §「审计存储不可用」）。
-    /// 只读路径继续用 TryAuditAsync 放行并告警，这里只服务于写与 C 类申请。
+    /// 写操作审计记录：审计存储不可用时抛出 AuditUnavailableException。
+    /// 只读路径继续用 TryAuditAsync 放行并告警。
     /// </summary>
-    public async Task RequireAuditAsync(AutomationGrant grant, string eventType, CancellationToken cancellationToken)
+    public async Task RequireAuditAsync(AutomationGrant grant, string eventType, CancellationToken cancellationToken,
+        string? clientId = null, string? channelId = null, string? reasonCode = null)
     {
         await audit.RecordAsync(new AuditEvent(eventType, "accepted")
         {
             Actor = $"automation:{grant.Subject}",
+            ClientId = clientId,
+            ChannelId = channelId,
+            ReasonCode = reasonCode,
             AutomationGrantId = grant.GrantId,
             DeviceKeyThumbprint = grant.DeviceThumbprint
         }, cancellationToken);

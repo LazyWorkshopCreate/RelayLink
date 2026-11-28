@@ -41,18 +41,28 @@ public static class DeviceProof
         {
             using var document = JsonDocument.Parse(jwkJson);
             var root = document.RootElement;
-            if (!root.TryGetProperty("kty", out var kty) || kty.GetString() != "EC") return null;
-            if (!root.TryGetProperty("crv", out var crv) || crv.GetString() != "P-256") return null;
-            if (!root.TryGetProperty("x", out var x) || !root.TryGetProperty("y", out var y)) return null;
+            if (root.ValueKind != JsonValueKind.Object) return null;
+            if (!root.TryGetProperty("kty", out var kty) || kty.ValueKind != JsonValueKind.String || kty.GetString() != "EC") return null;
+            if (!root.TryGetProperty("crv", out var crv) || crv.ValueKind != JsonValueKind.String || crv.GetString() != "P-256") return null;
+            if (!root.TryGetProperty("x", out var x) || x.ValueKind != JsonValueKind.String ||
+                !root.TryGetProperty("y", out var y) || y.ValueKind != JsonValueKind.String) return null;
             var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
-            key.ImportParameters(new ECParameters
+            try
             {
-                Curve = ECCurve.NamedCurves.nistP256,
-                Q = new ECPoint { X = Base64UrlDecode(x.GetString()!), Y = Base64UrlDecode(y.GetString()!) }
-            });
-            return key;
+                key.ImportParameters(new ECParameters
+                {
+                    Curve = ECCurve.NamedCurves.nistP256,
+                    Q = new ECPoint { X = Base64UrlDecode(x.GetString()!), Y = Base64UrlDecode(y.GetString()!) }
+                });
+                return key;
+            }
+            catch
+            {
+                key.Dispose();
+                throw;
+            }
         }
-        catch (Exception exception) when (exception is JsonException or ArgumentException or CryptographicException)
+        catch (Exception exception) when (exception is JsonException or FormatException or ArgumentException or CryptographicException)
         {
             return null;
         }
@@ -123,7 +133,12 @@ public static class DeviceProof
         using (payloadDocument)
         {
             var headerRoot = headerDocument.RootElement;
-            if (!headerRoot.TryGetProperty("alg", out var algorithm) || algorithm.GetString() != "ES256")
+            if (headerRoot.ValueKind != JsonValueKind.Object || payloadDocument.RootElement.ValueKind != JsonValueKind.Object)
+            {
+                error = new ValidationError("proof_invalid", "证明头与载荷必须是 JSON 对象。");
+                return false;
+            }
+            if (!headerRoot.TryGetProperty("alg", out var algorithm) || algorithm.ValueKind != JsonValueKind.String || algorithm.GetString() != "ES256")
             {
                 error = new ValidationError("proof_invalid", "证明必须使用 ES256。");
                 return false;

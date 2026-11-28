@@ -14,14 +14,19 @@ public final class UdpEntry {
     }
 
     public static DatagramSocket bind(EntryDescriptor entry) {
+        if (entry == null) {
+            throw new RelayLinkException(RelayLinkException.INVALID_USAGE, "entry 不能为空。");
+        }
         if (!"udp".equals(entry.transport())) {
             throw new RelayLinkException(RelayLinkException.INVALID_USAGE, "该入口不是 UDP。");
         }
 
         DatagramSocket socket = null;
         try {
-            // InetSocketAddress 的主机解析失败以 IAE（未受检）抛出，统一转为 entry_not_found。
             var address = new InetSocketAddress(entry.host(), entry.port());
+            if (address.isUnresolved()) {
+                throw new RelayLinkException(RelayLinkException.ENTRY_NOT_FOUND, "无法解析 UDP 入口。");
+            }
             socket = new DatagramSocket();
             socket.connect(address);
             return socket;

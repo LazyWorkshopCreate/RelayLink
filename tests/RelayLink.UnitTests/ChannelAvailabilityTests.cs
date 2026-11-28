@@ -42,6 +42,10 @@ public sealed class ChannelAvailabilityTests
         Assert.True(ChannelAvailability.IsOutboundMappingAvailable(mapping, address, Channel("private", "tcp"), new Session(Guid.NewGuid(), "caller", DateTimeOffset.UtcNow) { ProtocolVersion = 3 }, target));
         Assert.False(ChannelAvailability.IsOutboundMappingAvailable(mapping, null, udp, caller, target));
         Assert.False(ChannelAvailability.IsOutboundMappingAvailable(mapping with { Enabled = false }, address, udp, caller, target));
+        Assert.False(ChannelAvailability.IsOutboundMappingAvailable(mapping, address, Channel("private", "tcp") with { Enabled = false }, caller, target));
+        Assert.False(ChannelAvailability.IsOutboundMappingAvailable(mapping, address, Channel("private", "tcp"), caller, null));
+        target.Close();
+        Assert.False(ChannelAvailability.IsOutboundMappingAvailable(mapping, address, Channel("private", "tcp"), caller, target));
     }
 
     private static ChannelConfiguration Channel(string id, string transport) =>

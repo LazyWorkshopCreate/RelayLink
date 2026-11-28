@@ -12,9 +12,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -57,8 +60,12 @@ type EntryDescriptor struct {
 
 // NewEntryDescriptor 校验并创建入口描述。
 func NewEntryDescriptor(host string, port int, transport string) (*EntryDescriptor, error) {
-	if host == "" {
+	clean := strings.TrimSpace(host)
+	if clean == "" {
 		return nil, newError(InvalidUsage, "host 不能为空。")
+	}
+	if strings.HasPrefix(clean, "[") && strings.HasSuffix(clean, "]") && len(clean) > 2 {
+		clean = clean[1 : len(clean)-1]
 	}
 	if port < 1 || port > 65535 {
 		return nil, newError(InvalidUsage, "port 必须在 1–65535。")
@@ -66,18 +73,27 @@ func NewEntryDescriptor(host string, port int, transport string) (*EntryDescript
 	if transport == "" {
 		transport = "tcp"
 	}
-	return &EntryDescriptor{Host: host, Port: port, Transport: transport}, nil
+	if transport != "tcp" && transport != "udp" {
+		return nil, newError(InvalidUsage, "transport 必须为 tcp 或 udp。")
+	}
+	return &EntryDescriptor{Host: clean, Port: port, Transport: transport}, nil
 }
 
-// Endpoint 返回 host:port 形式。
+// Endpoint 返回 host:port 形式（IPv6 自动加方括号）。
 func (e *EntryDescriptor) Endpoint() string {
-	return fmt.Sprintf("%s:%d", e.Host, e.Port)
+	return net.JoinHostPort(e.Host, strconv.Itoa(e.Port))
 }
 
 // ConnectTCP 连接 TCP 入口。一次业务流一条连接，支持单向半关闭。
 func ConnectTCP(entry *EntryDescriptor, connectTimeout time.Duration) (net.Conn, error) {
+	if entry == nil {
+		return nil, newError(InvalidUsage, "entry 不能为空。")
+	}
 	if entry.Transport != "tcp" {
 		return nil, newError(InvalidUsage, "该入口不是 TCP。")
+	}
+	if connectTimeout <= 0 {
+		return nil, newError(InvalidUsage, "connectTimeout 必须大于 0。")
 	}
 	conn, err := net.DialTimeout("tcp", entry.Endpoint(), connectTimeout)
 	if err != nil {
@@ -95,8 +111,7 @@ func classifyDialError(err error) *RelayLinkError {
 	if errors.As(err, &netErr) && netErr.Timeout() {
 		return &RelayLinkError{Code: Timeout, Message: "连接入口超时。", Err: err}
 	}
-	message := err.Error()
-	if containsConnectionRefused(message) {
+	if errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.Errno(10061)) || containsConnectionRefused(err.Error()) {
 		return &RelayLinkError{Code: EntryUnavailable, Message: "入口拒绝连接。", Err: err}
 	}
 	return &RelayLinkError{Code: TargetConnectFailed, Message: "连接入口失败。", Err: err}
@@ -120,6 +135,9 @@ func ShutdownWrite(conn net.Conn) error {
 
 // BindUDP 绑定 UDP 入口。单 socket 会话，保留报文边界。
 func BindUDP(entry *EntryDescriptor) (*net.UDPConn, error) {
+	if entry == nil {
+		return nil, newError(InvalidUsage, "entry 不能为空。")
+	}
 	if entry.Transport != "udp" {
 		return nil, newError(InvalidUsage, "该入口不是 UDP。")
 	}
@@ -148,10 +166,13 @@ func SendUDP(conn *net.UDPConn, payload []byte) error {
 
 type agentSnapshot struct {
 	Servers []struct {
-		Mappings []struct {
-			TargetClientID  string  `json:"targetClientId"`
-			TargetChannelID string  `json:"targetChannelId"`
-			LocalAddress    *string `json:"localAddress"`
+		ProfileID string `json:"profileId"`
+		Mappings  []struct {
+			Enabled           *bool   `json:"enabled"`
+			TargetClientID    string  `json:"targetClientId"`
+			TargetChannelID   string  `json:"targetChannelId"`
+			LocalAddress      *string `json:"localAddress"`
+			TransportProtocol string  `json:"transportProtocol"`
 		} `json:"mappings"`
 	} `json:"servers"`
 }
@@ -159,25 +180,62 @@ type agentSnapshot struct {
 // DiscoverMapping 从本机 Agent 的 v2 只读 API 发现授权互访入口。
 // 只覆盖授权互访；普通代理入口必须显式配置。
 func DiscoverMapping(targetClientID, targetChannelID string, dashboardPort int) (*EntryDescriptor, error) {
+	return DiscoverMappingForProfile(targetClientID, targetChannelID, dashboardPort, "")
+}
+
+// DiscoverMappingForProfile 按可选 profileID 从本机 Agent 的 v2 只读 API 发现授权互访入口。
+func DiscoverMappingForProfile(targetClientID, targetChannelID string, dashboardPort int, profileID string) (*EntryDescriptor, error) {
 	if dashboardPort < 1 || dashboardPort > 65535 {
 		return nil, newError(InvalidUsage, "dashboardPort 无效。")
 	}
+	if targetClientID == "" || targetChannelID == "" {
+		return nil, newError(InvalidUsage, "targetClientID 与 targetChannelID 不能为空。")
+	}
 
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := &http.Client{
+		Timeout:   5 * time.Second,
+		Transport: &http.Transport{Proxy: nil},
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 	url := fmt.Sprintf("http://127.0.0.1:%d/api/v2/mappings", dashboardPort)
 	response, err := client.Get(url)
 	if err != nil {
+		var netErr net.Error
+		if errors.As(err, &netErr) && netErr.Timeout() {
+			return nil, &RelayLinkError{Code: Timeout, Message: "查询本机 Agent 只读 API 超时。", Err: err}
+		}
 		return nil, &RelayLinkError{Code: EntryUnavailable, Message: "无法连接本机 Agent 只读 API。", Err: err}
 	}
 	defer response.Body.Close()
 
+	if response.StatusCode != http.StatusOK {
+		return nil, newError(EntryUnavailable, "Agent 只读 API 返回 %d。", response.StatusCode)
+	}
+
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		var netErr net.Error
+		if errors.As(err, &netErr) && netErr.Timeout() {
+			return nil, &RelayLinkError{Code: Timeout, Message: "读取本机 Agent 响应超时。", Err: err}
+		}
+		return nil, &RelayLinkError{Code: EntryUnavailable, Message: "读取本机 Agent 响应失败。", Err: err}
+	}
+
 	var snapshot agentSnapshot
-	if err := json.NewDecoder(response.Body).Decode(&snapshot); err != nil {
+	if err := json.Unmarshal(body, &snapshot); err != nil {
 		return nil, &RelayLinkError{Code: ConfigurationDrift, Message: "Agent 返回了无法解析的内容。", Err: err}
 	}
 
 	for _, server := range snapshot.Servers {
+		if profileID != "" && server.ProfileID != profileID {
+			continue
+		}
 		for _, mapping := range server.Mappings {
+			if mapping.Enabled != nil && !*mapping.Enabled {
+				continue
+			}
 			if mapping.TargetClientID != targetClientID || mapping.TargetChannelID != targetChannelID {
 				continue
 			}
@@ -188,11 +246,15 @@ func DiscoverMapping(targetClientID, targetChannelID string, dashboardPort int) 
 			if err != nil {
 				continue
 			}
-			var port int
-			if _, err := fmt.Sscanf(portText, "%d", &port); err != nil {
+			port, err := strconv.Atoi(portText)
+			if err != nil || port < 1 || port > 65535 {
 				continue
 			}
-			return NewEntryDescriptor(host, port, "tcp")
+			transport := mapping.TransportProtocol
+			if transport == "" {
+				transport = "tcp"
+			}
+			return NewEntryDescriptor(host, port, transport)
 		}
 	}
 

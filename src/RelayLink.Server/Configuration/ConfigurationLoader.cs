@@ -163,10 +163,7 @@ public sealed class ConfigurationLoader
         ValidateAddressAndPort(server.Tunnel.ListenAddress, server.Tunnel.EffectiveDataPort, "data endpoint");
         if (server.Tunnel.Port == server.Tunnel.EffectiveDataPort)
             throw new ConfigurationException("Control and data endpoints must use different ports.");
-        if (server.Tunnel.AgentServerHost is { } agentServerHost &&
-            (string.IsNullOrWhiteSpace(agentServerHost) ||
-             Uri.CheckHostName(agentServerHost) == UriHostNameType.Unknown ||
-             agentServerHost is "0.0.0.0" or "::"))
+        if (server.Tunnel.AgentServerHost is { } agentServerHost && !IsValidAgentServerHost(agentServerHost))
         {
             throw new ConfigurationException("Tunnel agentServerHost must be a DNS name or a concrete IP address.");
         }
@@ -192,7 +189,7 @@ public sealed class ConfigurationLoader
             using var certificate = X509Certificate2.CreateFromPemFile(server.Tunnel.CertificatePemPath, server.Tunnel.PrivateKeyPemPath);
             if (!certificate.HasPrivateKey) throw new CryptographicException("Certificate did not load a private key.");
         }
-        catch (Exception exception) when (exception is CryptographicException or IOException or ArgumentException)
+        catch (Exception exception) when (exception is CryptographicException or IOException or ArgumentException or UnauthorizedAccessException or System.Security.SecurityException)
         {
             throw new ConfigurationException($"Unable to load tunnel certificate and private key: {exception.Message}");
         }
@@ -210,13 +207,13 @@ public sealed class ConfigurationLoader
                     throw new ConfigurationException("Trusted CA PEM must contain only CA certificates.");
                 foreach (var certificate in certificates) certificate.Dispose();
             }
-            catch (Exception exception) when (exception is CryptographicException or IOException or ArgumentException)
+            catch (Exception exception) when (exception is CryptographicException or IOException or ArgumentException or UnauthorizedAccessException or System.Security.SecurityException)
             {
                 throw new ConfigurationException($"Unable to load tunnel trusted CA PEM: {exception.Message}");
             }
         }
 
-        if (server.Limits.MaxConnections < 1 || server.Limits.MaxPendingConnections < 1 || server.Limits.MaxPendingConnections > server.Limits.MaxConnections || server.Limits.MaxUnauthenticatedConnections < 1 || server.Limits.MaxChannelsPerClient < 1 || server.Limits.OpenTimeoutSeconds < 1 || server.Limits.BlockedWriteTimeoutSeconds < 1 || server.Limits.HalfCloseDrainTimeoutSeconds < 1 || server.Limits.TcpIdleTimeoutSeconds is < 0 or > 86_400)
+        if (server.Limits.MaxConnections < 1 || server.Limits.MaxPendingConnections < 1 || server.Limits.MaxPendingConnections > server.Limits.MaxConnections || server.Limits.MaxUnauthenticatedConnections < 1 || server.Limits.MaxChannelsPerClient < 1 || server.Limits.OpenTimeoutSeconds is < 1 or > 300 || server.Limits.BlockedWriteTimeoutSeconds < 1 || server.Limits.HalfCloseDrainTimeoutSeconds < 1 || server.Limits.TcpIdleTimeoutSeconds is < 0 or > 86_400)
         {
             throw new ConfigurationException("Server limits are invalid.");
         }
@@ -278,7 +275,7 @@ public sealed class ConfigurationLoader
         foreach (var client in clients)
         foreach (var channel in client.Channels)
         {
-            if (!IsLoopbackHost(channel.TargetHost) || channel.TargetPort != automation.Port) continue;
+            if (!IsLoopbackOrUnspecifiedHost(channel.TargetHost) || channel.TargetPort != automation.Port) continue;
             if (channel.AuthorizedClientsOnly && channel.EndToEndEncryptionEnabled && channel.ApplicationProtocol == "raw")
                 continue;
             throw new ConfigurationException(
@@ -286,9 +283,21 @@ public sealed class ConfigurationLoader
         }
     }
 
-    private static bool IsLoopbackHost(string host) =>
-        host is "127.0.0.1" or "::1" or "localhost" ||
-        (IPAddress.TryParse(host, out var address) && IPAddress.IsLoopback(address));
+    public static bool IsLoopbackOrUnspecifiedHost(string? host)
+    {
+        if (string.IsNullOrWhiteSpace(host)) return false;
+        var candidate = host.Trim();
+        if (candidate.StartsWith('[') && candidate.EndsWith(']') && candidate.Length > 2)
+            candidate = candidate[1..^1];
+        candidate = candidate.TrimEnd('.');
+        if (candidate.Length == 0) return false;
+        if (string.Equals(candidate, "localhost", StringComparison.OrdinalIgnoreCase) ||
+            candidate.EndsWith(".localhost", StringComparison.OrdinalIgnoreCase))
+            return true;
+        if (!IPAddress.TryParse(candidate, out var address)) return false;
+        if (address.IsIPv4MappedToIPv6) address = address.MapToIPv4();
+        return IPAddress.IsLoopback(address) || address.Equals(IPAddress.Any) || address.Equals(IPAddress.IPv6Any);
+    }
 
     private static void ValidateClient(ClientConfiguration client, string path, ServerConfiguration server)
     {
@@ -300,6 +309,11 @@ public sealed class ConfigurationLoader
         if (client.SchemaVersion != 1 || string.IsNullOrWhiteSpace(client.DisplayName) || client.Channels is null || client.OutboundMappings is null)
         {
             throw new ConfigurationException($"Invalid client configuration: {path}");
+        }
+
+        if (client.AgentServerHost is { } clientServerHost && !IsValidAgentServerHost(clientServerHost))
+        {
+            throw new ConfigurationException($"Client agentServerHost must be a DNS name or a concrete IP address: {client.ClientId}");
         }
 
         if (client.MaxConnections < 1 || client.MaxConnections > server.Limits.MaxConnections || client.MaxPendingConnections < 1 || client.MaxPendingConnections > client.MaxConnections || client.Channels.Count > server.Limits.MaxChannelsPerClient || client.OutboundMappings.Count > server.Limits.MaxChannelsPerClient)
@@ -395,7 +409,8 @@ public sealed class ConfigurationLoader
                 listeners.Add(channel);
                 if (channel.TransportProtocol == "tcp" && ((channel.ListenPort == server.Tunnel.Port && EndpointsOverlap(channel.ListenAddress, server.Tunnel.ListenAddress)) ||
                     (channel.ListenPort == server.Tunnel.EffectiveDataPort && EndpointsOverlap(channel.ListenAddress, server.Tunnel.ListenAddress)) ||
-                    (channel.ListenPort == server.Dashboard.Port && EndpointsOverlap(channel.ListenAddress, server.Dashboard.ListenAddress))))
+                    (channel.ListenPort == server.Dashboard.Port && EndpointsOverlap(channel.ListenAddress, server.Dashboard.ListenAddress)) ||
+                    (server.Automation is { } automation && channel.ListenPort == automation.Port && EndpointsOverlap(channel.ListenAddress, automation.ListenAddress))))
                 {
                     throw new ConfigurationException($"Channel endpoint conflicts with a server endpoint: {endpoint}");
                 }
@@ -461,9 +476,22 @@ public sealed class ConfigurationLoader
         return left.Length == right.Length && CryptographicOperations.FixedTimeEquals(left, right);
     }
 
-    private static bool IsIdentifier(string? value) => value is { Length: > 0 and <= 64 } && System.Text.RegularExpressions.Regex.IsMatch(value, "^[a-z0-9][a-z0-9_-]{0,63}$", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
-    private static bool IsMappingIdentifier(string? value) => value is { Length: > 0 and <= 129 } && System.Text.RegularExpressions.Regex.IsMatch(value, "^[a-z0-9][a-z0-9_-]{0,128}$", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
-    private static bool EndpointsOverlap(string first, string second) => first == second || first is "0.0.0.0" or "::" || second is "0.0.0.0" or "::";
+    private static bool IsValidAgentServerHost(string host) =>
+        !string.IsNullOrWhiteSpace(host) &&
+        Uri.CheckHostName(host) != UriHostNameType.Unknown &&
+        !string.Equals(host, "0.0.0.0", StringComparison.Ordinal) &&
+        !string.Equals(host, "::", StringComparison.Ordinal);
+
+    private static bool IsIdentifier(string? value) => value is { Length: > 0 and <= 64 } && System.Text.RegularExpressions.Regex.IsMatch(value, "\\A[a-z0-9][a-z0-9_-]{0,63}\\z", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+    private static bool IsMappingIdentifier(string? value) => value is { Length: > 0 and <= 129 } && System.Text.RegularExpressions.Regex.IsMatch(value, "\\A[a-z0-9][a-z0-9_-]{0,128}\\z", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+    private static bool EndpointsOverlap(string first, string second)
+    {
+        if (!IPAddress.TryParse(first, out var left) || !IPAddress.TryParse(second, out var right))
+            return string.Equals(first, second, StringComparison.Ordinal);
+        return left.AddressFamily == right.AddressFamily &&
+               (left.Equals(right) || left.Equals(IPAddress.Any) || right.Equals(IPAddress.Any) ||
+                left.Equals(IPAddress.IPv6Any) || right.Equals(IPAddress.IPv6Any));
+    }
     private static void ValidateAddressAndPort(string? address, int port, string label)
     {
         if (!IPAddress.TryParse(address, out _) || port is < 1 or > 65535) throw new ConfigurationException($"Invalid {label}.");

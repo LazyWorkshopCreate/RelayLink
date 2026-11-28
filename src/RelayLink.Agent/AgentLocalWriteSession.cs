@@ -16,7 +16,11 @@ public sealed class AgentLocalWriteSession
         {
             var now = DateTimeOffset.UtcNow;
             if (cookie is not null && sessions.TryGetValue(cookie, out var existing) && existing.ExpiresAtUtc > now)
-                return existing;
+            {
+                var renewed = existing with { ExpiresAtUtc = now.Add(Lifetime) };
+                sessions[cookie] = renewed;
+                return renewed;
+            }
             foreach (var expired in sessions.Where(item => item.Value.ExpiresAtUtc <= now).Select(item => item.Key).ToArray())
                 sessions.Remove(expired);
             if (sessions.Count >= 128)
@@ -34,7 +38,13 @@ public sealed class AgentLocalWriteSession
         lock (gate)
         {
             if (!sessions.TryGetValue(cookie, out var session)) return null;
-            if (session.ExpiresAtUtc > DateTimeOffset.UtcNow) return session;
+            var now = DateTimeOffset.UtcNow;
+            if (session.ExpiresAtUtc > now)
+            {
+                var renewed = session with { ExpiresAtUtc = now.Add(Lifetime) };
+                sessions[cookie] = renewed;
+                return renewed;
+            }
             sessions.Remove(cookie);
             return null;
         }

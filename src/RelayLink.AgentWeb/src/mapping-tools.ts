@@ -35,21 +35,46 @@ export function mappingTools(
 
     if (mapping.applicationProtocol === "http") {
         if (mapping.httpState !== "ready" || !mapping.accessUrl) return null;
+        if (/[\u0000-\u001f\u007f\s]/.test(mapping.accessUrl)) return null;
         try {
             const authority = /^https?:\/\/([^/?#\\]+)(?:[/?#]|$)/i.exec(
                 mapping.accessUrl,
             )?.[1];
-            if (!authority || authority.includes("@")) return null;
+            if (
+                !authority ||
+                authority.includes("@") ||
+                authority.includes("[") ||
+                authority.includes("]")
+            ) {
+                return null;
+            }
+
+            let hostPart = authority;
+            if (authority.includes(":")) {
+                const match = /^([^:]+):([1-9]\d{0,4})$/.exec(authority);
+                if (!match || Number(match[2]) > 65535) return null;
+                hostPart = match[1];
+            }
 
             const url = new URL(mapping.accessUrl);
             if (url.protocol !== "http:" && url.protocol !== "https:")
                 return null;
 
+            const isNormalizedIpv4 = /^(?:\d{1,3}\.){3}\d{1,3}$/.test(
+                url.hostname,
+            );
+            if (
+                isNormalizedIpv4 &&
+                (hostPart !== "127.0.0.1" || url.hostname !== "127.0.0.1")
+            ) {
+                return null;
+            }
+
             const urlPort = Number(
                 url.port || (url.protocol === "https:" ? "443" : "80"),
             );
             if (url.username || url.password || urlPort !== port) return null;
-            return { kind: "web", url: mapping.accessUrl };
+            return { kind: "web", url: url.href };
         } catch {
             return null;
         }

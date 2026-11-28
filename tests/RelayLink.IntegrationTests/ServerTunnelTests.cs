@@ -623,8 +623,12 @@ public sealed class ServerTunnelTests
         using (var anonymous = await http.GetAsync(endpoint, token)) Assert.Equal(HttpStatusCode.Unauthorized, anonymous.StatusCode);
         using (var failed = await http.PostAsJsonAsync($"http://127.0.0.1:{fixture.DashboardPort}/api/v1/admin/session", new { username = "admin", password = "wrong-password" }, token))
             Assert.Equal(HttpStatusCode.Unauthorized, failed.StatusCode);
+        string csrfToken;
         using (var login = await http.PostAsJsonAsync($"http://127.0.0.1:{fixture.DashboardPort}/api/v1/admin/session", new { username = "admin", password = "test-password" }, token))
+        {
             login.EnsureSuccessStatusCode();
+            csrfToken = (await login.Content.ReadFromJsonAsync<JsonElement>(cancellationToken: token)).GetProperty("csrfToken").GetString()!;
+        }
         using (var invalid = await http.GetAsync($"{endpoint}?hours=2161", token)) Assert.Equal(HttpStatusCode.BadRequest, invalid.StatusCode);
         using (var listed = await http.GetAsync($"{endpoint}?hours=24&pageSize=1", token))
         {
@@ -643,7 +647,12 @@ public sealed class ServerTunnelTests
             Assert.DoesNotContain("test-password", text, StringComparison.Ordinal);
             Assert.DoesNotContain("csrfToken", text, StringComparison.Ordinal);
         }
-        using (var logout = await http.DeleteAsync($"http://127.0.0.1:{fixture.DashboardPort}/api/v1/admin/session", token))
+        using (var logoutMissingCsrf = await http.DeleteAsync($"http://127.0.0.1:{fixture.DashboardPort}/api/v1/admin/session", token))
+            Assert.Equal(HttpStatusCode.Unauthorized, logoutMissingCsrf.StatusCode);
+        using (var stillValid = await http.GetAsync(endpoint, token)) Assert.Equal(HttpStatusCode.OK, stillValid.StatusCode);
+        using var logoutRequest = new HttpRequestMessage(HttpMethod.Delete, $"http://127.0.0.1:{fixture.DashboardPort}/api/v1/admin/session");
+        logoutRequest.Headers.Add("X-RelayLink-CSRF", csrfToken);
+        using (var logout = await http.SendAsync(logoutRequest, token))
             Assert.Equal(HttpStatusCode.NoContent, logout.StatusCode);
         using (var after = await http.GetAsync(endpoint, token)) Assert.Equal(HttpStatusCode.Unauthorized, after.StatusCode);
     }

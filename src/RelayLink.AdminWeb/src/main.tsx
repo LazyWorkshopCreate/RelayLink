@@ -1,6 +1,5 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { createRoot } from 'react-dom/client';
-import * as Dialog from '@radix-ui/react-dialog';
 import {
     Activity,
     ClipboardList,
@@ -11,7 +10,6 @@ import {
     CircleAlert,
     CircleHelp,
     Cloud,
-    Copy,
     LockKeyhole,
     LogOut,
     Plus,
@@ -24,395 +22,35 @@ import {
     Trash2,
     X,
 } from 'lucide-react';
+import { api, downloadAgentConfig, enc, fmt, hasAllTags, parseTags, time } from './api';
+import { AuditModal } from './components/AuditModal';
+import { AutomationModal } from './components/AutomationModal';
+import { CopyEndpointButton, Modal, NumberField, TrafficChart } from './components/Modal';
+import {
+    emptyChannel,
+    emptyClient,
+    emptyMapping,
+    type AgentDefaults,
+    type AuditPage,
+    type AutomationChange,
+    type AutomationGrant,
+    type AutomationPairing,
+    type Channel,
+    type ChannelForm,
+    type Client,
+    type ClientForm,
+    type DashboardSnapshot,
+    type HistorySample,
+    type LiveConnection,
+    type Mapping,
+    type MappingForm,
+    type Overview,
+    type SecurityGroup,
+    type SecurityGroupForm,
+    type Session,
+    type ViewClient,
+} from './types';
 import './styles.css';
-
-type Session = { authenticated: boolean; csrfToken?: string };
-type AgentDefaults = { serverHost: string | null; serverPort: number; useTls: boolean };
-type Overview = {
-    statsSinceUtc: string;
-    snapshotTimeUtc: string;
-    clientsOnline: number;
-    clientsTotal: number;
-    channelsAvailable: number;
-    channelsTotal: number;
-    activeConnections: number;
-    bytesToTarget: number;
-    bytesToCaller: number;
-    peerCiphertextToTarget: number;
-    peerCiphertextToCaller: number;
-    tcpIdleTimeoutSeconds?: number;
-    halfCloseDrainTimeoutSeconds?: number;
-};
-type Client = {
-    clientId: string;
-    displayName: string;
-    tags: string[];
-    enabled: boolean;
-    online: boolean;
-    e2eCertificateSha256?: string;
-    lastHeartbeatUtc?: string;
-    maxConnections: number;
-    maxPendingConnections: number;
-};
-type Channel = {
-    channelId: string;
-    displayName: string;
-    tags: string[];
-    enabled: boolean;
-    authorizedClientsOnly?: boolean;
-    endToEndEncryptionEnabled?: boolean;
-    securityGroupId?: string | null;
-    available: boolean;
-    listenAddress: string;
-    listenPort: number;
-    targetHost: string;
-    targetPort: number;
-    maxConnections: number;
-    targetConnectTimeoutSeconds: number;
-    applicationProtocol?: 'raw' | 'http';
-    httpState?: string | null;
-    entryScheme?: 'http' | 'https' | null;
-    accessUrl?: string | null;
-    transportProtocol?: 'tcp' | 'udp';
-    udpIdleTimeoutSeconds?: number;
-    pendingConnections: number;
-    activeConnections: number;
-    bytesToTarget: number;
-    bytesToCaller: number;
-    peerCiphertextToTarget: number;
-    peerCiphertextToCaller: number;
-    targetLastResult?: string;
-};
-type Mapping = {
-    applicationProtocol?: 'raw' | 'http';
-    httpState?: string | null;
-    entryScheme?: 'http' | 'https' | null;
-    accessUrl?: string | null;
-    transportProtocol?: 'tcp' | 'udp';
-    mappingId: string;
-    enabled: boolean;
-    localAddress: string | null;
-    localPort: number | null;
-    available: boolean;
-    targetClientId: string;
-    targetChannelId: string;
-};
-type SecurityGroup = { id: string; name: string; entries: string[] };
-type SecurityGroupForm = { id: string; name: string; entries: string };
-type HistorySample = { timestampUtc: string; bytesToTarget: number; bytesToCaller: number };
-type LiveConnection = {
-    connectionId: string;
-    kind: string;
-    state: string;
-    source: string;
-    startedAtUtc: string;
-    bytesToTarget: number;
-    bytesToCaller: number;
-};
-type AuditRow = {
-    eventId: string;
-    occurredAtUtc: string;
-    eventType: string;
-    outcome: string;
-    reasonCode?: string;
-    connectionId?: string;
-    sessionId?: string;
-    clientId?: string;
-    channelId?: string;
-    mappingId?: string;
-    callerClientId?: string;
-    targetClientId?: string;
-    actor?: string;
-    remoteIp?: string;
-    durationMs?: number;
-    bytesToTarget: number;
-    bytesToCaller: number;
-};
-type AuditPage = { total: number; events: AuditRow[] };
-
-// 自动化管理面：待批准配对、已签发授权、变更申请。
-// 这里展示的 scope 与设备指纹都是非秘密元数据。
-type AutomationPairing = {
-    requestId: string;
-    subject: string;
-    platform: string;
-    cliVersion: string;
-    scopes: string[];
-    deviceKeyThumbprint: string;
-    userCode: string;
-    state: string;
-    createdAtUtc: string;
-    expiresAtUtc: string;
-    decidedBy?: string | null;
-};
-type AutomationGrant = {
-    grantId: string;
-    subject: string;
-    platform: string;
-    deviceKeyThumbprint: string;
-    scopes: string[];
-    createdAtUtc: string;
-    expiresAtUtc: string;
-    revokedAtUtc?: string | null;
-};
-type AutomationChange = {
-    changeRequestId: string;
-    type: string;
-    targetKey: string;
-    payload: string;
-    reason?: string | null;
-    requestedBy: string;
-    state: string;
-    createdAtUtc: string;
-    expiresAtUtc: string;
-    failureReason?: string | null;
-};
-const auditLabels: Record<string, string> = {
-    admin_login_success: '管理员登录成功',
-    admin_login_failure: '管理员登录失败',
-    admin_logout: '管理员退出',
-    agent_session_ready: 'Agent 上线',
-    agent_session_closed: 'Agent 离线',
-    agent_session_rejected: 'Agent 认证拒绝',
-    proxy_connection_opened: '普通连接建立',
-    proxy_connection_closed: '普通连接断开',
-    proxy_connection_rejected: '普通连接拒绝',
-    peer_connection_opened: '端到端连接建立',
-    peer_connection_closed: '端到端连接断开',
-    peer_connection_rejected: '端到端连接拒绝',
-};
-type ViewClient = Client & { channels: Channel[]; mappings: Mapping[] };
-type DashboardSnapshot = {
-    snapshotTimeUtc: string;
-    page: number;
-    pageSize: number;
-    total: number;
-    overview: Overview;
-    clients: ViewClient[];
-};
-type ClientForm = {
-    clientId: string;
-    displayName: string;
-    tags: string;
-    enabled: boolean;
-    maxConnections: number;
-    maxPendingConnections: number;
-    agentServerHost: string;
-};
-type ChannelForm = {
-    channelId: string;
-    displayName: string;
-    tags: string;
-    enabled: boolean;
-    listenAddress: string;
-    listenPort: number;
-    targetHost: string;
-    targetPort: number;
-    maxConnections: number;
-    targetConnectTimeoutSeconds: number;
-    transportProtocol?: 'tcp' | 'udp';
-    udpIdleTimeoutSeconds?: number;
-    authorizedClientsOnly: boolean;
-    endToEndEncryptionEnabled: boolean;
-    securityGroupId: string;
-};
-type MappingForm = {
-    targetClientId: string;
-    targetChannelId: string;
-};
-
-const emptyClient: ClientForm = {
-    clientId: '',
-    displayName: '',
-    tags: '',
-    enabled: true,
-    maxConnections: 100,
-    maxPendingConnections: 100,
-    agentServerHost: '',
-};
-const emptyChannel: ChannelForm = {
-    channelId: '',
-    displayName: '',
-    tags: '',
-    enabled: true,
-    listenAddress: '0.0.0.0',
-    listenPort: 19000,
-    targetHost: '127.0.0.1',
-    targetPort: 19001,
-    maxConnections: 100,
-    targetConnectTimeoutSeconds: 10,
-    transportProtocol: 'tcp',
-    udpIdleTimeoutSeconds: 60,
-    authorizedClientsOnly: false,
-    endToEndEncryptionEnabled: true,
-    securityGroupId: '',
-};
-const emptyMapping: MappingForm = {
-    targetClientId: '',
-    targetChannelId: '',
-};
-const fmt = (n: number) =>
-    n < 1024
-        ? `${n || 0} B`
-        : n < 1048576
-          ? `${(n / 1024).toFixed(1)} KiB`
-          : `${(n / 1048576).toFixed(1)} MiB`;
-const time = (s?: string) => (s ? new Date(s).toLocaleString('zh-CN') : '—');
-const enc = encodeURIComponent;
-const parseTags = (value: string) => [
-    ...new Map(
-        value
-            .split(/[,，\n]+/)
-            .map((tag) => tag.trim())
-            .filter(Boolean)
-            .map((tag) => [tag.toLowerCase(), tag]),
-    ).values(),
-];
-const hasAllTags = (tags: string[] | undefined, required: string[]) => {
-    const normalized = new Set((tags || []).map((tag) => tag.toLowerCase()));
-    return required.every((tag) => normalized.has(tag.toLowerCase()));
-};
-
-async function api<T>(path: string, init?: RequestInit): Promise<T> {
-    const response = await fetch(path, { credentials: 'same-origin', cache: 'no-store', ...init });
-    if (!response.ok) {
-        const body = await response.json().catch(() => ({}));
-        throw new Error(body.error || `${response.status} ${response.statusText}`);
-    }
-    return response.status === 204 ? (undefined as T) : (response.json() as Promise<T>);
-}
-
-function Modal({
-    title,
-    description,
-    open,
-    onClose,
-    error,
-    wide,
-    children,
-}: {
-    title: string;
-    description?: string;
-    open: boolean;
-    onClose: () => void;
-    error?: string;
-    wide?: boolean;
-    children: ReactNode;
-}) {
-    return (
-        <Dialog.Root
-            open={open}
-            onOpenChange={(value) => {
-                if (!value) onClose();
-            }}
-        >
-            <Dialog.Portal>
-                <Dialog.Overlay className="modal-overlay" />
-                <Dialog.Content className={wide ? 'modal audit-modal' : 'modal'}>
-                    <div className="modal-heading">
-                        <div>
-                            <Dialog.Title>{title}</Dialog.Title>
-                            {description && <Dialog.Description>{description}</Dialog.Description>}
-                        </div>
-                        <Dialog.Close className="icon-button" aria-label="关闭">
-                            <X size={18} />
-                        </Dialog.Close>
-                    </div>
-                    {error && (
-                        <div className="alert error" role="alert">
-                            {error}
-                        </div>
-                    )}
-                    {children}
-                </Dialog.Content>
-            </Dialog.Portal>
-        </Dialog.Root>
-    );
-}
-
-function NumberField({
-    label,
-    value,
-    onChange,
-    min = 1,
-    max = 65535,
-}: {
-    label: string;
-    value: number;
-    onChange: (n: number) => void;
-    min?: number;
-    max?: number;
-}) {
-    return (
-        <label className="field">
-            {label}
-            <input
-                type="number"
-                min={min}
-                max={max}
-                required
-                value={value}
-                onChange={(e) => onChange(Number(e.target.value))}
-            />
-        </label>
-    );
-}
-
-function TrafficChart({ samples }: { samples: HistorySample[] }) {
-    if (!samples.length) return <div className="empty-chart">所选时段暂无历史样本</div>;
-    const max = Math.max(1, ...samples.flatMap((s) => [s.bytesToTarget, s.bytesToCaller]));
-    const line = (key: 'bytesToTarget' | 'bytesToCaller') =>
-        samples
-            .map(
-                (s, i) => `${38 + (i * 680) / Math.max(1, samples.length - 1)},${210 - (s[key] / max) * 178}`,
-            )
-            .join(' ');
-    return (
-        <div className="chart-wrap">
-            <svg viewBox="0 0 750 240" role="img" aria-label="目标和访问方每分钟流量折线图">
-                <line x1="38" y1="210" x2="720" y2="210" className="axis" />
-                <line x1="38" y1="32" x2="38" y2="210" className="axis" />
-                <text x="3" y="38">
-                    {fmt(max)}
-                </text>
-                <text x="7" y="215">
-                    0
-                </text>
-                <polyline className="chart-target" points={line('bytesToTarget')} />
-                <polyline className="chart-caller" points={line('bytesToCaller')} />
-            </svg>
-            <div className="chart-labels">
-                <span>{time(samples[0].timestampUtc)}</span>
-                <span>{time(samples.at(-1)?.timestampUtc)}</span>
-            </div>
-        </div>
-    );
-}
-
-function CopyEndpointButton({ value }: { value: string }) {
-    const [copied, setCopied] = useState(false);
-    return (
-        <button
-            type="button"
-            className={`copy-button${copied ? ' copied' : ''}`}
-            aria-label={copied ? `已复制 ${value}` : `复制 ${value}`}
-            title={copied ? '已复制' : '复制地址和端口'}
-            onClick={() => {
-                const write = navigator.clipboard?.writeText(value);
-                if (!write) return;
-                void write.then(
-                    () => {
-                        setCopied(true);
-                        window.setTimeout(() => setCopied(false), 1500);
-                    },
-                    () => undefined,
-                );
-            }}
-        >
-            {copied ? <Check size={13} /> : <Copy size={13} />}
-        </button>
-    );
-}
 
 export function App() {
     const [session, setSession] = useState<Session>({ authenticated: false });
@@ -422,6 +60,7 @@ export function App() {
     const [securityGroupsOpen, setSecurityGroupsOpen] = useState(false);
     const [automationOpen, setAutomationOpen] = useState(false);
     const [automationBusy, setAutomationBusy] = useState(false);
+    const [automationActionBusy, setAutomationActionBusy] = useState(false);
     const [automationPairings, setAutomationPairings] = useState<AutomationPairing[]>([]);
     const [automationGrants, setAutomationGrants] = useState<AutomationGrant[]>([]);
     const [automationChanges, setAutomationChanges] = useState<AutomationChange[]>([]);
@@ -489,15 +128,23 @@ export function App() {
         confirmDeleteMapping ||
         securityGroupsOpen ||
         auditOpen ||
+        automationOpen ||
         securityGroupToDelete,
     );
     const editingRef = useRef(editing);
     const refreshInFlightRef = useRef<Promise<void> | null>(null);
+    const refreshSeqRef = useRef(0);
+    const auditSeqRef = useRef(0);
+    const automationSeqRef = useRef(0);
+    const historySeqRef = useRef(0);
+    const connectionsSeqRef = useRef(0);
     editingRef.current = editing;
 
-    const refresh = useCallback(() => {
-        if (refreshInFlightRef.current) return refreshInFlightRef.current;
-        const pending = (async () => {
+    const refresh = useCallback((force = false) => {
+        if (!force && refreshInFlightRef.current) return refreshInFlightRef.current;
+        const seq = ++refreshSeqRef.current;
+        let pending!: Promise<void>;
+        pending = (async () => {
             try {
                 const [nextSession, firstPage] = await Promise.all([
                     api<Session>('/api/v1/admin/session'),
@@ -511,19 +158,22 @@ export function App() {
                     );
                     allClients.push(...nextPage.clients);
                 }
+                if (seq !== refreshSeqRef.current) return;
                 setSession(nextSession);
                 setOverview(firstPage.overview);
                 setClients(allClients);
                 setUpdatedAt(Date.now());
                 setError('');
             } catch (e) {
+                if (seq !== refreshSeqRef.current) return;
                 setError((e as Error).message);
             } finally {
                 setBusy(false);
+                if (refreshInFlightRef.current === pending) {
+                    refreshInFlightRef.current = null;
+                }
             }
-        })().finally(() => {
-            refreshInFlightRef.current = null;
-        });
+        })();
         refreshInFlightRef.current = pending;
         return pending;
     }, []);
@@ -558,19 +208,22 @@ export function App() {
         }
     }
     async function loadAudit(page = 1, hours = auditHours, eventType = auditType, clientId = auditClient) {
+        const seq = ++auditSeqRef.current;
         setAuditBusy(true);
         setError('');
         try {
             const result = await api<AuditPage>(
                 `/api/v1/admin/audit?hours=${hours}&page=${page}&pageSize=50&eventType=${enc(eventType)}&clientId=${enc(clientId.trim())}`,
             );
+            if (seq !== auditSeqRef.current) return;
             setAuditPage(result);
             setAuditPageNumber(page);
         } catch (e) {
+            if (seq !== auditSeqRef.current) return;
             setAuditPage({ total: 0, events: [] });
             setError((e as Error).message);
         } finally {
-            setAuditBusy(false);
+            if (seq === auditSeqRef.current) setAuditBusy(false);
         }
     }
     function openAudit() {
@@ -581,6 +234,7 @@ export function App() {
 
     // ---- 自动化授权与变更审批 ----
     async function loadAutomation() {
+        const seq = ++automationSeqRef.current;
         setAutomationBusy(true);
         setError('');
         try {
@@ -589,13 +243,15 @@ export function App() {
                 api<{ grants: AutomationGrant[] }>('/api/v1/admin/automation/grants'),
                 api<{ changeRequests: AutomationChange[] }>('/api/v1/admin/automation/change-requests'),
             ]);
+            if (seq !== automationSeqRef.current) return;
             setAutomationPairings(pairings.pairings);
             setAutomationGrants(grants.grants);
             setAutomationChanges(changes.changeRequests);
         } catch (e) {
+            if (seq !== automationSeqRef.current) return;
             setError((e as Error).message);
         } finally {
-            setAutomationBusy(false);
+            if (seq === automationSeqRef.current) setAutomationBusy(false);
         }
     }
 
@@ -604,22 +260,33 @@ export function App() {
         await loadAutomation();
     }
 
-    async function decidePairing(id: string, approve: boolean) {
+    async function decidePairing(
+        id: string,
+        approve: boolean,
+        approvedScopes?: string[],
+        lifetimeMinutes?: number,
+    ) {
+        if (automationActionBusy) return;
+        setAutomationActionBusy(true);
         setError('');
         try {
             await write(
                 `/api/v1/admin/automation/pairings/${enc(id)}/${approve ? 'approve' : 'deny'}`,
                 'POST',
-                {},
+                approve ? { approvedScopes, lifetimeMinutes } : {},
             );
             setNotice(approve ? '已批准该自动化配对请求。' : '已拒绝该自动化配对请求。');
             await loadAutomation();
         } catch (e) {
             setError((e as Error).message);
+        } finally {
+            setAutomationActionBusy(false);
         }
     }
 
     async function revokeGrant(id: string) {
+        if (automationActionBusy) return;
+        setAutomationActionBusy(true);
         setError('');
         try {
             await write(`/api/v1/admin/automation/grants/${enc(id)}`, 'DELETE');
@@ -627,10 +294,14 @@ export function App() {
             await loadAutomation();
         } catch (e) {
             setError((e as Error).message);
+        } finally {
+            setAutomationActionBusy(false);
         }
     }
 
     async function decideChange(id: string, action: 'approve' | 'reject' | 'execute') {
+        if (automationActionBusy) return;
+        setAutomationActionBusy(true);
         setError('');
         try {
             await write(`/api/v1/admin/automation/change-requests/${enc(id)}/${action}`, 'POST', {});
@@ -642,8 +313,13 @@ export function App() {
                       : '已拒绝该变更申请。',
             );
             await loadAutomation();
+            if (action === 'execute') {
+                await refresh(true);
+            }
         } catch (e) {
             setError((e as Error).message);
+        } finally {
+            setAutomationActionBusy(false);
         }
     }
 
@@ -705,7 +381,7 @@ export function App() {
             setLoginPassword('');
             setLoginOpen(false);
             setNotice('已登录，可以管理客户端与通道。');
-            await refresh();
+            await refresh(true);
         } catch (e) {
             setError((e as Error).message);
         } finally {
@@ -714,12 +390,20 @@ export function App() {
     }
     async function logout() {
         try {
-            await api('/api/v1/admin/session', { method: 'DELETE' });
-            setSession({ authenticated: false });
+            await write('/api/v1/admin/session', 'DELETE');
+            setSession((current) => ({
+                authenticated: false,
+                automationEnabled: current.automationEnabled,
+                automationSessionLifetimeMinutes: current.automationSessionLifetimeMinutes,
+            }));
             setSecurityGroups([]);
             setSecurityGroupsOpen(false);
             setAuditOpen(false);
             setAuditPage({ total: 0, events: [] });
+            setAutomationOpen(false);
+            setAutomationPairings([]);
+            setAutomationGrants([]);
+            setAutomationChanges([]);
             setNotice('已退出登录。');
         } catch (e) {
             setError((e as Error).message);
@@ -768,7 +452,7 @@ export function App() {
             );
             setClientDialog(null);
             setNotice(original ? '客户端设置已保存。' : '客户端已创建，可下载 Agent 配置。');
-            await refresh();
+            await refresh(true);
         } catch (e) {
             setError((e as Error).message);
         } finally {
@@ -786,7 +470,7 @@ export function App() {
             );
             setConfirmDeleteClient(null);
             setNotice('客户端及其通道、访问入口配置已删除。');
-            await refresh();
+            await refresh(true);
         } catch (e) {
             setError((e as Error).message);
         } finally {
@@ -809,7 +493,7 @@ export function App() {
             );
             setChannelDialog(null);
             setNotice(result.message);
-            await refresh();
+            await refresh(true);
         } catch (e) {
             setError((e as Error).message);
         } finally {
@@ -827,7 +511,7 @@ export function App() {
             );
             setConfirmDelete(null);
             setNotice(result.message);
-            await refresh();
+            await refresh(true);
         } catch (e) {
             setError((e as Error).message);
         } finally {
@@ -850,7 +534,7 @@ export function App() {
             setNotice(
                 result.message ?? '端到端访问入口已创建并下发。创建后不可修改；如需调整，请删除后重建。',
             );
-            await refresh();
+            await refresh(true);
         } catch (e) {
             setError((e as Error).message);
         } finally {
@@ -868,7 +552,7 @@ export function App() {
             );
             setConfirmDeleteMapping(null);
             setNotice(result.message ?? '端到端访问入口已删除并下发，原有连接已断开。');
-            await refresh();
+            await refresh(true);
         } catch (e) {
             setError((e as Error).message);
         } finally {
@@ -876,11 +560,13 @@ export function App() {
         }
     }
     async function showHistory(client: ViewClient, channel: Channel, hours = 24) {
+        const seq = ++historySeqRef.current;
         setHistoryDialog({ client, channel, hours, samples: [] });
         try {
             const result = await api<{ samples: HistorySample[] }>(
                 `/api/v1/history?clientId=${enc(client.clientId)}&channelId=${enc(channel.channelId)}&hours=${hours}`,
             );
+            if (seq !== historySeqRef.current) return;
             setHistoryDialog((current) =>
                 current &&
                 current.client.clientId === client.clientId &&
@@ -889,14 +575,16 @@ export function App() {
                     : current,
             );
         } catch (e) {
-            setError((e as Error).message);
+            if (seq === historySeqRef.current) setError((e as Error).message);
         }
     }
     const loadConnections = useCallback(async (clientId: string, channelId: string) => {
+        const seq = ++connectionsSeqRef.current;
         try {
             const result = await api<{ connections: LiveConnection[] }>(
                 `/api/v1/clients/${enc(clientId)}/channels/${enc(channelId)}/connections`,
             );
+            if (seq !== connectionsSeqRef.current) return;
             setConnectionDialog((current) =>
                 current?.client.clientId === clientId && current.channel.channelId === channelId
                     ? { ...current, connections: result.connections, loading: false }
@@ -904,6 +592,7 @@ export function App() {
             );
             setError('');
         } catch (e) {
+            if (seq !== connectionsSeqRef.current) return;
             setConnectionDialog((current) =>
                 current?.client.clientId === clientId && current.channel.channelId === channelId
                     ? { ...current, loading: false }
@@ -936,7 +625,7 @@ export function App() {
             );
             setConfirmConnectionId(null);
             await loadConnections(connectionDialog.client.clientId, connectionDialog.channel.channelId);
-            await refresh();
+            await refresh(true);
             setNotice('已断开指定连接。');
         } catch (e) {
             setError((e as Error).message);
@@ -996,7 +685,7 @@ export function App() {
                             <Shield size={15} /> 安全组
                         </button>
                     )}
-                    {session.authenticated && (
+                    {session.authenticated && session.automationEnabled === true && (
                         <button className="ghost" onClick={() => void openAutomation()}>
                             <KeyRound size={15} /> 自动化授权
                         </button>
@@ -1026,7 +715,7 @@ export function App() {
                             查看节点状态、通道流量与历史趋势。{!session.authenticated && '登录后可编辑配置。'}
                         </p>
                     </div>
-                    <button className="ghost refresh" onClick={() => void refresh()}>
+                    <button className="ghost refresh" onClick={() => void refresh(true)}>
                         <RefreshCw size={16} /> 刷新{' '}
                         <span>{overview ? time(overview.snapshotTimeUtc) : '—'}</span>
                     </button>
@@ -1222,9 +911,11 @@ export function App() {
                                         <div className="client-actions">
                                             <button
                                                 className="ghost"
-                                                onClick={() => {
-                                                    window.location.href = `/api/v1/admin/clients/${enc(client.clientId)}/agent-config`;
-                                                }}
+                                                onClick={() =>
+                                                    void downloadAgentConfig(client.clientId).catch((e) =>
+                                                        setError((e as Error).message),
+                                                    )
+                                                }
                                             >
                                                 <ArrowDownToLine size={15} /> 下载配置
                                             </button>
@@ -1580,296 +1271,42 @@ export function App() {
                 </footer>
             </main>
 
-            <Modal
-                title="审计日志"
-                description="仅管理员可查看。记录登录、Agent 会话和连接生命周期元数据，不包含密码、密钥或业务内容。"
+            <AuditModal
                 open={auditOpen}
-                onClose={() => setAuditOpen(false)}
+                onClose={() => {
+                    ++auditSeqRef.current;
+                    setAuditOpen(false);
+                }}
                 error={error}
-                wide
-            >
-                <form
-                    className="audit-filters"
-                    onSubmit={(event) => {
-                        event.preventDefault();
-                        void loadAudit(1);
-                    }}
-                >
-                    <label>
-                        时间范围
-                        <select
-                            value={auditHours}
-                            onChange={(event) => setAuditHours(Number(event.target.value))}
-                        >
-                            <option value={24}>最近 24 小时</option>
-                            <option value={168}>最近 7 天</option>
-                            <option value={720}>最近 30 天</option>
-                            <option value={2160}>最近 90 天</option>
-                        </select>
-                    </label>
-                    <label>
-                        事件
-                        <select value={auditType} onChange={(event) => setAuditType(event.target.value)}>
-                            <option value="">全部事件</option>
-                            {Object.entries(auditLabels).map(([value, label]) => (
-                                <option key={value} value={value}>
-                                    {label}
-                                </option>
-                            ))}
-                        </select>
-                    </label>
-                    <label>
-                        客户端 ID
-                        <input
-                            value={auditClient}
-                            maxLength={128}
-                            onChange={(event) => setAuditClient(event.target.value)}
-                            placeholder="全部客户端"
-                        />
-                    </label>
-                    <button className="primary" disabled={auditBusy}>
-                        查询
-                    </button>
-                </form>
-                <div className="audit-summary">
-                    共 {auditPage.total} 条 · 第 {auditPageNumber} 页{' '}
-                    <button
-                        className="text-button"
-                        disabled={auditBusy}
-                        onClick={() => void loadAudit(auditPageNumber)}
-                    >
-                        刷新
-                    </button>
-                </div>
-                <div className="table-scroll">
-                    <table className="audit-table">
-                        <thead>
-                            <tr>
-                                <th>时间</th>
-                                <th>事件</th>
-                                <th>结果 / 原因</th>
-                                <th>客户端 / 通道</th>
-                                <th>来源</th>
-                                <th>连接 ID</th>
-                                <th>流量 →目标 / →访问方</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {auditPage.events.map((item) => (
-                                <tr key={item.eventId}>
-                                    <td>{time(item.occurredAtUtc)}</td>
-                                    <td>{auditLabels[item.eventType] || item.eventType}</td>
-                                    <td
-                                        title={`${item.outcome}${item.reasonCode ? ` · ${item.reasonCode}` : ''}`}
-                                    >
-                                        {item.outcome}
-                                        {item.reasonCode ? ` · ${item.reasonCode}` : ''}
-                                    </td>
-                                    <td
-                                        className="mono"
-                                        title={`${item.clientId || item.actor || '—'}${item.channelId ? ` / ${item.channelId}` : ''}`}
-                                    >
-                                        {item.clientId || item.actor || '—'}
-                                        {item.channelId ? ` / ${item.channelId}` : ''}
-                                    </td>
-                                    <td className="mono" title={item.remoteIp || item.callerClientId || '—'}>
-                                        {item.remoteIp || item.callerClientId || '—'}
-                                    </td>
-                                    <td className="mono" title={item.connectionId || ''}>
-                                        {item.connectionId ? `${item.connectionId.slice(0, 8)}…` : '—'}
-                                    </td>
-                                    <td className="mono">
-                                        {fmt(item.bytesToTarget)} / {fmt(item.bytesToCaller)}
-                                    </td>
-                                </tr>
-                            ))}
-                            {!auditPage.events.length && (
-                                <tr>
-                                    <td className="empty-row" colSpan={7}>
-                                        {auditBusy ? '加载中…' : '所选范围没有审计事件'}
-                                    </td>
-                                </tr>
-                            )}
-                        </tbody>
-                    </table>
-                </div>
-                <div className="audit-pages">
-                    <button
-                        className="ghost"
-                        disabled={auditBusy || auditPageNumber <= 1}
-                        onClick={() => void loadAudit(auditPageNumber - 1)}
-                    >
-                        上一页
-                    </button>
-                    <button
-                        className="ghost"
-                        disabled={auditBusy || auditPageNumber * 50 >= auditPage.total}
-                        onClick={() => void loadAudit(auditPageNumber + 1)}
-                    >
-                        下一页
-                    </button>
-                </div>
-            </Modal>
+                busy={auditBusy}
+                page={auditPage}
+                pageNumber={auditPageNumber}
+                hours={auditHours}
+                eventType={auditType}
+                clientId={auditClient}
+                onHoursChange={setAuditHours}
+                onEventTypeChange={setAuditType}
+                onClientIdChange={setAuditClient}
+                onLoad={(page = 1) => loadAudit(page)}
+            />
 
-            <Modal
-                title="自动化授权与变更审批"
-                description="核对用户码后再批准配对。用户码必须与操作员屏幕上显示的一致；批准时只能缩小 scope 与有效期。变更申请批准后才会执行一次。"
+            <AutomationModal
                 open={automationOpen}
-                onClose={() => setAutomationOpen(false)}
+                onClose={() => {
+                    ++automationSeqRef.current;
+                    setAutomationOpen(false);
+                }}
                 error={error}
-            >
-                <div className="automation-panel">
-                    <section>
-                        <h3>待批准的配对请求（{automationPairings.length}）</h3>
-                        {automationBusy && <p className="muted">加载中…</p>}
-                        {!automationBusy && automationPairings.length === 0 && (
-                            <p className="muted">没有待批准的请求。</p>
-                        )}
-                        {automationPairings.map((item) => (
-                            <article key={item.requestId} className="automation-card">
-                                <div>
-                                    <strong className="automation-usercode">{item.userCode}</strong>
-                                    <span className="muted"> ← 核对用户码后再批准</span>
-                                </div>
-                                <dl>
-                                    <dt>主体</dt>
-                                    <dd>{item.subject}</dd>
-                                    <dt>平台</dt>
-                                    <dd>
-                                        {item.platform} / CLI {item.cliVersion}
-                                    </dd>
-                                    <dt>申请 scope</dt>
-                                    <dd>{item.scopes.join(', ')}</dd>
-                                    <dt>设备指纹</dt>
-                                    <dd className="mono">{item.deviceKeyThumbprint}</dd>
-                                    <dt>过期</dt>
-                                    <dd>{time(item.expiresAtUtc)}</dd>
-                                </dl>
-                                <div className="automation-actions">
-                                    <button
-                                        className="primary"
-                                        onClick={() => void decidePairing(item.requestId, true)}
-                                    >
-                                        批准
-                                    </button>
-                                    <button
-                                        className="ghost"
-                                        onClick={() => void decidePairing(item.requestId, false)}
-                                    >
-                                        拒绝
-                                    </button>
-                                </div>
-                            </article>
-                        ))}
-                    </section>
-
-                    <section>
-                        <h3>已签发的授权（{automationGrants.length}）</h3>
-                        {automationGrants.length === 0 && <p className="muted">还没有已签发的授权。</p>}
-                        {automationGrants.map((grant) => (
-                            <article key={grant.grantId} className="automation-card">
-                                <dl>
-                                    <dt>主体</dt>
-                                    <dd>{grant.subject}</dd>
-                                    <dt>平台</dt>
-                                    <dd>{grant.platform}</dd>
-                                    <dt>scope</dt>
-                                    <dd>{grant.scopes.join(', ')}</dd>
-                                    <dt>到期</dt>
-                                    <dd>{time(grant.expiresAtUtc)}</dd>
-                                    <dt>状态</dt>
-                                    <dd>
-                                        {grant.revokedAtUtc
-                                            ? `已撤销（${time(grant.revokedAtUtc)}）`
-                                            : '有效'}
-                                    </dd>
-                                </dl>
-                                {!grant.revokedAtUtc && (
-                                    <div className="automation-actions">
-                                        <button
-                                            className="ghost danger"
-                                            onClick={() => void revokeGrant(grant.grantId)}
-                                        >
-                                            撤销授权
-                                        </button>
-                                    </div>
-                                )}
-                            </article>
-                        ))}
-                    </section>
-
-                    <section>
-                        <h3>变更申请（{automationChanges.length}）</h3>
-                        {automationChanges.length === 0 && <p className="muted">没有变更申请。</p>}
-                        {automationChanges.map((change) => (
-                            <article key={change.changeRequestId} className="automation-card">
-                                <dl>
-                                    <dt>类型</dt>
-                                    <dd className="mono">{change.type}</dd>
-                                    <dt>目标</dt>
-                                    <dd className="mono">{change.targetKey}</dd>
-                                    <dt>状态</dt>
-                                    <dd>{change.state}</dd>
-                                    <dt>申请方</dt>
-                                    <dd>{change.requestedBy}</dd>
-                                    <dt>载荷</dt>
-                                    <dd>
-                                        <code>{change.payload}</code>
-                                    </dd>
-                                    {change.failureReason && (
-                                        <>
-                                            <dt>失败原因</dt>
-                                            <dd>{change.failureReason}</dd>
-                                        </>
-                                    )}
-                                </dl>
-                                <div className="automation-actions">
-                                    {change.state === 'pending' && (
-                                        <>
-                                            <button
-                                                className="primary"
-                                                onClick={() =>
-                                                    void decideChange(change.changeRequestId, 'approve')
-                                                }
-                                            >
-                                                批准
-                                            </button>
-                                            <button
-                                                className="ghost"
-                                                onClick={() =>
-                                                    void decideChange(change.changeRequestId, 'reject')
-                                                }
-                                            >
-                                                拒绝
-                                            </button>
-                                        </>
-                                    )}
-                                    {change.state === 'approved' && (
-                                        <>
-                                            <button
-                                                className="primary"
-                                                onClick={() =>
-                                                    void decideChange(change.changeRequestId, 'execute')
-                                                }
-                                            >
-                                                执行
-                                            </button>
-                                            <button
-                                                className="ghost"
-                                                onClick={() =>
-                                                    void decideChange(change.changeRequestId, 'reject')
-                                                }
-                                            >
-                                                拒绝
-                                            </button>
-                                        </>
-                                    )}
-                                </div>
-                            </article>
-                        ))}
-                    </section>
-                </div>
-            </Modal>
+                busy={automationBusy}
+                actionBusy={automationActionBusy}
+                maxSessionLifetimeMinutes={session.automationSessionLifetimeMinutes}
+                pairings={automationPairings}
+                grants={automationGrants}
+                changes={automationChanges}
+                onDecidePairing={decidePairing}
+                onRevokeGrant={revokeGrant}
+                onDecideChange={decideChange}
+            />
 
             <Modal
                 title="安全组"
@@ -2612,6 +2049,7 @@ export function App() {
                 description="建连中与转发中的实时快照，每 5 秒更新。断开连接会中止当前业务会话。"
                 open={!!connectionDialog}
                 onClose={() => {
+                    ++connectionsSeqRef.current;
                     setConnectionDialog(null);
                     setConfirmConnectionId(null);
                 }}
@@ -2720,7 +2158,10 @@ export function App() {
                 title={`${historyDialog?.client.displayName ?? ''} / ${historyDialog?.channel.displayName ?? ''}`}
                 description="历史流量按分钟存储；图表随时间范围按分钟、15 分钟或小时汇总。互访通道统计服务端转发字节，加密通道对应密文字节。"
                 open={!!historyDialog}
-                onClose={() => setHistoryDialog(null)}
+                onClose={() => {
+                    ++historySeqRef.current;
+                    setHistoryDialog(null);
+                }}
                 error={error}
             >
                 {historyDialog && (

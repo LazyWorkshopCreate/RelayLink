@@ -178,4 +178,47 @@ public sealed class HttpProxyProcessTests
         }
         await upstream.StopAsync(token);
     }
+
+    [Fact]
+    public async Task Peer_http_connection_close_receives_graceful_eof_without_reset()
+    {
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(45));
+        var token = deadline.Token;
+        var builder = WebApplication.CreateSlimBuilder();
+        builder.Logging.ClearProviders();
+        await using var upstream = builder.Build();
+        upstream.Urls.Add("http://127.0.0.1:0");
+        upstream.Run(context => context.Response.WriteAsync("ok-eof", context.RequestAborted));
+        await upstream.StartAsync(token);
+
+        using var fixture = new PeerConnectionTests.Fixture();
+        var options = new HttpProxyOptions
+        {
+            PublicEntryScheme = "http", PeerEntryScheme = "http",
+            PublicAllowedAuthorities = [$"panel.test:{fixture.ProxyPort}"], PublicAllowedOrigins = [$"http://panel.test:{fixture.ProxyPort}"],
+            PeerAuthorityHost = "localhost", PeerAllowedOrigins = ["entry"], UpstreamAuthority = "upstream.test",
+            HostMode = "upstream", OriginMode = "preserve"
+        };
+        await fixture.StartAsync(httpOptions: options, httpTargetPort: new Uri(upstream.Urls.Single()).Port);
+        await fixture.WaitOnlineAsync(token);
+
+        using var tcp = new TcpClient();
+        await tcp.ConnectAsync(IPAddress.Loopback, fixture.LocalPort, token);
+        await using var stream = tcp.GetStream();
+        var reqBytes = Encoding.ASCII.GetBytes($"GET / HTTP/1.1\r\nHost: localhost:{fixture.LocalPort}\r\nConnection: close\r\n\r\n");
+        await stream.WriteAsync(reqBytes, token);
+        var buf = new byte[1024];
+        var ms = new MemoryStream();
+        while (true)
+        {
+            var n = await stream.ReadAsync(buf, token);
+            if (n == 0) break;
+            ms.Write(buf, 0, n);
+        }
+        var responseText = Encoding.ASCII.GetString(ms.ToArray());
+        Assert.Contains("200 OK", responseText, StringComparison.Ordinal);
+        Assert.Contains("ok-eof", responseText, StringComparison.Ordinal);
+        Assert.DoesNotContain("transport_error", fixture.Logs(), StringComparison.OrdinalIgnoreCase);
+        await upstream.StopAsync(token);
+    }
 }

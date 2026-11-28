@@ -87,6 +87,36 @@ public sealed class AuditServiceTests
         }
     }
 
+    [Fact]
+    public async Task Rejection_flood_does_not_starve_critical_audit_writes_and_recovery_matches_event_types()
+    {
+        using var directory = new TestDirectory("relaylink-audit-flood-");
+        try
+        {
+            var path = Path.Combine(directory.Path, "audit.db");
+            var first = Service(path);
+            await first.StartAsync(CancellationToken.None);
+
+            // Simulate rejection flood + opened peer connection without closing it,
+            // plus a closed proxy connection that must NOT suppress recovering the peer connection.
+            var proxyId = Guid.NewGuid();
+            var peerId = Guid.NewGuid();
+            for (var index = 0; index < 300; index++)
+                await first.RecordAsync(new AuditEvent("security_group_rejected", "denied") { ClientId = "agent", ChannelId = "echo", RemoteIp = $"192.0.2.{index % 20}" });
+
+            await first.RecordAsync(new AuditEvent("proxy_connection_opened", "success") { ClientId = "agent", ChannelId = "echo", ConnectionId = proxyId, RemoteIp = "127.0.0.1" });
+            await first.RecordAsync(new AuditEvent("proxy_connection_closed", "closed") { ClientId = "agent", ChannelId = "echo", ConnectionId = proxyId, ReasonCode = "completed" });
+            await first.RecordAsync(new AuditEvent("peer_connection_opened", "success") { ClientId = "agent", ChannelId = "peer", ConnectionId = peerId, RemoteIp = "127.0.0.1" });
+
+            var restarted = Service(path);
+            await restarted.StartAsync(CancellationToken.None);
+            var page = await restarted.ReadAsync(DateTimeOffset.UtcNow.AddHours(-1), DateTimeOffset.UtcNow.AddHours(1), null, "agent", 1, 50, CancellationToken.None);
+            Assert.Contains(page.Events, item => item.EventType == "proxy_connection_opened" && item.ConnectionId == proxyId);
+            Assert.Contains(page.Events, item => item.EventType == "peer_connection_closed" && item.ConnectionId == peerId && item.ReasonCode == "server_restart");
+        }
+        finally { SqliteConnection.ClearAllPools(); }
+    }
+
     private static AuditService Service(string path)
     {
         var server = new ServerConfiguration(1,

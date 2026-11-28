@@ -1,5 +1,3 @@
-using System.Diagnostics;
-
 namespace RelayLink.Transport;
 
 // Cancels Token when no Touch has arrived for the idle interval. A non-positive interval disables the watch.
@@ -7,12 +5,15 @@ public sealed class RelayIdleWatch : IDisposable
 {
     private readonly CancellationTokenSource owned = new();
     private readonly CancellationTokenSource? linked;
-    private long lastActivity = Stopwatch.GetTimestamp();
+    private readonly TimeProvider timeProvider;
+    private long lastActivity;
     private readonly Task watcher = Task.CompletedTask;
     private int disposed;
 
-    public RelayIdleWatch(TimeSpan idleTimeout, CancellationToken parent = default)
+    public RelayIdleWatch(TimeSpan idleTimeout, CancellationToken parent = default, TimeProvider? timeProvider = null)
     {
+        this.timeProvider = timeProvider ?? TimeProvider.System;
+        lastActivity = this.timeProvider.GetTimestamp();
         if (idleTimeout <= TimeSpan.Zero)
         {
             Token = parent;
@@ -26,17 +27,23 @@ public sealed class RelayIdleWatch : IDisposable
 
     public CancellationToken Token { get; }
 
-    public void Touch() => Interlocked.Exchange(ref lastActivity, Stopwatch.GetTimestamp());
+    public void Touch() => Interlocked.Exchange(ref lastActivity, timeProvider.GetTimestamp());
 
     public void Dispose()
     {
         if (Interlocked.Exchange(ref disposed, 1) == 1) return;
         try { owned.Cancel(); }
         catch (ObjectDisposedException) { }
-        try { watcher.Wait(TimeSpan.FromSeconds(2)); }
-        catch (AggregateException) { }
-        linked?.Dispose();
-        owned.Dispose();
+        if (linked is null)
+        {
+            owned.Dispose();
+            return;
+        }
+        _ = watcher.ContinueWith(_ =>
+        {
+            linked.Dispose();
+            owned.Dispose();
+        }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
     }
 
     private async Task WatchAsync(TimeSpan idleTimeout)
@@ -45,7 +52,7 @@ public sealed class RelayIdleWatch : IDisposable
         {
             while (!Token.IsCancellationRequested)
             {
-                var remaining = idleTimeout - Stopwatch.GetElapsedTime(Volatile.Read(ref lastActivity));
+                var remaining = idleTimeout - timeProvider.GetElapsedTime(Volatile.Read(ref lastActivity));
                 if (remaining <= TimeSpan.Zero)
                 {
                     try { owned.Cancel(); }
@@ -54,9 +61,9 @@ public sealed class RelayIdleWatch : IDisposable
                 }
 
                 var slice = remaining > TimeSpan.FromSeconds(1) ? TimeSpan.FromSeconds(1) : remaining;
-                await Task.Delay(slice, Token);
+                await Task.Delay(slice, timeProvider, Token);
             }
         }
-        catch (OperationCanceledException) when (Token.IsCancellationRequested) { }
+        catch (Exception exception) when (exception is OperationCanceledException or ObjectDisposedException) { }
     }
 }

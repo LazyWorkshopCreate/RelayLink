@@ -140,6 +140,46 @@ public sealed class AgentConfigurationMigratorTests
         finally { directory.Delete(recursive: true); }
     }
 
+    [Fact]
+    public void Migrator_preserves_limits_and_reads_trusted_ca_file_when_base64_is_whitespace()
+    {
+        var directory = Directory.CreateTempSubdirectory("relaylink-migration-limits-");
+        try
+        {
+            var configurationPath = Path.Combine(directory.FullName, "agent.json");
+            using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+            var req = new CertificateRequest("CN=Root", key, HashAlgorithmName.SHA256);
+            req.CertificateExtensions.Add(new X509BasicConstraintsExtension(true, false, 0, true));
+            using var caCert = req.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow.AddDays(1));
+            var caPath = Path.Combine(directory.FullName, "ca.pem");
+            File.WriteAllText(caPath, caCert.ExportCertificatePem());
+
+            var secret = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
+            var legacy = JsonSerializer.Serialize(new
+            {
+                serverHost = "127.0.0.1",
+                serverPort = 7443,
+                clientId = "same",
+                maxConnections = 2500,
+                maxPendingConnections = 80,
+                useTls = true,
+                trustedCaPemPath = "ca.pem",
+                trustedCaPemBase64 = "   ",
+                secret,
+                reconnect = new { initialDelaySeconds = 1, maxDelaySeconds = 30, permanentErrorDelaySeconds = 60 }
+            });
+            File.WriteAllText(configurationPath, legacy);
+
+            AgentConfigurationMigrator.MigrateInstalled(configurationPath);
+            var migrated = AgentProcessConfigurationLoader.Load(configurationPath);
+            Assert.Equal(2500, migrated.MaxConnections);
+            Assert.Equal(2500, Assert.Single(migrated.Servers).MaxConnections);
+            Assert.Equal(80, Assert.Single(migrated.Servers).MaxPendingConnections);
+            Assert.False(string.IsNullOrWhiteSpace(Assert.Single(migrated.Servers).TrustedCaPemBase64));
+        }
+        finally { directory.Delete(recursive: true); }
+    }
+
     private static string LegacyJson(string secret) => JsonSerializer.Serialize(new
     {
         serverHost = "127.0.0.1", serverPort = 7443, clientId = "same", useTls = false, secret,

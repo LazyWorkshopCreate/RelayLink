@@ -23,20 +23,22 @@ SDK 让第三方应用经 RelayLink 访问内网服务。**它不实现中继协
 
 | 语言 | 目录 | 最低版本 | 依赖 | 本机已验证 |
 |---|---|---|---|---|
-| C#/.NET | `src/RelayLink.Sdk` | netstandard2.0 / net8.0 / net10.0 | 仅 BCL | 是（编译 + 单元测试） |
-| Python | `sdk/python` | 3.9 | 仅标准库 | 是（冒烟测试） |
-| TypeScript/Node | `sdk/typescript` | Node 20 | 仅内置模块 | 是（tsc 类型检查） |
-| Go | `sdk/go` | 1.22 | 仅标准库 | 是（Go 1.27.3：`go vet` + `go build` + conformance 3/3） |
-| Java | `sdk/java` | 17 | 仅 JDK | 是（OpenJDK 17.0.21：`javac` + conformance 5/5） |
-| Rust | `sdk/rust` | 1.75 | 无外部依赖 | 是（Rust 1.99.1：`cargo build` + conformance 5/5） |
+| C#/.NET | `src/RelayLink.Sdk` | netstandard2.0 / net8.0 / net10.0 | 仅 BCL | 是（三目标编译 + `SdkDataPlaneTests` 一致性测试） |
+| Python | `sdk/python` | 3.9 | 仅标准库 | 是（`unittest` 一致性 + IPv6/UDP 测试 3/3） |
+| TypeScript/Node | `sdk/typescript` | Node 20 | 仅内置模块 | 是（`tsc` 编译 + `node:test` 一致性测试 3/3） |
+| Go | `sdk/go` | 1.22 | 仅标准库 | 是（`go vet` + `go test -v` 一致性测试 6/6） |
+| Java | `sdk/java` | 17 | 仅 JDK | 是（OpenJDK 17 `javac -encoding UTF-8` + `ConformanceRunner` / JUnit 5 `ConformanceTest`） |
+| Rust | `sdk/rust` | 1.75 | 无外部依赖 | 是（`cargo test` 一致性测试 4/4） |
 
-六种实现均已在 **Windows x64** 上编译并跑通 `contract/conformance/data-plane.json` 对应的用例。
-Linux / macOS 原生、musl 与 arm64 目标仍未验证，见 [TST-014](../docs/testing/ai-automation-verification.md)。
+六种实现均已在 **Windows x64** 上编译并跑通 `contract/conformance/data-plane.json` 对应的用例及 UDP/IPv6/半关闭扩展场景；C#/.NET、`Python`、`TypeScript`、`Go`、`Rust`、`Java` 检查也已接入 GitHub Actions 标准 CI（macOS/arm64 与 musl 目标需在对应平台验证）。见 [TST-014](../docs/testing/ai-automation-verification.md) 与 [TST-015](../docs/testing/code-review-2026-11-25.md)。
 
 各语言的 conformance 用例：
 
-- Go：`go test ./relaylink/ -v`（读取 `contract/conformance/data-plane.json`）
-- Java：`javac` 编译主代码与 `src/test`，用 JUnit Console Standalone 运行 `ConformanceTest`
+- C# / .NET：`dotnet build src/RelayLink.Sdk/RelayLink.Sdk.csproj -c Release` + `dotnet test tests/RelayLink.UnitTests/RelayLink.UnitTests.csproj -c Release --filter SdkDataPlaneTests`
+- Python：`python -m unittest discover -s sdk/python/tests -v`（支持 `pyproject.toml` 打包元数据）
+- TypeScript / Node：`npm --prefix sdk/typescript test`
+- Go：`go vet ./... && go test ./relaylink/ -v`（读取 `contract/conformance/data-plane.json`）
+- Java：`javac -encoding UTF-8` 编译主代码与 `ConformanceRunner`，运行零依赖 `java ... com.relaylink.sdk.ConformanceRunner`；配置 Maven/JUnit 环境时可通过 `pom.xml` 运行 `ConformanceTest`
 - Rust：`cargo test`（`tests/conformance.rs` 读取仓库根契约文件）
 
 ## 契约

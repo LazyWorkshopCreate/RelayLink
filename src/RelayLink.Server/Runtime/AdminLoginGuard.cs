@@ -126,7 +126,7 @@ public sealed class AdminLoginGuard
     private static FailureState FreshUser(IpBucket bucket, string username, DateTimeOffset now)
     {
         if (!bucket.Users.TryGetValue(username, out var state) || (state.Reserved == 0 && IdleExpired(state, now)))
-            return new FailureState(now, 0, state?.Reserved ?? 0, null);
+            return new FailureState(now, 0, 0, null);
         return state;
     }
 

@@ -393,6 +393,76 @@ public sealed class CliProcessTests : IAsyncLifetime
         Assert.False(string.IsNullOrWhiteSpace(body.GetProperty("data").GetProperty("changeRequestId").GetString()));
     }
 
+    [Fact]
+    public async Task Cli_pair_json_outputs_pure_json_captures_spki_and_server_health_succeeds()
+    {
+        await StartServerAsync();
+        cliPath = ResolveCliPath();
+        cliDirectory = Path.Combine(storage!.Path, "cli-home");
+        Directory.CreateDirectory(cliDirectory);
+
+        var pairJson = await RunCliAsync("--entry", $"127.0.0.1:{automationPort}", "--accept-spki", "--json",
+            "pair", "--scope", "server.read", "--scope", "clients.read", "--subject", "cli-pin-test");
+        Assert.Equal(5, pairJson.ExitCode);
+        using var created = JsonDocument.Parse(pairJson.Output);
+        var createdData = created.RootElement.GetProperty("data");
+        var requestId = createdData.GetProperty("requestId").GetString()!;
+        var userCode = createdData.GetProperty("userCode").GetString()!;
+        Assert.False(string.IsNullOrWhiteSpace(createdData.GetProperty("spkiSha256").GetString()));
+
+        var configText = await File.ReadAllTextAsync(Path.Combine(cliDirectory, "config.json"));
+        using var configJson = JsonDocument.Parse(configText);
+        var savedSpki = configJson.RootElement.GetProperty("profiles")[0].GetProperty("spkiSha256").GetString();
+        Assert.False(string.IsNullOrWhiteSpace(savedSpki));
+
+        using var admin = await AdminAsync();
+        using var approve = await admin.PostAsJsonAsync($"/api/v1/admin/automation/pairings/{requestId}/approve", new { });
+        approve.EnsureSuccessStatusCode();
+
+        // Subsequent commands rely exclusively on persisted pinned SPKI (no --accept-spki or --spki).
+        var waitJson = await RunCliAsync("--entry", $"127.0.0.1:{automationPort}", "--json",
+            "pair", "--wait", "--request", requestId, "--code", userCode);
+        Assert.True(waitJson.ExitCode == 0, $"pair --wait 失败：exit={waitJson.ExitCode} || stdout=[{waitJson.Output}] || stderr=[{waitJson.Error}]");
+
+        var health = await RunCliAsync("--entry", $"127.0.0.1:{automationPort}", "--json", "server", "health");
+        Assert.True(health.ExitCode == 0, $"server health 失败：exit={health.ExitCode} || stdout=[{health.Output}] || stderr=[{health.Error}]");
+        using var healthDoc = JsonDocument.Parse(health.Output);
+        Assert.True(healthDoc.RootElement.GetProperty("data").TryGetProperty("ready", out _));
+    }
+
+    [Fact]
+    public async Task Cli_unsupported_api_version_exits_with_code_9()
+    {
+        var (_, entry) = await PreparePairedCliAsync();
+        var result = await RunCliAsync("--entry", entry, "--api-version", "2", "server", "health");
+        Assert.Equal(9, result.ExitCode);
+    }
+
+    [Fact]
+    public async Task Cli_auth_trust_reset_logout_and_skill_install_work()
+    {
+        var (_, entry) = await PreparePairedCliAsync();
+
+        var reset = await RunCliAsync("--json", "auth", "trust", "--reset");
+        Assert.Equal(0, reset.ExitCode);
+        using var resetJson = JsonDocument.Parse(reset.Output);
+        Assert.True(resetJson.RootElement.GetProperty("data").GetProperty("spkiReset").GetBoolean());
+
+        var afterReset = await RunCliAsync("--entry", entry, "auth", "whoami");
+        Assert.Equal(8, afterReset.ExitCode);
+
+        var logout = await RunCliAsync("auth", "logout");
+        Assert.Equal(0, logout.ExitCode);
+        Assert.Empty(Directory.GetFiles(Path.Combine(cliDirectory, "credentials")));
+
+        var skillTarget = Path.Combine(storage!.Path, "installed-skill");
+        var skillInstall = await RunCliAsync("skill", "install", "--target", skillTarget);
+        Assert.True(skillInstall.ExitCode == 0, $"skill install 失败：exit={skillInstall.ExitCode} || stdout=[{skillInstall.Output}] || stderr=[{skillInstall.Error}]");
+        Assert.True(File.Exists(Path.Combine(skillTarget, "SKILL.md")));
+        Assert.True(File.Exists(Path.Combine(skillTarget, "scripts", "relaylink.mjs")));
+        Assert.True(File.Exists(Path.Combine(skillTarget, "reference", "commands.md")));
+    }
+
 
     /// <summary>定位 relaylink.dll：优先测试输出目录（项目引用会复制），否则走 CLI 项目构建输出。</summary>
     private static string ResolveCliPath()

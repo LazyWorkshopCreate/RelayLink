@@ -69,8 +69,32 @@ internal sealed class PeerSessionCoordinator(
                 return "transport protocol must be tcp or udp";
             if (mapping.ApplicationProtocol is not ("raw" or "http"))
                 return "application protocol must be raw or http";
-            if (mapping.ApplicationProtocol == "http" && (mapping.TransportProtocol != "tcp" || mapping.Http is null))
-                return "http mappings require tcp and http options";
+            if (mapping.ApplicationProtocol == "http")
+            {
+                if (mapping.TransportProtocol != "tcp" || mapping.Http is null)
+                    return "http mappings require tcp and http options";
+                if (mapping.Http.Scheme is not ("http" or "https"))
+                    return "http mapping scheme must be http or https";
+                var authorityHost = mapping.Http.AuthorityHost;
+                if (string.IsNullOrWhiteSpace(authorityHost) ||
+                    authorityHost.Any(c => char.IsControl(c) || char.IsWhiteSpace(c)) ||
+                    Uri.CheckHostName(authorityHost) is not (UriHostNameType.Dns or UriHostNameType.IPv4))
+                    return "http mapping authority host is invalid";
+                try
+                {
+                    _ = HttpProxyPolicy.NormalizeAuthority(authorityHost, mapping.Http.Scheme);
+                }
+                catch (ArgumentException)
+                {
+                    return "http mapping authority host is invalid";
+                }
+                if (mapping.Http.PolicyHash is not { Length: 64 } || !mapping.Http.PolicyHash.All(Uri.IsHexDigit))
+                    return "http mapping policy hash is invalid";
+            }
+            else if (mapping.Http is not null)
+            {
+                return "raw mappings cannot include http options";
+            }
         }
 
         return null;
@@ -169,6 +193,7 @@ internal sealed class PeerSessionCoordinator(
             while (!sessionToken.IsCancellationRequested && !binding.Stopped)
             {
                 var caller = await binding.Listener!.AcceptSocketAsync(sessionToken);
+                caller.NoDelay = true;
                 var lease = quota.TryAcquirePending();
                 if (lease is null)
                 {
@@ -256,8 +281,8 @@ internal sealed class PeerSessionCoordinator(
                 lease.MarkActive();
                 deadline.CancelAfter(Timeout.InfiniteTimeSpan);
                 if (datagram is not null) await datagram.RelayAsync(peerStream, mapping.UdpIdleTimeoutSeconds, deadline.Token);
-                else if (tls is not null) await RelayEncryptedSocketAsync(caller!, tls, connection.Framed, sessionToken, halfCloseDrainTimeout ?? TimeSpan.FromSeconds(300), tcpIdleTimeout ?? TimeSpan.Zero);
-                else await RelayPlainSocketAsync(caller!, connection.Framed, sessionToken, halfCloseDrainTimeout ?? TimeSpan.FromSeconds(300), tcpIdleTimeout ?? TimeSpan.Zero);
+                else if (tls is not null) await RelayEncryptedSocketAsync(caller!, tls, connection.Framed, sessionToken, halfCloseDrainTimeout ?? TimeSpan.FromSeconds(300), tcpIdleTimeout ?? TimeSpan.Zero, connection.Abort);
+                else await RelayPlainSocketAsync(caller!, connection.Framed, sessionToken, halfCloseDrainTimeout ?? TimeSpan.FromSeconds(300), tcpIdleTimeout ?? TimeSpan.Zero, connection.Abort);
             }
             catch (Exception exception) when (exception is IOException or SocketException or OperationCanceledException or AuthenticationException or ProtocolException)
             {
@@ -308,6 +333,7 @@ internal sealed class PeerSessionCoordinator(
                 lease.MarkActive(); deadline.CancelAfter(Timeout.InfiniteTimeSpan);
                 await using var application = new PeerApplicationStream(peerStream);
                 await httpProxy!.ServeAsync(channel, application, open.HttpIngress!, sessionToken, open.ConnectionId);
+                await connection.Framed.CompleteWritesAsync(sessionToken);
                 return;
             }
             if (channel.TransportProtocol == "udp")
@@ -325,11 +351,12 @@ internal sealed class PeerSessionCoordinator(
             using var targetDeadline = CancellationTokenSource.CreateLinkedTokenSource(deadline.Token);
             targetDeadline.CancelAfter(TimeSpan.FromSeconds(channel.TargetConnectTimeoutSeconds));
             await target.ConnectAsync(channel.TargetHost, channel.TargetPort, targetDeadline.Token);
+            target.NoDelay = true;
             await peerStream.WriteAsync(new byte[] { 1 }, deadline.Token);
             lease.MarkActive();
             deadline.CancelAfter(Timeout.InfiniteTimeSpan);
-            if (tls is not null) await RelayEncryptedSocketAsync(target.Client, tls, connection.Framed, sessionToken, halfCloseDrainTimeout ?? TimeSpan.FromSeconds(300), tcpIdleTimeout ?? TimeSpan.Zero);
-            else await RelayPlainSocketAsync(target.Client, connection.Framed, sessionToken, halfCloseDrainTimeout ?? TimeSpan.FromSeconds(300), tcpIdleTimeout ?? TimeSpan.Zero);
+            if (tls is not null) await RelayEncryptedSocketAsync(target.Client, tls, connection.Framed, sessionToken, halfCloseDrainTimeout ?? TimeSpan.FromSeconds(300), tcpIdleTimeout ?? TimeSpan.Zero, connection.Abort);
+            else await RelayPlainSocketAsync(target.Client, connection.Framed, sessionToken, halfCloseDrainTimeout ?? TimeSpan.FromSeconds(300), tcpIdleTimeout ?? TimeSpan.Zero, connection.Abort);
         }
         catch (Exception exception) when (exception is IOException or SocketException or OperationCanceledException or AuthenticationException or ProtocolException)
         {
@@ -337,13 +364,14 @@ internal sealed class PeerSessionCoordinator(
         }
     }
 
-    private async Task<PeerDataConnection> ConnectDataAsync(Guid connectionId, Guid ownSessionId, string token, string role, CancellationToken cancellationToken)
+    internal async Task<PeerDataConnection> ConnectDataAsync(Guid connectionId, Guid ownSessionId, string token, string role, CancellationToken cancellationToken)
     {
         var client = new TcpClient();
         try
         {
             await client.ConnectAsync(agent.ServerHost, agent.EffectiveDataPort, cancellationToken);
             client.NoDelay = true;
+            TcpKeepAlive.Enable(client.Client);
             var transport = client.GetStream();
             var reader = new FrameReader(transport);
             var writer = new FrameWriter(transport);
@@ -374,23 +402,21 @@ internal sealed class PeerSessionCoordinator(
             DateTime.UtcNow >= leaf.NotBefore.ToUniversalTime() && DateTime.UtcNow <= leaf.NotAfter.ToUniversalTime();
     }
 
-    private static async Task RelayEncryptedSocketAsync(Socket socket, SslStream tls, FramedDuplexStream framed, CancellationToken cancellationToken, TimeSpan halfCloseDrainTimeout, TimeSpan tcpIdleTimeout)
+    internal static async Task RelayEncryptedSocketAsync(Socket socket, Stream tls, FramedDuplexStream framed, CancellationToken cancellationToken, TimeSpan halfCloseDrainTimeout, TimeSpan tcpIdleTimeout, Action? abortTunnel = null, TimeProvider? timeProvider = null)
     {
         using var relayCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        using var idle = new RelayIdleWatch(tcpIdleTimeout, relayCancellation.Token);
+        using var idle = new RelayIdleWatch(tcpIdleTimeout, relayCancellation.Token, timeProvider);
         TcpKeepAlive.Enable(socket);
         var toPeer = Task.Run(async () =>
         {
-            var payload = new byte[ProtocolConstants.MaxDataPayloadLength];
-            var header = new byte[4];
+            var frame = new byte[4 + ProtocolConstants.MaxDataPayloadLength];
             while (true)
             {
-                var count = await socket.ReceiveAsync(payload, SocketFlags.None, idle.Token);
+                var count = await socket.ReceiveAsync(frame.AsMemory(4), SocketFlags.None, idle.Token);
+                BinaryPrimitives.WriteInt32BigEndian(frame.AsSpan(0, 4), count);
+                await tls.WriteAsync(frame.AsMemory(0, 4 + count), idle.Token);
                 idle.Touch();
-                BinaryPrimitives.WriteInt32BigEndian(header, count);
-                await tls.WriteAsync(header, idle.Token);
                 if (count == 0) return;
-                await tls.WriteAsync(payload.AsMemory(0, count), idle.Token);
             }
         }, relayCancellation.Token);
         var fromPeer = Task.Run(async () =>
@@ -401,10 +427,9 @@ internal sealed class PeerSessionCoordinator(
             {
                 await tls.ReadExactlyAsync(header, idle.Token);
                 var count = BinaryPrimitives.ReadInt32BigEndian(header);
-                if (count == 0) { socket.Shutdown(SocketShutdown.Send); return; }
+                if (count == 0) { socket.Shutdown(SocketShutdown.Send); idle.Touch(); return; }
                 if (count < 0 || count > payload.Length) throw new ProtocolException("Invalid peer application frame length.");
                 await tls.ReadExactlyAsync(payload.AsMemory(0, count), idle.Token);
-                idle.Touch();
                 var pending = payload.AsMemory(0, count);
                 while (!pending.IsEmpty)
                 {
@@ -412,16 +437,17 @@ internal sealed class PeerSessionCoordinator(
                     if (sent == 0) throw new IOException("Local socket closed during peer relay.");
                     pending = pending[sent..];
                 }
+                idle.Touch();
             }
-        }, idle.Token);
-        await RelayPump.CompleteBidirectionalAsync(toPeer, fromPeer, () => { relayCancellation.Cancel(); socket.Dispose(); }, halfCloseDrainTimeout);
+        }, relayCancellation.Token);
+        await RelayPump.CompleteBidirectionalAsync(toPeer, fromPeer, () => { relayCancellation.Cancel(); socket.Dispose(); abortTunnel?.Invoke(); }, halfCloseDrainTimeout);
         await framed.CompleteWritesAsync(relayCancellation.Token);
     }
 
-    private static async Task RelayPlainSocketAsync(Socket socket, FramedDuplexStream framed, CancellationToken cancellationToken, TimeSpan halfCloseDrainTimeout, TimeSpan tcpIdleTimeout)
+    internal static async Task RelayPlainSocketAsync(Socket socket, FramedDuplexStream framed, CancellationToken cancellationToken, TimeSpan halfCloseDrainTimeout, TimeSpan tcpIdleTimeout, Action? abortTunnel = null, TimeProvider? timeProvider = null)
     {
         using var relayCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        using var idle = new RelayIdleWatch(tcpIdleTimeout, relayCancellation.Token);
+        using var idle = new RelayIdleWatch(tcpIdleTimeout, relayCancellation.Token, timeProvider);
         TcpKeepAlive.Enable(socket);
         var toPeer = Task.Run(async () =>
         {
@@ -429,13 +455,14 @@ internal sealed class PeerSessionCoordinator(
             while (true)
             {
                 var count = await socket.ReceiveAsync(payload, SocketFlags.None, idle.Token);
-                idle.Touch();
                 if (count == 0)
                 {
                     await framed.CompleteWritesAsync(idle.Token);
+                    idle.Touch();
                     return;
                 }
                 await framed.WriteAsync(payload.AsMemory(0, count), idle.Token);
+                idle.Touch();
             }
         }, relayCancellation.Token);
         var fromPeer = Task.Run(async () =>
@@ -444,10 +471,10 @@ internal sealed class PeerSessionCoordinator(
             while (true)
             {
                 var count = await framed.ReadAsync(payload, idle.Token);
-                idle.Touch();
                 if (count == 0)
                 {
                     socket.Shutdown(SocketShutdown.Send);
+                    idle.Touch();
                     return;
                 }
                 var pending = payload.AsMemory(0, count);
@@ -457,9 +484,10 @@ internal sealed class PeerSessionCoordinator(
                     if (sent == 0) throw new IOException("Local socket closed during peer relay.");
                     pending = pending[sent..];
                 }
+                idle.Touch();
             }
         }, relayCancellation.Token);
-        await RelayPump.CompleteBidirectionalAsync(toPeer, fromPeer, () => { relayCancellation.Cancel(); socket.Dispose(); }, halfCloseDrainTimeout);
+        await RelayPump.CompleteBidirectionalAsync(toPeer, fromPeer, () => { relayCancellation.Cancel(); socket.Dispose(); abortTunnel?.Invoke(); }, halfCloseDrainTimeout);
     }
 
     private void NoteUdpDrop()
@@ -505,9 +533,15 @@ internal sealed class PeerSessionCoordinator(
         public void Stop() { Stopped = true; Listener?.Stop(); Udp?.Stop(); }
     }
 
-    private sealed class PeerDataConnection(TcpClient client, Stream transport, FramedDuplexStream framed) : IAsyncDisposable
+    internal sealed class PeerDataConnection(TcpClient client, Stream transport, FramedDuplexStream framed) : IAsyncDisposable
     {
+        public Socket Socket => client.Client;
         public FramedDuplexStream Framed { get; } = framed;
+        public void Abort()
+        {
+            try { client.Dispose(); }
+            catch (ObjectDisposedException) { }
+        }
         public async ValueTask DisposeAsync() { await transport.DisposeAsync(); client.Dispose(); }
     }
 }

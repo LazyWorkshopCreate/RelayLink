@@ -120,7 +120,7 @@ RelayLink.Server --config <server.json> --check-config
 
 ### 4.3 连接空闲与半关闭
 
-`limits.tcpIdleTimeoutSeconds` 控制已经建立的普通 TCP 代理和授权互访。双向都没有新数据达到该秒数后，服务端取消连接并释放名额。缺省为 900 秒；设为 `0` 则关闭应用层空闲超时。升级后，旧配置文件里没有该字段时也按 900 秒生效。TCP 套接字另开 keepalive，用于对端崩溃后的补充探测。
+`limits.tcpIdleTimeoutSeconds` 控制已经建立的普通 TCP 代理和授权互访。双向都没有新数据达到该秒数后，服务端取消连接并释放名额。缺省为 900 秒；设为 `0` 则关闭应用层空闲超时。升级后，旧配置文件里没有该字段时也按 900 秒生效。控制连接以及普通代理、授权互访数据隧道的 TCP 套接字另开启操作系统层 KeepAlive（空闲 30 秒后每 10 秒探测 1 次、最多重试 3 次），用于 NAT/防火墙保活及对端失联后的补充探测；OS KeepAlive 报文不会重置应用层空闲超时计时，因此像 RDP、SSH 这类可能长时间无界面或键盘输出的长连接，如不希望在静置 15 分钟后断开，可将 `limits.tcpIdleTimeoutSeconds` 设为 `0`（仅依赖 TCP KeepAlive 探测死链）或调大后重启 Server。
 
 `limits.halfCloseDrainTimeoutSeconds` 仍是半关闭后等待另一方向结束的秒数，默认 300。服务端在注册接受消息里把排空秒数和 TCP 空闲秒数交给 Agent，两端使用同一排空窗口。修改这两项需要重启 Server，Agent 在下次注册时取得新值。管理页总览显示当前 TCP 空闲秒数。
 
@@ -149,7 +149,7 @@ RelayLink.Server --config <server.json> --check-config
 
 | 平台 | 操作 | 注意事项 |
 |---|---|---|
-| Windows | 运行自包含或框架依赖 Agent 安装包并选择下载的 JSON | 两种包均需要 x64 和 VC++ 2015–2022 x64；框架依赖包另需 .NET 10 ASP.NET Core Runtime x64 |
+| Windows | 运行自包含或框架依赖 Agent 安装包并选择下载的 JSON | 两种包均需要 x64 和 VC++ 2015–2022 x64；框架依赖包另需机器级的 .NET 10 Runtime x64 和 ASP.NET Core Runtime x64，安装器会在停止已有服务前检查 .NET 宿主和这两个共享框架 |
 | Linux | 发布 `linux-x64`，按 systemd 文档安装 | 程序目录只读，状态目录仅服务账号可写 |
 | macOS Intel | 使用 `osx-x64` 包 | 按 launchd 文档创建服务账号和状态目录 |
 | macOS Apple Silicon | 使用 `osx-arm64` 包 | 不要混用 Intel 包 |

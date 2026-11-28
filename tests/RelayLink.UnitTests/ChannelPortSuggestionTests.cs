@@ -42,6 +42,22 @@ public sealed class ChannelPortSuggestionTests
         Assert.Equal(new[] { 19004, 19005 }, probes);
     }
 
+    [Fact]
+    public void Skips_automation_port_for_tcp_suggestions()
+    {
+        var server = new ServerConfiguration(1,
+            new TunnelConfiguration("127.0.0.1", 7443, false, "", "", 10, 15, 45) { DataPort = 7444 },
+            new DashboardConfiguration("127.0.0.1", 18080, 5, new DashboardAdminConfiguration("admin", "unused", 60)),
+            "clients", new LimitsConfiguration(100, 20, 10, 10, 20, 120, 300), null)
+        {
+            Automation = new AutomationConfiguration(true, AutomationConfiguration.LoopbackAddress, 19000, "a.pem", "a.key")
+        };
+        var client = new ClientConfiguration(1, "agent", "Agent", true, "unused", 10, 10, []);
+        var configuration = new LoadedConfiguration(server, new Dictionary<string, ClientConfiguration> { [client.ClientId] = client });
+
+        Assert.Equal(19001, ChannelPortSuggestion.Find(configuration, _ => true, "tcp"));
+    }
+
     private static LoadedConfiguration Configuration(int tunnelPort, int dataPort, int dashboardPort, IReadOnlyList<ChannelConfiguration> channels)
     {
         var server = new ServerConfiguration(1,

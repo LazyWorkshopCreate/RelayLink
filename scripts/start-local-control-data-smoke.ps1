@@ -38,8 +38,14 @@ $clientConfig = @{
     channels = @(@{ channelId = 'echo'; displayName = 'Echo'; enabled = $true; listenAddress = '127.0.0.1'; listenPort = $proxyPort; targetHost = '127.0.0.1'; targetPort = $targetPort; maxConnections = 100; targetConnectTimeoutSeconds = 5 })
 }
 $agentConfig = @{
-    serverHost = '127.0.0.1'; serverPort = $controlPort; dataPort = $dataPort; useTls = $false; clientId = 'smoke-agent'; secret = $secret; trustedCaPemPath = $null; dashboardPort = 0
-    reconnect = @{ initialDelaySeconds = 1; maxDelaySeconds = 2; permanentErrorDelaySeconds = 2 }
+    schemaVersion = 1
+    dashboardPort = 0
+    outboundPortRangeStart = 20000
+    outboundPortRangeEnd = 59999
+    servers = @(@{
+        profileId = 'primary'; enabled = $true; serverHost = '127.0.0.1'; serverPort = $controlPort; dataPort = $dataPort; useTls = $false; clientId = 'smoke-agent'; secret = $secret; trustedCaPemBase64 = $null
+        reconnect = @{ initialDelaySeconds = 1; maxDelaySeconds = 2; permanentErrorDelaySeconds = 2 }
+    })
 }
 $serverPath = Join-Path $runDir 'server.json'
 $clientPath = Join-Path $runDir 'clients/smoke-agent.json'

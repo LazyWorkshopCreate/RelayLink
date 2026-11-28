@@ -11,13 +11,14 @@ RelayLink 是基于 .NET 的反向 TCP / UDP 代理，用于让云端内网应�
 
 两种模式支持 TCP 字节流和单播 UDP 报文，不解析或修改 SQL/TDS 内容。UDP 按来源地址和端口隔离会话，通过现有 TCP 数据隧道转发，保留报文边界并空闲回收；UDP 设计与兼容性见 [UDP 转发](docs/design/udp-forwarding.md)。客户端互访的本机入口端口由访问方 Agent 在配置范围内选择，并在端口冲突时轮换。
 
-Server 兼容 v3 Agent 的 TCP 连接，可先升级服务端；UDP 需要相关 Agent 支持 v4。v0.1.0-rc.9 重建版包含此兼容修复；同名旧包仍拒绝 v3，下载时须核对最新 SHA256SUMS，详见[使用指南](docs/operations/udp-forwarding.md)。
+Server 兼容 v3 Agent 的 TCP 连接，可先升级服务端；UDP 需要相关 Agent 支持 v4，HTTP/HTTPS 需要支持 v5（见 [发布说明](docs/releases/README.md) 与 [UDP 使用指南](docs/operations/udp-forwarding.md)）。
 
 ## 主要能力
 
 - 每个 Agent 使用独立客户端 ID 和密钥认证；通道及访问映射由服务端集中管理，认证后下发。
 - 控制连接与按业务连接建立的数据隧道使用独立服务端端口。控制连接默认使用 TLS；普通代理数据通道完成绑定后直接复制原始 TCP 字节，不提供链路加密。客户端授权互访要求控制 TLS；Agent 间业务流默认建立内层 TLS，关闭通道加密后则以明文中继。
-- 服务端管理页面支持匿名只读查看状态、通道和流量历史；管理员登录后可管理客户端、通道、访问映射及普通通道的来源 IP 安全组，并查看登录与连接生命周期审计日志。
+- 服务端管理页面支持匿名只读查看状态、通道和流量历史；管理员登录后可管理客户端、通道、访问映射、普通通道来源 IP 安全组、审计日志以及可选 AI 自动化配对/变更审批。
+- 可选 AI 自动化管理面（默认关闭，仅回环 HTTPS）与 `relaylink` CLI / Skill 通过授权互访接入；另提供面向数据面入口的六语言 SDK（C#/.NET、Python、TypeScript、Go、Java、Rust，见 [SDK 说明](sdk/README.md)）。
 - Agent 提供本机状态页，展示通道和可用的访问方地址，并通过导入服务端 JSON 新增或修改连接项；连接项可停用、重新启用或删除。Windows 使用 Windows Service，Linux 使用 systemd，macOS 使用 launchd 托管。
 - Agent 本机页可打开 HTTP/HTTPS 互访 URL。普通 TCP 互访入口提供系统 SSH 链接和可复制的 SSH 命令，Windows 用户也可下载远程桌面连接文件。参见[从 Agent 本机页连接互访入口](docs/operations/installation-and-usage.md#71-从-agent-本机页连接互访入口)。
 
@@ -37,22 +38,30 @@ Linux Docker 主机可使用 `pwsh ./scripts/start-server-compose.ps1 -AgentServ
 
 ```text
 RelayLink/
-├── RelayLink.slnx           .NET 解决方案
-├── .github/workflows/       GitHub Actions 流水线
+├── RelayLink.slnx                   .NET 解决方案
+├── .github/workflows/               GitHub Actions 流水线
+├── website/                         GitHub Pages 静态产品与文档网站源码
 ├── src/
-│   ├── RelayLink.Server/   服务端与管理 API
-│   ├── RelayLink.Agent/    Windows/Linux/macOS Agent
-│   ├── RelayLink.Protocol/ 协议与消息模型
-│   ├── RelayLink.Transport/ TCP、TLS 与流量转发
-│   ├── RelayLink.Logging/  服务端与 Agent 共用的文件日志
-│   ├── RelayLink.AdminWeb/ React 服务端管理前端
-│   └── RelayLink.AgentWeb/ React Agent 本机前端
-├── tests/                  单元与集成测试
-├── tools/                  模拟目标与模拟调用方
-├── config/examples/        脱敏配置示例
-├── deploy/                 Docker、Linux、Windows、macOS 部署资源
-├── scripts/                构建与开发脚本
-└── docs/                   需求、设计及开发文档
+│   ├── RelayLink.Server/            服务端、管理 API 与回环自动化管理面
+│   ├── RelayLink.Agent/             Windows/Linux/macOS Agent
+│   ├── RelayLink.Agent.ConfigMigrator/ Agent 启动前配置转换器
+│   ├── RelayLink.Protocol/          协议与消息模型
+│   ├── RelayLink.Transport/         TCP、TLS 与流量转发
+│   ├── RelayLink.Logging/           服务端与 Agent 共用的文件日志
+│   ├── RelayLink.AutomationClient/  CLI 共用的自动化管理客户端
+│   ├── RelayLink.Cli/               自动化管理命令行工具（relaylink）
+│   ├── RelayLink.Sdk/               C#/.NET 数据面入口发现与传输 SDK
+│   ├── RelayLink.AdminWeb/          React 服务端管理前端
+│   └── RelayLink.AgentWeb/          React Agent 本机前端
+├── sdk/                             Python/TypeScript/Go/Java/Rust 数据面 SDK
+├── skills/relaylink-admin/          随 CLI 提供的运维 agent skill
+├── contract/                        自动化 OpenAPI、错误码与跨语言一致性契约
+├── tests/                           单元与集成测试
+├── tools/                           模拟目标与模拟调用方
+├── config/examples/                 脱敏配置示例
+├── deploy/                          Docker、Linux、Windows、macOS 部署资源
+├── scripts/                         构建、本地验收与验证脚本
+└── docs/                            需求、设计及开发文档
 ```
 
 各目录的详细职责见[仓库目录规划](docs/development/repository-layout.md)。

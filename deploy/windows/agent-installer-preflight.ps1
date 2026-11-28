@@ -5,6 +5,7 @@ param(
     [string]$ConfigurationPath,
     [string]$ServiceName = 'RelayLinkAgent',
     [string]$DataDirectory = (Join-Path $env:ProgramData 'RelayLink\Agent'),
+    [switch]$RequireDotNetRuntime,
     [string]$ErrorReportPath
 )
 
@@ -16,6 +17,49 @@ trap {
     }
     [Console]::Error.WriteLine($message)
     exit 1
+}
+if ($RequireDotNetRuntime) {
+    $key = 'SOFTWARE\dotnet\Setup\InstalledVersions\x64'
+    $dotnetRoot = $null
+    foreach ($view in @([Microsoft.Win32.RegistryView]::Registry32, [Microsoft.Win32.RegistryView]::Registry64)) {
+        $registry = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, $view)
+        try {
+            $installation = $registry.OpenSubKey($key)
+            if ($installation) {
+                try { $dotnetRoot = $installation.GetValue('InstallLocation') }
+                finally { $installation.Dispose() }
+            }
+        }
+        finally { $registry.Dispose() }
+        if ($dotnetRoot) { break }
+    }
+    if (!$dotnetRoot) {
+        $dotnetRoot = Join-Path $env:ProgramW6432 'dotnet'
+        if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64') {
+            $dotnetRoot = Join-Path $dotnetRoot 'x64'
+        }
+    }
+    $message = 'Install or repair the machine-wide x64 .NET 10 Runtime and ASP.NET Core Runtime before continuing.'
+    $hostPath = Join-Path $dotnetRoot 'dotnet.exe'
+    if (!(Test-Path -LiteralPath $hostPath -PathType Leaf)) { throw $message }
+    $probe = New-Object Diagnostics.ProcessStartInfo
+    $probe.FileName = $hostPath
+    $probe.Arguments = '--list-runtimes'
+    $probe.UseShellExecute = $false
+    $probe.RedirectStandardOutput = $true
+    $probe.CreateNoWindow = $true
+    $process = [Diagnostics.Process]::Start($probe)
+    try {
+        $output = $process.StandardOutput.ReadToEndAsync()
+        if (!$process.WaitForExit(10000)) {
+            $process.Kill()
+            throw $message
+        }
+        $runtimes = $output.GetAwaiter().GetResult()
+        if ($process.ExitCode -ne 0 -or $runtimes -notmatch '(?m)^Microsoft\.NETCore\.App 10\.\d+\.\d+ \[' -or
+            $runtimes -notmatch '(?m)^Microsoft\.AspNetCore\.App 10\.\d+\.\d+ \[') { throw $message }
+    }
+    finally { $process.Dispose() }
 }
 if ($Mode -ne 'Update') {
     if ([string]::IsNullOrWhiteSpace($ConfigurationPath) -or -not (Test-Path -LiteralPath $ConfigurationPath -PathType Leaf)) {
@@ -44,7 +88,7 @@ if ($Mode -eq 'Install') {
     return
 }
 if (-not $service) { throw "Existing installation has no '$ServiceName' service; repair it before upgrading." }
-$registered = Get-WmiObject -Class Win32_Service -Filter "Name='$ServiceName'"
+$registered = Get-CimInstance -ClassName Win32_Service -Filter "Name='$ServiceName'"
 $installedConfiguration = Join-Path ([IO.Path]::GetFullPath($DataDirectory)) 'agent.json'
 $expectedPath = '"{0}" --config "{1}"' -f ([IO.Path]::GetFullPath($ExecutablePath)), $installedConfiguration
 $legacyPath = '"{0}" --config "{1}"' -f (Join-Path $legacyProgramDirectory 'RelayLink.Agent.exe'), $installedConfiguration

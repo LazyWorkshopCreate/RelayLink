@@ -708,6 +708,68 @@ public sealed class ConfigurationTests
         Assert.Contains("Unable to read", stderr, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("LOCALHOST.")]
+    [InlineData("sub.localhost")]
+    [InlineData("0.0.0.0")]
+    [InlineData("::")]
+    [InlineData("[::ffff:127.0.0.1]")]
+    public void Automation_loopback_target_guard_rejects_normalized_loopback_and_unspecified_hosts(string targetHost)
+    {
+        Assert.True(ConfigurationLoader.IsLoopbackOrUnspecifiedHost(targetHost));
+        var server = TestConfiguration().Server with
+        {
+            Tunnel = new TunnelConfiguration("127.0.0.1", 7443, false, "", "", 10, 15, 45),
+            Automation = new AutomationConfiguration(true, AutomationConfiguration.LoopbackAddress, 18082, "a.pem", "a.key")
+            {
+                ResolvedCertificatePath = "a.pem",
+                ResolvedPrivateKeyPath = "a.key"
+            }
+        };
+        var client = new ClientConfiguration(1, "agent", "Agent", true, Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)), 10, 5,
+            [new ChannelConfiguration("bypass", "Bypass", true, "127.0.0.1", 19010, targetHost, 18082, 5, 5)]);
+
+        Assert.Throws<ConfigurationException>(() =>
+            ConfigurationLoader.ValidateAutomationLoopbackTargets(server, [client], "unit test"));
+    }
+
+    [Fact]
+    public void Server_and_client_validation_enforces_automation_conflicts_limits_newlines_hosts_and_ipv6_overlap()
+    {
+        var loader = new ConfigurationLoader();
+        var baseServer = TestConfiguration().Server with
+        {
+            Tunnel = new TunnelConfiguration("127.0.0.1", 7443, false, "", "", 10, 15, 45),
+            Automation = new AutomationConfiguration(true, AutomationConfiguration.LoopbackAddress, 7443, "a.pem", "a.key")
+            {
+                ResolvedCertificatePath = "a.pem",
+                ResolvedPrivateKeyPath = "a.key"
+            }
+        };
+        Assert.Throws<ConfigurationException>(() => loader.ValidateServerUpdate(new LoadedConfiguration(baseServer, new Dictionary<string, ClientConfiguration>())));
+
+        var badTimeout = baseServer with
+        {
+            Automation = null,
+            Limits = baseServer.Limits with { OpenTimeoutSeconds = 301 }
+        };
+        Assert.Throws<ConfigurationException>(() => loader.ValidateServerUpdate(new LoadedConfiguration(badTimeout, new Dictionary<string, ClientConfiguration>())));
+
+        var secret = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
+        var newlineClient = new ClientConfiguration(1, "agent\n", "Agent", true, secret, 10, 5, []);
+        var badHostClient = new ClientConfiguration(1, "agent", "Agent", true, secret, 10, 5, []) { AgentServerHost = "invalid host!" };
+        var validServer = baseServer with { Automation = null };
+        Assert.Throws<ConfigurationException>(() => loader.ValidateClientUpdate(new LoadedConfiguration(validServer, new Dictionary<string, ClientConfiguration> { [newlineClient.ClientId] = newlineClient })));
+        Assert.Throws<ConfigurationException>(() => loader.ValidateClientUpdate(new LoadedConfiguration(validServer, new Dictionary<string, ClientConfiguration> { [badHostClient.ClientId] = badHostClient })));
+
+        var ipv6Overlap = new ClientConfiguration(1, "agent", "Agent", true, secret, 10, 5,
+        [
+            new ChannelConfiguration("c1", "C1", true, "::1", 19020, "127.0.0.1", 9, 2, 5),
+            new ChannelConfiguration("c2", "C2", true, "0:0:0:0:0:0:0:1", 19020, "127.0.0.1", 9, 2, 5)
+        ]);
+        Assert.Throws<ConfigurationException>(() => loader.ValidateClientUpdate(new LoadedConfiguration(validServer, new Dictionary<string, ClientConfiguration> { [ipv6Overlap.ClientId] = ipv6Overlap })));
+    }
+
     private static string WriteMinimalServer(string directory, string clientsDirectory)
     {
         var path = Path.Combine(directory, "server.json");

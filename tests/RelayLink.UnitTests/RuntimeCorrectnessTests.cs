@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
@@ -60,21 +61,27 @@ public sealed class RuntimeCorrectnessTests
     [Fact]
     public async Task Activity_defers_the_idle_watch()
     {
-        using var idle = new RelayIdleWatch(TimeSpan.FromMilliseconds(400));
-        var keepAlive = Task.Run(async () =>
-        {
-            for (var attempt = 0; attempt < 6; attempt++)
-            {
-                await Task.Delay(100);
-                idle.Touch();
-            }
-        });
-        var cancelled = Task.Delay(Timeout.Infinite, idle.Token);
-        var elapsed = Task.Delay(500);
-        Assert.Same(elapsed, await Task.WhenAny(cancelled, elapsed));
-        await keepAlive;
-        var deadline = DateTime.UtcNow.AddSeconds(2);
-        while (!idle.Token.IsCancellationRequested && DateTime.UtcNow < deadline) await Task.Delay(20);
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var time = new ManualTimeProvider();
+        using var idle = new RelayIdleWatch(TimeSpan.FromSeconds(1), CancellationToken.None, time);
+        await time.WaitForTimerCountAsync(1, deadline.Token);
+
+        time.Advance(TimeSpan.FromMilliseconds(800));
+        Assert.False(idle.Token.IsCancellationRequested);
+        idle.Touch();
+        time.Advance(TimeSpan.FromMilliseconds(200));
+        await time.WaitForTimerCountAsync(2, deadline.Token);
+        Assert.False(idle.Token.IsCancellationRequested);
+
+        time.Advance(TimeSpan.FromMilliseconds(500));
+        idle.Touch();
+        time.Advance(TimeSpan.FromMilliseconds(300));
+        await time.WaitForTimerCountAsync(3, deadline.Token);
+        Assert.False(idle.Token.IsCancellationRequested);
+
+        time.Advance(TimeSpan.FromMilliseconds(700));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            Task.Delay(Timeout.Infinite, idle.Token).WaitAsync(deadline.Token));
         Assert.True(idle.Token.IsCancellationRequested);
     }
 
@@ -184,6 +191,38 @@ public sealed class RuntimeCorrectnessTests
         await workspace.Service.StopAsync(CancellationToken.None);
     }
 
+    [Fact]
+    public void RelayIdleWatch_dispose_does_not_block_synchronously()
+    {
+        var watch = new RelayIdleWatch(TimeSpan.FromSeconds(30));
+        var started = Stopwatch.GetTimestamp();
+        watch.Dispose();
+        var elapsed = Stopwatch.GetElapsedTime(started);
+        Assert.True(elapsed < TimeSpan.FromSeconds(1), $"RelayIdleWatch.Dispose took {elapsed.TotalMilliseconds} ms.");
+    }
+
+    [Fact]
+    public async Task Pre_ready_session_skips_configuration_push_during_handshake()
+    {
+        using var workspace = new ConfigWorkspace();
+        var client = workspace.Runtime.Configuration.Clients["agent"];
+        Assert.True(workspace.Runtime.Sessions.TryRegister(client, out var session));
+        session.AttachControlWriter(new FrameWriter(new HangingStream(), TimeSpan.FromMilliseconds(50)));
+
+        var (_, channelPush) = await workspace.Editor.UpdateAsync("agent", "echo",
+            new ChannelUpdateRequest("handshake-edit", true, "127.0.0.1", workspace.Port, "127.0.0.1", 9, 2, 5), CancellationToken.None);
+        Assert.False(channelPush.PushedToAgent);
+        Assert.Null(channelPush.FailureReason);
+
+        var (_, clientPush) = await workspace.ClientEditor.UpdateAsync("agent",
+            new ClientUpdateRequest("Agent Updated", true, 4, 2), CancellationToken.None);
+        Assert.False(clientPush.PushedToAgent);
+        Assert.Null(clientPush.FailureReason);
+
+        session.Close();
+        await workspace.Service.StopAsync(CancellationToken.None);
+    }
+
     private static ChannelUpdateRequest Update(int port) =>
         new("Echo", true, "127.0.0.1", port, "127.0.0.1", 9, 2, 5);
 
@@ -212,6 +251,7 @@ public sealed class RuntimeCorrectnessTests
         public ServerRuntime Runtime { get; }
         public ProxyListenerService Service { get; }
         public ChannelConfigurationEditor Editor { get; }
+        public ClientConfigurationEditor ClientEditor { get; }
         public string ClientsDirectory { get; }
         public string ClientPath { get; }
 
@@ -241,9 +281,10 @@ public sealed class RuntimeCorrectnessTests
             Service = new ProxyListenerService(Runtime, new PendingConnectionRegistry(), new MetricsRegistry(loaded),
                 new AuditService(Runtime, NullLogger<AuditService>.Instance), NullLogger<ProxyListenerService>.Instance);
             Service.ApplyConfigurationAsync(loaded, CancellationToken.None).GetAwaiter().GetResult();
-            Editor = new ChannelConfigurationEditor(serverPath, new ConfigurationLoader(), Runtime, Service,
-                new PeerRelayRegistry(Runtime, new MetricsRegistry(loaded), new AuditService(Runtime, NullLogger<AuditService>.Instance), NullLogger<PeerRelayRegistry>.Instance),
-                Runtime.Sessions, new ConfigurationWriteLock());
+            var writeLock = new ConfigurationWriteLock();
+            var peerRelays = new PeerRelayRegistry(Runtime, new MetricsRegistry(loaded), new AuditService(Runtime, NullLogger<AuditService>.Instance), NullLogger<PeerRelayRegistry>.Instance);
+            Editor = new ChannelConfigurationEditor(serverPath, new ConfigurationLoader(), Runtime, Service, peerRelays, Runtime.Sessions, writeLock);
+            ClientEditor = new ClientConfigurationEditor(serverPath, new ConfigurationLoader(), Runtime, Service, peerRelays, Runtime.Sessions, writeLock);
         }
 
         public void Dispose()

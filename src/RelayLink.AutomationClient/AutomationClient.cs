@@ -1,7 +1,9 @@
 using System.Buffers.Text;
 using System.Net;
 using System.Net.Http.Headers;
+using System.Net.Security;
 using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -119,33 +121,43 @@ public sealed class AutomationClient : IDisposable
     /// 它来自 /info（匿名可达），配对时也会写进 profile。
     /// </summary>
     public string? AutomationInstanceId { get; set; }
+    public string? ObservedSpkiSha256 { get; private set; }
 
-    public AutomationClient(string baseUrl, string? pinnedSpkiSha256 = null, bool acceptAny = false)
+    public static string ComputeSpkiSha256(X509Certificate2 certificate) =>
+        Base64UrlEncode(SHA256.HashData(certificate.PublicKey.ExportSubjectPublicKeyInfo()));
+
+    public AutomationClient(string baseUrl, string? pinnedSpkiSha256 = null, bool acceptAny = false,
+        int apiVersion = SupportedApiVersion, TimeSpan? timeout = null)
     {
-        baseUri = new Uri(baseUrl.TrimEnd('/') + "/");
-        var handler = new HttpClientHandler();
-        if (acceptAny)
+        if (!Uri.TryCreate(baseUrl.TrimEnd('/') + "/", UriKind.Absolute, out var parsed) ||
+            !string.Equals(parsed.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase))
+            throw new ArgumentException("Automation endpoint requires https://.", nameof(baseUrl));
+        baseUri = parsed;
+        var handler = new HttpClientHandler
         {
-            // 仅用于首次配对前核对指纹；配对后必须使用固定值。
-            handler.ServerCertificateCustomValidationCallback = (_, certificate, _, _) =>
+            UseProxy = false,
+            AllowAutoRedirect = false
+        };
+        handler.ServerCertificateCustomValidationCallback = (_, certificate, _, sslPolicyErrors) =>
+        {
+            if (certificate is null) return false;
+            var cert2 = certificate as X509Certificate2 ?? X509CertificateLoader.LoadCertificate(certificate.Export(X509ContentType.Cert));
+            try
             {
-                if (certificate is not null && pinnedSpkiSha256 is not null)
-                {
-                    var spki = Base64UrlEncode(certificate.GetPublicKey());
+                var spki = ComputeSpkiSha256(cert2);
+                ObservedSpkiSha256 = spki;
+                if (pinnedSpkiSha256 is not null)
                     return string.Equals(spki, pinnedSpkiSha256, StringComparison.Ordinal);
-                }
+                return acceptAny || sslPolicyErrors == SslPolicyErrors.None;
+            }
+            finally
+            {
+                if (!ReferenceEquals(cert2, certificate)) cert2.Dispose();
+            }
+        };
 
-                return pinnedSpkiSha256 is null;
-            };
-        }
-        else if (pinnedSpkiSha256 is not null)
-        {
-            handler.ServerCertificateCustomValidationCallback = (_, certificate, _, _) =>
-                certificate is not null && string.Equals(Base64UrlEncode(certificate.GetPublicKey()), pinnedSpkiSha256, StringComparison.Ordinal);
-        }
-
-        http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(30) };
-        http.DefaultRequestHeaders.Add(ApiVersionHeader, SupportedApiVersion.ToString());
+        http = new HttpClient(handler) { Timeout = timeout ?? TimeSpan.FromSeconds(30) };
+        http.DefaultRequestHeaders.Add(ApiVersionHeader, apiVersion.ToString());
     }
 
     public sealed record ApiError(string Code, string Message, bool Retryable, string? RequestId);
@@ -167,49 +179,73 @@ public sealed class AutomationClient : IDisposable
 
         if (device is not null)
         {
-            // htu 用未转义路径：服务端从 request.Path（已解码）比对。
-            // 若用 PathAndQuery（转义形态），含非 URL 安全字符的 clientId 会恒 proof_invalid。
-            var unescapedPath = Uri.UnescapeDataString(request.RequestUri!.AbsolutePath);
-            var htu = string.IsNullOrEmpty(request.RequestUri.Query)
-                ? unescapedPath
-                : unescapedPath + request.RequestUri.Query;
-            var claims = new Dictionary<string, object?>
-            {
-                ["htm"] = method.Method,
-                ["htu"] = htu
-            };
-            if (token is not null)
-                claims["ath"] = Base64UrlEncode(SHA256.HashData(Encoding.UTF8.GetBytes(token)));
-            // instanceId 必须有值：服务端会拒绝缺失或不匹配的证明。
-            if (!string.IsNullOrEmpty(AutomationInstanceId))
-                claims["instanceId"] = AutomationInstanceId;
+            var claims = BuildRequestClaims(method, request.RequestUri!, token, null);
             request.Headers.Add(ProofHeader, device.CreateProof(claims));
         }
 
         using var response = await http.SendAsync(request, cancellationToken).ConfigureAwait(false);
+        return await ParseResponseAsync(response, cancellationToken).ConfigureAwait(false);
+    }
+
+    private Dictionary<string, object?> BuildRequestClaims(HttpMethod method, Uri requestUri, string? token,
+        IReadOnlyDictionary<string, object?>? extraClaims)
+    {
+        var unescapedPath = Uri.UnescapeDataString(requestUri.AbsolutePath);
+        var htu = string.IsNullOrEmpty(requestUri.Query) ? unescapedPath : unescapedPath + requestUri.Query;
+        var claims = new Dictionary<string, object?>
+        {
+            ["htm"] = method.Method,
+            ["htu"] = htu
+        };
+        if (token is not null)
+            claims["ath"] = Base64UrlEncode(SHA256.HashData(Encoding.UTF8.GetBytes(token)));
+        if (!string.IsNullOrEmpty(AutomationInstanceId))
+            claims["instanceId"] = AutomationInstanceId;
+        if (extraClaims is not null)
+        {
+            foreach (var (name, value) in extraClaims)
+                claims[name] = value;
+        }
+        return claims;
+    }
+
+    private static async Task<ApiResult> ParseResponseAsync(HttpResponseMessage response, CancellationToken cancellationToken)
+    {
         var text = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
         if (string.IsNullOrWhiteSpace(text))
             return new ApiResult(response.IsSuccessStatusCode, null, null, response.StatusCode);
 
-        using var document = JsonDocument.Parse(text);
-        var root = document.RootElement.Clone();
-        if (response.IsSuccessStatusCode)
+        JsonDocument document;
+        try
         {
-            return root.TryGetProperty("data", out var data)
-                ? new ApiResult(true, data, null, response.StatusCode)
-                : new ApiResult(true, root, null, response.StatusCode);
+            document = JsonDocument.Parse(text);
+        }
+        catch (JsonException)
+        {
+            return new ApiResult(false, null, new ApiError("invalid_response", text, false, null), response.StatusCode);
         }
 
-        if (root.TryGetProperty("error", out var error))
+        using (document)
         {
-            return new ApiResult(false, null, new ApiError(
-                error.TryGetProperty("code", out var code) ? code.GetString() ?? "unknown" : "unknown",
-                error.TryGetProperty("message", out var message) ? message.GetString() ?? string.Empty : string.Empty,
-                error.TryGetProperty("retryable", out var retryable) && retryable.ValueKind == JsonValueKind.True,
-                error.TryGetProperty("requestId", out var requestId) ? requestId.GetString() : null), response.StatusCode);
-        }
+            var root = document.RootElement.Clone();
+            if (response.IsSuccessStatusCode)
+            {
+                return root.TryGetProperty("data", out var data)
+                    ? new ApiResult(true, data, null, response.StatusCode)
+                    : new ApiResult(true, root, null, response.StatusCode);
+            }
 
-        return new ApiResult(false, null, new ApiError("unknown", text, false, null), response.StatusCode);
+            if (root.TryGetProperty("error", out var error))
+            {
+                return new ApiResult(false, null, new ApiError(
+                    error.TryGetProperty("code", out var code) ? code.GetString() ?? "unknown" : "unknown",
+                    error.TryGetProperty("message", out var message) ? message.GetString() ?? string.Empty : string.Empty,
+                    error.TryGetProperty("retryable", out var retryable) && retryable.ValueKind == JsonValueKind.True,
+                    error.TryGetProperty("requestId", out var requestId) ? requestId.GetString() : null), response.StatusCode);
+            }
+
+            return new ApiResult(false, null, new ApiError("unknown", text, false, null), response.StatusCode);
+        }
     }
 
     // ---------------- 匿名 ----------------
@@ -227,66 +263,52 @@ public sealed class AutomationClient : IDisposable
     public async Task<ApiResult> QueryPairingAsync(Guid requestId, string userCode, DeviceKey device, CancellationToken cancellationToken)
     {
         var digest = UserCodeDigest(userCode);
-        using var request = new HttpRequestMessage(HttpMethod.Post, new Uri(baseUri, $"api/v1/automation/pairing/requests/{requestId}/status"))
+        var uri = new Uri(baseUri, $"api/v1/automation/pairing/requests/{requestId}/status");
+        using var request = new HttpRequestMessage(HttpMethod.Post, uri)
         {
-            // 服务端 status 端点要求 body.userCode 与 proof.userCodeDigest 双重一致；
-            // 只发 proof 不带 body 会被判 pairing_denied（用户码不正确）。
             Content = new StringContent(JsonSerializer.Serialize(new { userCode }, Json), Encoding.UTF8, "application/json")
         };
-        request.Headers.Add(ProofHeader, device.CreateProof(new Dictionary<string, object?>
+        request.Headers.Add(ProofHeader, device.CreateProof(BuildRequestClaims(HttpMethod.Post, uri, null, new Dictionary<string, object?>
         {
             ["requestId"] = requestId.ToString(),
             ["userCodeDigest"] = digest
-        }));
+        })));
         return await SendRawAsync(request, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<ApiResult> ExchangeTokenAsync(Guid requestId, string userCode, DeviceKey device, CancellationToken cancellationToken)
     {
         var digest = UserCodeDigest(userCode);
-        using var request = new HttpRequestMessage(HttpMethod.Post, new Uri(baseUri, $"api/v1/automation/pairing/requests/{requestId}/token"))
+        var uri = new Uri(baseUri, $"api/v1/automation/pairing/requests/{requestId}/token");
+        using var request = new HttpRequestMessage(HttpMethod.Post, uri)
         {
             Content = new StringContent(JsonSerializer.Serialize(new { userCode }, Json), Encoding.UTF8, "application/json")
         };
-        request.Headers.Add(ProofHeader, device.CreateProof(new Dictionary<string, object?>
+        request.Headers.Add(ProofHeader, device.CreateProof(BuildRequestClaims(HttpMethod.Post, uri, null, new Dictionary<string, object?>
         {
             ["requestId"] = requestId.ToString(),
             ["userCodeDigest"] = digest
-        }));
+        })));
         return await SendRawAsync(request, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<ApiResult> CancelPairingAsync(Guid requestId, DeviceKey device, CancellationToken cancellationToken)
     {
-        using var request = new HttpRequestMessage(HttpMethod.Delete, new Uri(baseUri, $"api/v1/automation/pairing/requests/{requestId}"));
-        request.Headers.Add(ProofHeader, device.CreateProof(new Dictionary<string, object?>
+        var uri = new Uri(baseUri, $"api/v1/automation/pairing/requests/{requestId}");
+        using var request = new HttpRequestMessage(HttpMethod.Delete, uri);
+        request.Headers.Add(ProofHeader, device.CreateProof(BuildRequestClaims(HttpMethod.Delete, uri, null, new Dictionary<string, object?>
         {
             ["requestId"] = requestId.ToString()
-        }));
+        })));
         return await SendRawAsync(request, cancellationToken).ConfigureAwait(false);
     }
 
     private async Task<ApiResult> SendRawAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
-        request.Headers.TryAddWithoutValidation(ApiVersionHeader, SupportedApiVersion.ToString());
+        if (!request.Headers.Contains(ApiVersionHeader))
+            request.Headers.TryAddWithoutValidation(ApiVersionHeader, http.DefaultRequestHeaders.GetValues(ApiVersionHeader).First());
         using var response = await http.SendAsync(request, cancellationToken).ConfigureAwait(false);
-        var text = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-        if (string.IsNullOrWhiteSpace(text)) return new ApiResult(response.IsSuccessStatusCode, null, null, response.StatusCode);
-
-        using var document = JsonDocument.Parse(text);
-        var root = document.RootElement.Clone();
-        if (response.IsSuccessStatusCode)
-            return root.TryGetProperty("data", out var data)
-                ? new ApiResult(true, data, null, response.StatusCode)
-                : new ApiResult(true, root, null, response.StatusCode);
-
-        return root.TryGetProperty("error", out var error)
-            ? new ApiResult(false, null, new ApiError(
-                error.TryGetProperty("code", out var code) ? code.GetString() ?? "unknown" : "unknown",
-                error.TryGetProperty("message", out var message) ? message.GetString() ?? string.Empty : string.Empty,
-                error.TryGetProperty("retryable", out var retryable) && retryable.ValueKind == JsonValueKind.True,
-                error.TryGetProperty("requestId", out var id) ? id.GetString() : null), response.StatusCode)
-            : new ApiResult(false, null, new ApiError("unknown", text, false, null), response.StatusCode);
+        return await ParseResponseAsync(response, cancellationToken).ConfigureAwait(false);
     }
 
     public static string UserCodeDigest(string userCode)
@@ -300,6 +322,9 @@ public sealed class AutomationClient : IDisposable
 
     public Task<ApiResult> WhoAmIAsync(DeviceKey device, string token, CancellationToken cancellationToken) =>
         SendAsync(HttpMethod.Get, "/api/v1/automation/whoami", device, token, null, null, cancellationToken);
+
+    public Task<ApiResult> GetHealthAsync(DeviceKey device, string token, CancellationToken cancellationToken) =>
+        SendAsync(HttpMethod.Get, "/api/v1/automation/health", device, token, null, null, cancellationToken);
 
     public Task<ApiResult> GetVersionAsync(DeviceKey device, string token, CancellationToken cancellationToken) =>
         SendAsync(HttpMethod.Get, "/api/v1/automation/version", device, token, null, null, cancellationToken);

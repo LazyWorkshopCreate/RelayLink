@@ -1,6 +1,7 @@
 package com.relaylink.sdk;
 
 import java.io.IOException;
+import java.net.ConnectException;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
@@ -13,8 +14,14 @@ public final class TcpEntry {
     }
 
     public static Socket connect(EntryDescriptor entry, int connectTimeoutMillis) {
+        if (entry == null) {
+            throw new RelayLinkException(RelayLinkException.INVALID_USAGE, "entry 不能为空。");
+        }
         if (!"tcp".equals(entry.transport())) {
             throw new RelayLinkException(RelayLinkException.INVALID_USAGE, "该入口不是 TCP。");
+        }
+        if (connectTimeoutMillis <= 0) {
+            throw new RelayLinkException(RelayLinkException.INVALID_USAGE, "connectTimeoutMillis 必须大于 0。");
         }
 
         Socket socket = new Socket();
@@ -27,6 +34,9 @@ public final class TcpEntry {
         } catch (UnknownHostException exception) {
             closeQuietly(socket);
             throw new RelayLinkException(RelayLinkException.ENTRY_NOT_FOUND, "无法解析入口主机。", exception);
+        } catch (ConnectException exception) {
+            closeQuietly(socket);
+            throw new RelayLinkException(RelayLinkException.ENTRY_UNAVAILABLE, "入口拒绝连接：" + exception.getMessage(), exception);
         } catch (IOException exception) {
             closeQuietly(socket);
             String message = exception.getMessage() == null ? "" : exception.getMessage();

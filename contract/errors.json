@@ -27,6 +27,12 @@
     { "code": "unsupported_api_version", "http": 400, "retryable": false, "summary": "请求的 API 版本不受支持；CLI 以退出码 9 结束。" },
     { "code": "automation_disabled", "http": 404, "retryable": false, "summary": "自动化入口未启用。" }
   ],
+  "dataPlaneCodes": [
+    { "code": "ENTRY_NOT_FOUND", "summary": "本机 Agent 未发现匹配的可用入口。" },
+    { "code": "ENTRY_UNAVAILABLE", "summary": "入口存在但当前未激活、不可达或连接被拒绝。" },
+    { "code": "TIMEOUT", "summary": "入口连接或操作在限定时间内超时。" },
+    { "code": "PROTOCOL_ERROR", "summary": "本机 Agent 状态响应格式或协议字段不符合预期。" }
+  ],
   "exitCodes": [
     { "code": 0, "meaning": "成功" },
     { "code": 2, "meaning": "用法错误" },

@@ -1,7 +1,5 @@
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
-using System.Security.AccessControl;
-using System.Security.Principal;
 
 namespace RelayLink.Agent;
 
@@ -24,7 +22,10 @@ internal sealed class AgentIdentity : IDisposable
         try
         {
             using (var file = CreatePrivateFile(temporary))
+            {
                 file.Write(generated.Export(X509ContentType.Pkcs12));
+                file.Flush(flushToDisk: true);
+            }
             File.Move(temporary, path, overwrite: false);
         }
         finally { if (File.Exists(temporary)) File.Delete(temporary); }
@@ -49,13 +50,9 @@ internal sealed class AgentIdentity : IDisposable
 
     private static FileStream CreatePrivateFile(string path)
     {
-        if (!OperatingSystem.IsWindows())
-            return new FileStream(path, new FileStreamOptions { Mode = FileMode.CreateNew, Access = FileAccess.Write, Share = FileShare.None, UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite });
-        var user = WindowsIdentity.GetCurrent().User ?? throw new UnauthorizedAccessException("Current Windows identity has no SID.");
-        var security = new FileSecurity();
-        security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
-        security.AddAccessRule(new FileSystemAccessRule(user, FileSystemRights.FullControl, AccessControlType.Allow));
-        return new FileInfo(path).Create(FileMode.CreateNew, FileSystemRights.FullControl, FileShare.None, 4096, FileOptions.None, security);
+        if (OperatingSystem.IsWindows())
+            return new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+        return new FileStream(path, new FileStreamOptions { Mode = FileMode.CreateNew, Access = FileAccess.Write, Share = FileShare.None, UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite });
     }
 
     public void Dispose() => Certificate.Dispose();

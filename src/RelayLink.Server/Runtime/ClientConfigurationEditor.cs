@@ -44,7 +44,7 @@ public sealed class ClientConfigurationEditor(string serverConfigurationPath, Co
         var secret = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
         var client = new ClientConfiguration(1, request.ClientId, request.DisplayName, request.Enabled, secret, request.MaxConnections, request.MaxPendingConnections, [])
         {
-            AgentServerHost = request.AgentServerHost,
+            AgentServerHost = string.IsNullOrWhiteSpace(request.AgentServerHost) ? null : request.AgentServerHost.Trim(),
             Tags = NormalizeTags(request.Tags)
         };
         return (new LoadedConfiguration(current.Server, current.Clients.Append(new KeyValuePair<string, ClientConfiguration>(client.ClientId, client)).ToDictionary()), client, true);
@@ -135,7 +135,7 @@ public sealed class ClientConfigurationEditor(string serverConfigurationPath, Co
                 peerRelays.RevokeClientConnections(client.ClientId);
                 if (sessions.TryGet(client.ClientId, out var disabled) && disabled is not null) sessions.Remove(client.ClientId, disabled.SessionId);
             }
-            else if (sessions.TryGet(client.ClientId, out var session) && session is { IsReady: true })
+            else if (sessions.TryGet(client.ClientId, out var session) && session is { HasCompletedHandshake: true })
             {
                 var (snapshot, version) = ConfigurationSnapshotFactory.Create(client, updated, session.ProtocolVersion);
                 if (!string.Equals(session.ConfigVersionPendingOrCurrent, version, StringComparison.Ordinal))
@@ -143,16 +143,16 @@ public sealed class ClientConfigurationEditor(string serverConfigurationPath, Co
                     var failure = await ConfigurationPush.TrySendAsync(session, snapshot, version, cancellationToken);
                     return (client, failure is null ? AgentPushReport.Sent : AgentPushReport.Failed(failure));
                 }
+                if (session.IsReady) return (client, AgentPushReport.Sent);
             }
-            var online = sessions.TryGet(client.ClientId, out var currentSession) && currentSession is not null;
-            return (client, online && client.Enabled ? AgentPushReport.Sent : AgentPushReport.Offline);
+            return (client, AgentPushReport.Offline);
         }
         catch (ConfigurationException exception) { throw new ClientUpdateException(exception.Message); }
         finally { writeLock.Gate.Release(); }
     }
 }
 
-public sealed record ClientCreateRequest(string ClientId, string DisplayName, bool Enabled, int MaxConnections, int MaxPendingConnections, string AgentServerHost)
+public sealed record ClientCreateRequest(string ClientId, string DisplayName, bool Enabled, int MaxConnections, int MaxPendingConnections, string? AgentServerHost)
 {
     public IReadOnlyList<string> Tags { get; init; } = [];
 }

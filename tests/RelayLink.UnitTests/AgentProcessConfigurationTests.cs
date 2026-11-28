@@ -1,3 +1,5 @@
+using System.Net;
+using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text.Json;
 using RelayLink.Agent;
@@ -52,5 +54,46 @@ public sealed class AgentProcessConfigurationTests
 
         Assert.Throws<AgentConfigurationException>(() => AgentProcessConfigurationLoader.Parse(duplicate.RootElement));
         Assert.Throws<AgentConfigurationException>(() => AgentProcessConfigurationLoader.Parse(excess.RootElement));
+    }
+
+    [Theory]
+    [InlineData("""{"servers":[{"profileId":"east\n","serverHost":"example.com","serverPort":7443,"dataPort":7444,"clientId":"agent","secret":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","reconnect":{"initialDelaySeconds":1,"maxDelaySeconds":30,"permanentErrorDelaySeconds":60}}]}""")]
+    [InlineData("""{"servers":[{"profileId":"east","serverHost":"example.com","serverPort":7443,"dataPort":7444,"clientId":"agent","secret":null,"reconnect":{"initialDelaySeconds":1,"maxDelaySeconds":30,"permanentErrorDelaySeconds":60}}]}""")]
+    public void Null_secret_and_trailing_newline_identifiers_throw_configuration_exception(string json)
+    {
+        using var document = JsonDocument.Parse(json);
+        Assert.Throws<AgentConfigurationException>(() => AgentProcessConfigurationLoader.Parse(document.RootElement));
+    }
+
+    [Fact]
+    public void Port_allocator_recovers_from_corrupt_state_and_rolls_back_on_persist_failure()
+    {
+        var directory = Directory.CreateTempSubdirectory("relaylink-ports-");
+        try
+        {
+            var corruptPath = Path.Combine(directory.FullName, "corrupt-ports.json");
+            File.WriteAllText(corruptPath, "{not-valid-json");
+            var recovered = new AgentPortAllocator(corruptPath, 31000, 31010);
+            using var listener = recovered.Bind("map-a");
+            Assert.InRange(((IPEndPoint)listener.LocalEndpoint).Port, 31000, 31010);
+
+            int singlePort;
+            using (var probe = new TcpListener(IPAddress.Loopback, 0))
+            {
+                probe.Start();
+                singlePort = ((IPEndPoint)probe.LocalEndpoint).Port;
+            }
+            var rollbackPath = Path.Combine(directory.FullName, "ports.json");
+            Directory.CreateDirectory(rollbackPath);
+            var allocator = new AgentPortAllocator(rollbackPath, singlePort, singlePort);
+            Assert.ThrowsAny<Exception>(() =>
+            {
+                using var failed = allocator.Bind("map-b");
+            });
+            Directory.Delete(rollbackPath);
+            using var retry = allocator.Bind("map-b");
+            Assert.Equal(singlePort, ((IPEndPoint)retry.LocalEndpoint).Port);
+        }
+        finally { directory.Delete(recursive: true); }
     }
 }
