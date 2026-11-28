@@ -25,6 +25,28 @@ public sealed class PeerConnectionTests
         Assert.Throws<SocketException>(fixture.TryBindDashboardPort);
     }
 
+#if LEGACY_V5_SERVER_TESTS
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task New_agents_use_legacy_udp_readiness_when_the_v5_server_omits_capabilities(bool encryption)
+    {
+        var server = Environment.GetEnvironmentVariable("RELAYLINK_LEGACY_V5_SERVER_ASSEMBLY")
+            ?? throw new InvalidOperationException("Set RELAYLINK_LEGACY_V5_SERVER_ASSEMBLY to the checksum-verified rc.14 Server DLL.");
+        using var fixture = new Fixture();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        await fixture.StartAsync(udp: true, encryption: encryption, serverAssembly: server);
+        await fixture.WaitOnlineAsync(deadline.Token);
+        using var http = new HttpClient();
+        var state = await http.GetFromJsonAsync<JsonElement>($"http://127.0.0.1:{fixture.AgentDashboardPort}/api/v2/mappings", deadline.Token);
+        var mapping = state.GetProperty("servers")[0].GetProperty("mappings").EnumerateArray().Single(m => m.GetProperty("mappingId").GetString() == "to-visited");
+        Assert.Equal(JsonValueKind.Null, mapping.GetProperty("endToEndEncryptionEnabled").ValueKind);
+        using var socket = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
+        socket.Connect(IPAddress.Loopback, fixture.LocalPort);
+        await socket.SendAsync(new byte[] { 7, 9 }, deadline.Token);
+        Assert.Equal(new byte[] { 7, 9 }, (await socket.ReceiveAsync(deadline.Token)).Buffer);
+    }
+#endif
 #if LEGACY_AGENT_TESTS
     [Fact]
     public async Task Udp_peer_request_to_real_v3_target_is_rejected_without_disconnect()
@@ -104,6 +126,52 @@ public sealed class PeerConnectionTests
     }
 
 #if PEER_TLS_TESTS
+    [Fact]
+    public async Task Failed_udp_target_preparation_drops_the_queued_packet_and_allows_a_new_source_after_repair()
+    {
+        using var fixture = new Fixture();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var token = deadline.Token;
+        // The unspecified address fails local target resolution without contacting a DNS server.
+        await fixture.StartAsync(udp: true, udpTargetHost: "0.0.0.0");
+        await fixture.WaitOnlineAsync(token);
+        using var http = new HttpClient(new HttpClientHandler { UseCookies = true });
+        using var login = await http.PostAsJsonAsync($"http://{fixture.DashboardAddress}/api/v1/admin/session",
+            new { username = "admin", password = "test-password" }, token);
+        login.EnsureSuccessStatusCode();
+        var csrf = (await login.Content.ReadFromJsonAsync<JsonElement>(cancellationToken: token)).GetProperty("csrfToken").GetString();
+        using var first = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
+        first.Connect(IPAddress.Loopback, fixture.LocalPort);
+        await first.SendAsync(new byte[] { 1 }, token);
+        while (true)
+        {
+            var status = await http.GetFromJsonAsync<JsonElement>($"http://{fixture.DashboardAddress}/api/v1/clients/visited/channels", token);
+            var channel = status.GetProperty("channels").EnumerateArray().Single(c => c.GetProperty("channelId").GetString() == "private");
+            if (channel.GetProperty("openFailedTotal").GetInt32() > 0) break;
+            await Task.Delay(25, token);
+        }
+        Assert.Equal(0, fixture.UdpTargetPackets);
+        using var repair = new HttpRequestMessage(HttpMethod.Put, $"http://{fixture.DashboardAddress}/api/v1/admin/clients/visited/channels/private")
+        { Content = JsonContent.Create(new { displayName = "Private", enabled = true, listenAddress = "127.0.0.1",
+            listenPort = fixture.ProxyPort, targetHost = "127.0.0.1", targetPort = fixture.TargetPort, maxConnections = 10,
+            targetConnectTimeoutSeconds = 5, transportProtocol = "udp" }) };
+        repair.Headers.Add("X-RelayLink-CSRF", csrf);
+        using var result = await http.SendAsync(repair, token);
+        result.EnsureSuccessStatusCode();
+        while (true)
+        {
+            var status = await http.GetFromJsonAsync<JsonElement>($"http://127.0.0.1:{fixture.VisitedDashboardPort}/api/v2/status", token);
+            if (status.GetProperty("servers")[0].GetProperty("channels").EnumerateArray().Any(c =>
+                c.GetProperty("channelId").GetString() == "private" && c.GetProperty("targetHost").GetString() == "127.0.0.1")) break;
+            await Task.Delay(25, token);
+        }
+        using var fresh = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
+        fresh.Connect(IPAddress.Loopback, fixture.LocalPort);
+        await fresh.SendAsync(new byte[] { 2 }, token);
+        Assert.Equal(new byte[] { 2 }, (await fresh.ReceiveAsync(token)).Buffer);
+        Assert.Equal(1, fixture.UdpTargetPackets);
+    }
+
     [Fact]
     public async Task Peer_transport_changes_push_dependent_mapping_and_rebuild_the_local_listener()
     {
@@ -311,8 +379,10 @@ public sealed class PeerConnectionTests
         var channel = channels!.RootElement.GetProperty("channels").EnumerateArray()
             .Single(item => item.GetProperty("channelId").GetString() == "private-b");
         Assert.False(channel.GetProperty("endToEndEncryptionEnabled").GetBoolean());
-        Assert.Equal(payload.Length + 32, channel.GetProperty("peerCiphertextToTarget").GetInt64());
-        Assert.Equal(payload.Length + 34, channel.GetProperty("peerCiphertextToCaller").GetInt64());
+        // The caller sends a 32-byte nonce and proof. The target sends its challenge and the service's 'B' greeting.
+        // The authenticated target-ready signal travels on the control connection.
+        Assert.Equal(payload.Length + 64, channel.GetProperty("peerCiphertextToTarget").GetInt64());
+        Assert.Equal(payload.Length + 33, channel.GetProperty("peerCiphertextToCaller").GetInt64());
     }
 #endif
 
@@ -509,10 +579,24 @@ public sealed class PeerConnectionTests
             response.EnsureSuccessStatusCode();
         }
 
+        async Task WaitForMappingModeAsync(bool expected)
+        {
+            while (true)
+            {
+                var state = await http.GetFromJsonAsync<JsonElement>($"http://127.0.0.1:{fixture.AgentDashboardPort}/api/v2/mappings", deadline.Token);
+                var mappings = state.GetProperty("servers")[0].GetProperty("mappings").EnumerateArray();
+                if (mappings.Any(item => item.GetProperty("mappingId").GetString() == "to-visited" &&
+                    item.GetProperty("endToEndEncryptionEnabled").GetBoolean() == expected)) return;
+                await Task.Delay(25, deadline.Token);
+            }
+        }
+
+        await WaitForMappingModeAsync(true);
         await SaveAsync(true);
         using (var unchanged = new CancellationTokenSource(TimeSpan.FromMilliseconds(300)))
             await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await changedStream.ReadAtLeastAsync(new byte[1], 1, false, unchanged.Token));
         await SaveAsync(false);
+        await WaitForMappingModeAsync(false);
         Assert.Equal(0, await changedStream.ReadAsync(new byte[1], deadline.Token));
 
         unaffected.Client.Shutdown(SocketShutdown.Send);
@@ -690,15 +774,19 @@ public sealed class PeerConnectionTests
     }
 
     [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public async Task Wrong_end_to_end_access_proof_never_connects_target(bool encryptionEnabled)
+    [InlineData(true, true)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(false, false)]
+    [InlineData(true, true, true)]
+    [InlineData(false, true, true)]
+    public async Task Wrong_end_to_end_access_proof_never_connects_target(bool encryptionEnabled, bool offerRelayControl, bool udp = false)
     {
         using var fixture = new Fixture();
-        await fixture.StartAsync(startCallerAgent: false);
+        await fixture.StartAsync(startCallerAgent: false, udp: udp, encryption: encryptionEnabled);
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(20));
         await fixture.WaitOnlineAsync(deadline.Token, expected: 1);
-        if (!encryptionEnabled)
+        if (!encryptionEnabled && !udp)
         {
             using var http = new HttpClient(new HttpClientHandler { UseCookies = true });
             using var login = await http.PostAsJsonAsync($"http://{fixture.DashboardAddress}/api/v1/admin/session",
@@ -724,7 +812,8 @@ public sealed class PeerConnectionTests
         await using var outer = await fixture.AuthenticateOuterAsync(controlClient, deadline.Token);
         var reader = new FrameReader(outer);
         var writer = new FrameWriter(outer);
-        await writer.WriteAsync(new Frame(FrameType.Register, JsonProtocolSerializer.Serialize(new RegisterMessage("caller", fixture.CallerSecret, "negative-test", new string('B', 64)))), deadline.Token);
+        await writer.WriteAsync(new Frame(FrameType.Register, JsonProtocolSerializer.Serialize(new RegisterMessage("caller", fixture.CallerSecret, "negative-test", new string('B', 64))
+        { RelayControlReady = offerRelayControl })), deadline.Token);
         var registrationFrame = await reader.ReadAsync(ProtocolConstants.MaxControlPayloadLength, deadline.Token);
         Assert.Equal(FrameType.RegisterAccepted, registrationFrame?.Type);
         var registration = JsonProtocolSerializer.Deserialize<RegisterAcceptedMessage>(registrationFrame!.Payload.Span);
@@ -734,7 +823,7 @@ public sealed class PeerConnectionTests
         while (grant is null)
         {
             var requestId = Guid.NewGuid();
-            await writer.WriteAsync(new Frame(FrameType.PeerOpenRequest, JsonProtocolSerializer.Serialize(new PeerOpenRequestMessage(requestId, encryptionEnabled ? "to-visited" : "to-visited-b"))), deadline.Token);
+            await writer.WriteAsync(new Frame(FrameType.PeerOpenRequest, JsonProtocolSerializer.Serialize(new PeerOpenRequestMessage(requestId, encryptionEnabled || udp ? "to-visited" : "to-visited-b"))), deadline.Token);
             var grantFrame = await reader.ReadAsync(ProtocolConstants.MaxControlPayloadLength, deadline.Token);
             if (grantFrame?.Type == FrameType.PeerOpenRejected)
             {
@@ -750,6 +839,8 @@ public sealed class PeerConnectionTests
             Assert.Equal(25_000, grant.SetupTimeoutMilliseconds);
         }
         Assert.Equal(encryptionEnabled, grant.EndToEndEncryptionEnabled);
+        Assert.Equal(offerRelayControl, grant.RelayBinding is not null);
+        Assert.Equal(udp ? "udp" : "tcp", grant.TransportProtocol);
         using var dataClient = new TcpClient();
         await dataClient.ConnectAsync(IPAddress.Loopback, fixture.DataPort, deadline.Token);
         await using var dataOuter = dataClient.GetStream();
@@ -768,10 +859,11 @@ public sealed class PeerConnectionTests
         }
         var challenge = new byte[32];
         await proofStream.ReadExactlyAsync(challenge, deadline.Token);
-        await proofStream.WriteAsync(new byte[32], deadline.Token);
+        await proofStream.WriteAsync(new byte[offerRelayControl ? 64 : 32], deadline.Token);
         try { Assert.Equal(0, await proofStream.ReadAsync(new byte[1], deadline.Token)); }
         catch (IOException) { }
         Assert.Equal(0, encryptionEnabled ? fixture.TargetConnections : fixture.TargetConnectionsB);
+        Assert.Equal(0, fixture.UdpTargetPackets);
     }
 #endif
 
@@ -862,12 +954,14 @@ public sealed class PeerConnectionTests
         private readonly Dictionary<int, TcpListener> heldPorts = [];
         private int targetConnections;
         private int targetConnectionsB;
+        private int udpTargetPackets;
+        public int UdpTargetPackets => Volatile.Read(ref udpTargetPackets);
         public int TargetConnections => Volatile.Read(ref targetConnections);
         public int TargetConnectionsB => Volatile.Read(ref targetConnectionsB);
         public int LocalPort => ReadPort("to-visited");
         public int LocalPortB => ReadPort("to-visited-b");
         public int AgentDashboardPort { get; }
-        private int VisitedDashboardPort { get; }
+        public int VisitedDashboardPort { get; }
         public int ProxyPort { get; }
         public int TargetPort { get; private set; }
         public int TcpTargetPort => ((IPEndPoint)target.LocalEndpoint).Port;
@@ -899,7 +993,7 @@ public sealed class PeerConnectionTests
         }
 
         public async Task StartAsync(bool startCallerAgent = true, bool mapDashboard = false, bool udp = false, bool encryption = true, string? callerAssembly = null, string? targetAssembly = null,
-            HttpProxyOptions? httpOptions = null, int? httpTargetPort = null, Action<string>? prepareHttpResources = null)
+            HttpProxyOptions? httpOptions = null, int? httpTargetPort = null, Action<string>? prepareHttpResources = null, string? udpTargetHost = null, string? serverAssembly = null)
         {
             var clients = Path.Combine(directory, "clients");
             var visitedDirectory = Path.Combine(directory, "visited");
@@ -930,7 +1024,7 @@ public sealed class PeerConnectionTests
             var fingerprint = CreateIdentity(Path.Combine(visitedState.FullName, "identity.pfx"));
             TargetFingerprint = fingerprint;
             var visitedChannels = new List<ChannelConfiguration>
-            { new ChannelConfiguration("private", "Private", true, "127.0.0.1", ProxyPort, "127.0.0.1", targetPort, 10, 5)
+            { new ChannelConfiguration("private", "Private", true, "127.0.0.1", ProxyPort, udpTargetHost ?? "127.0.0.1", targetPort, 10, 5)
             { AuthorizedClientsOnly = true, AccessSecret = accessSecret, TransportProtocol = udp ? "udp" : "tcp", EndToEndEncryptionEnabled = encryption },
              new ChannelConfiguration("private-b", "Private B", true, "127.0.0.1", AllocatePort(), "127.0.0.1", targetPortB, 10, 5)
             { AuthorizedClientsOnly = true, AccessSecret = accessSecretB } };
@@ -956,6 +1050,8 @@ public sealed class PeerConnectionTests
             { OutboundMappings = callerMappings };
             var intruder = new ClientConfiguration(1, "intruder", "Intruder", true, IntruderSecret, 5, 2, []);
             var json = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
+            // Older Server configurations reject unknown properties, including newer optional sections with null values.
+            if (serverAssembly is not null) json.DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull;
             await File.WriteAllTextAsync(Path.Combine(clients, "visited.json"), JsonSerializer.Serialize(visited, json));
             await File.WriteAllTextAsync(Path.Combine(clients, "caller.json"), JsonSerializer.Serialize(caller, json));
             await File.WriteAllTextAsync(Path.Combine(clients, "intruder.json"), JsonSerializer.Serialize(intruder, json));
@@ -973,7 +1069,7 @@ public sealed class PeerConnectionTests
             // Echo listeners bind port 0 while these sockets are still held, so they cannot
             // take the dashboard, tunnel, data, or proxy ports the server is about to claim.
             ReleaseHeldPortsExcept(AgentDashboardPort, VisitedDashboardPort);
-            StartProcess(typeof(ConfigurationLoader).Assembly.Location, serverPath);
+            StartProcess(serverAssembly ?? typeof(ConfigurationLoader).Assembly.Location, serverPath);
             await WaitReadyAsync();
 
             await File.WriteAllTextAsync(Path.Combine(visitedDirectory, "agent.json"), AgentJson("visited", secret));
@@ -1151,13 +1247,14 @@ public sealed class PeerConnectionTests
             }
         }
 
-        private static async Task EchoUdpAsync(UdpClient socket)
+        private async Task EchoUdpAsync(UdpClient socket)
         {
             try
             {
                 while (true)
                 {
                     var packet = await socket.ReceiveAsync();
+                    Interlocked.Increment(ref udpTargetPackets);
                     await socket.SendAsync(packet.Buffer, packet.RemoteEndPoint);
                 }
             }

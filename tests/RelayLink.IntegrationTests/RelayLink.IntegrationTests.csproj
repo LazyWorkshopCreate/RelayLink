@@ -6,6 +6,9 @@
   <PropertyGroup Condition="'$(EnablePeerTlsTests)' == 'true'">
     <DefineConstants>$(DefineConstants);PEER_TLS_TESTS</DefineConstants>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(EnableLegacyV5ServerTests)' == 'true'">
+    <DefineConstants>$(DefineConstants);LEGACY_V5_SERVER_TESTS</DefineConstants>
+  </PropertyGroup>
   <PropertyGroup Condition="'$(EnableLegacyAgentTests)' == 'true'">
     <DefineConstants>$(DefineConstants);LEGACY_AGENT_TESTS</DefineConstants>
   </PropertyGroup>

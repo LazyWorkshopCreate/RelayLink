@@ -84,17 +84,25 @@ public sealed class ServerTunnelTests
             new { username = "admin", password = "test-password" }, token);
         login.EnsureSuccessStatusCode();
         var csrf = (await login.Content.ReadFromJsonAsync<JsonElement>(cancellationToken: token)).GetProperty("csrfToken").GetString();
-        foreach (var protocol in new[] { "udp", "tcp" })
+        foreach (var transport in new[] { ProtocolType.Udp, ProtocolType.Tcp })
         {
+            var isUdp = transport == ProtocolType.Udp;
+            var protocol = isUdp ? "udp" : "tcp";
+            using var reservation = new Socket(AddressFamily.InterNetwork, isUdp ? SocketType.Dgram : SocketType.Stream, transport);
+            reservation.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+            var listenPort = ((IPEndPoint)reservation.LocalEndPoint!).Port;
             using var update = new HttpRequestMessage(HttpMethod.Put,
                 $"http://127.0.0.1:{fixture.DashboardPort}/api/v1/admin/clients/test-agent/channels/echo")
             {
-                Content = JsonContent.Create(new { displayName = "Echo", enabled = true, listenAddress = "127.0.0.1", listenPort = fixture.ProxyPort,
+                Content = JsonContent.Create(new { displayName = "Echo", enabled = true, listenAddress = "127.0.0.1", listenPort,
                     targetHost = "127.0.0.1", targetPort = fixture.TargetPort, maxConnections = 5, targetConnectTimeoutSeconds = 5, transportProtocol = protocol })
             };
             update.Headers.Add("X-RelayLink-CSRF", csrf);
+            // Hand the Server a port reserved with the transport it is about to bind.
+            reservation.Close();
             using var saved = await http.SendAsync(update, token);
-            saved.EnsureSuccessStatusCode();
+            if (!saved.IsSuccessStatusCode)
+                Assert.Fail($"Switch to {protocol} returned HTTP {(int)saved.StatusCode}: {await saved.Content.ReadAsStringAsync(token)}");
             var frame = await reader.ReadAsync(ProtocolConstants.MaxControlPayloadLength, token);
             Assert.Equal(FrameType.ConfigUpdate, frame?.Type);
             var message = JsonProtocolSerializer.Deserialize<ConfigUpdateMessage>(frame!.Payload.Span);

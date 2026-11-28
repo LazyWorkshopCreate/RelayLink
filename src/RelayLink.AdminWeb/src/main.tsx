@@ -52,6 +52,53 @@ import {
 } from './types';
 import './styles.css';
 
+function relayMode(encrypted?: boolean | null) {
+    return encrypted === true ? '加密中继' : encrypted === false ? '明文中继' : '加密状态未知';
+}
+
+function channelProtocol(channel: Channel) {
+    return channel.applicationProtocol === 'http'
+        ? (channel.entryScheme ?? 'http').toUpperCase()
+        : channel.transportProtocol === 'udp'
+          ? '单播 UDP'
+          : 'TCP';
+}
+
+const peerStateLabels: Record<string, string> = {
+    ready: '互访就绪',
+    disabled: '已禁用',
+    target_offline: '目标离线',
+    certificate_missing: '待登记证书',
+    restart_required: '需重启生效',
+    resource_unavailable: '代理资源未就绪',
+    unsupported_protocol: 'Agent 版本不支持',
+    control_tls_required: '需启用控制 TLS',
+};
+
+function channelState(client: Client, channel: Channel) {
+    if (!client.enabled || !channel.enabled) return 'disabled';
+    if (!channel.authorizedClientsOnly) return channel.available ? 'public_ready' : 'unavailable';
+    if (channel.peerState) return channel.peerState;
+    if (!client.e2eCertificateSha256) return 'certificate_missing';
+    if (!client.online) return 'target_offline';
+    if (channel.applicationProtocol === 'http' && channel.httpState !== 'ready')
+        return channel.httpState === 'restart_required' ? 'restart_required' : 'resource_unavailable';
+    return 'ready';
+}
+
+function ChannelStatus({ client, channel }: { client: Client; channel: Channel }) {
+    const state = channelState(client, channel);
+    const label = state === 'public_ready' ? '可接入' : (peerStateLabels[state] ?? '不可接入');
+    return (
+        <span
+            className={`state ${state === 'disabled' ? 'muted' : state === 'ready' || state === 'public_ready' ? 'good' : 'warn'}`}
+        >
+            <span />
+            {label}
+        </span>
+    );
+}
+
 export function App() {
     const [session, setSession] = useState<Session>({ authenticated: false });
     const [overview, setOverview] = useState<Overview | null>(null);
@@ -80,6 +127,7 @@ export function App() {
     const [status, setStatus] = useState('all');
     const [busy, setBusy] = useState(true);
     const [error, setError] = useState('');
+    const [refreshError, setRefreshError] = useState('');
     const [notice, setNotice] = useState('');
     const [loginOpen, setLoginOpen] = useState(false);
     const [loginName, setLoginName] = useState('');
@@ -163,10 +211,10 @@ export function App() {
                 setOverview(firstPage.overview);
                 setClients(allClients);
                 setUpdatedAt(Date.now());
-                setError('');
+                setRefreshError('');
             } catch (e) {
                 if (seq !== refreshSeqRef.current) return;
-                setError((e as Error).message);
+                setRefreshError((e as Error).message);
             } finally {
                 setBusy(false);
                 if (refreshInFlightRef.current === pending) {
@@ -531,9 +579,7 @@ export function App() {
                 form,
             );
             setMappingDialog(null);
-            setNotice(
-                result.message ?? '端到端访问入口已创建并下发。创建后不可修改；如需调整，请删除后重建。',
-            );
+            setNotice(result.message ?? '互访入口已创建并下发。创建后不可修改；如需调整，请删除后重建。');
             await refresh(true);
         } catch (e) {
             setError((e as Error).message);
@@ -551,7 +597,7 @@ export function App() {
                 'DELETE',
             );
             setConfirmDeleteMapping(null);
-            setNotice(result.message ?? '端到端访问入口已删除并下发，原有连接已断开。');
+            setNotice(result.message ?? '互访入口已删除并下发，原有连接已断开。');
             await refresh(true);
         } catch (e) {
             setError((e as Error).message);
@@ -659,7 +705,23 @@ export function App() {
                       ),
                   },
         );
-    const stale = Boolean(error || (updatedAt && clock - updatedAt > 10000));
+    const stale = Boolean(refreshError || (!editing && updatedAt && clock - updatedAt > 10000));
+    const pageError = refreshError || (!editing ? error : '');
+    useEffect(() => {
+        setError('');
+    }, [editing]);
+    const readyPeers = clients.reduce(
+        (total, client) =>
+            total +
+            client.channels.filter(
+                (channel) => channel.authorizedClientsOnly && channelState(client, channel) === 'ready',
+            ).length,
+        0,
+    );
+    const mappingTarget = clients.find((client) => client.clientId === mappingDialog?.form.targetClientId);
+    const mappingChannel = mappingTarget?.channels.find(
+        (channel) => channel.channelId === mappingDialog?.form.targetChannelId,
+    );
 
     return (
         <div className="shell">
@@ -720,10 +782,13 @@ export function App() {
                         <span>{overview ? time(overview.snapshotTimeUtc) : '—'}</span>
                     </button>
                 </section>
-                {error && (
+                {pageError && (
                     <div className="alert error" role="alert">
-                        <CircleHelp size={16} /> {error}
-                        <button onClick={() => setError('')} aria-label="关闭错误">
+                        <CircleHelp size={16} /> {pageError}
+                        <button
+                            onClick={() => (refreshError ? setRefreshError('') : setError(''))}
+                            aria-label="关闭错误"
+                        >
                             <X size={15} />
                         </button>
                     </div>
@@ -756,9 +821,11 @@ export function App() {
                         <div>
                             <span>可用通道</span>
                             <strong>
-                                {overview ? `${overview.channelsAvailable} / ${overview.channelsTotal}` : '—'}
+                                {overview
+                                    ? `${overview.channelsAvailable + readyPeers} / ${overview.channelsTotal}`
+                                    : '—'}
                             </strong>
-                            <small>可接入 / 总数</small>
+                            <small>已就绪 / 全部（含授权互访）</small>
                         </div>
                     </div>
                     <div className="metric">
@@ -960,17 +1027,17 @@ export function App() {
                                                     })
                                                 }
                                             >
-                                                <Plus size={15} /> 添加端到端访问入口
+                                                <Plus size={15} /> 添加互访入口
                                             </button>
                                         </div>
                                     )}
                                 </div>
                                 <div className="table-scroll">
-                                    <table>
+                                    <table className="channel-table">
                                         <thead>
                                             <tr>
                                                 <th className="channel-col">通道</th>
-                                                <th>云端监听</th>
+                                                <th>接入方式 / 云端监听</th>
                                                 <th>目标地址</th>
                                                 <th>状态</th>
                                                 <th title="建连中：正在连接目标；转发中：正在传输">
@@ -1005,9 +1072,25 @@ export function App() {
                                                             )}
                                                         </td>
                                                         <td className="mono">
-                                                            {ch.authorizedClientsOnly
-                                                                ? `${(ch.applicationProtocol === 'http' ? (ch.entryScheme ?? 'http') : (ch.transportProtocol ?? 'tcp')).toUpperCase()} · 仅客户端互访 · ${ch.endToEndEncryptionEnabled !== false ? '加密' : '明文'}`
-                                                                : `${(ch.applicationProtocol === 'http' ? (ch.entryScheme ?? 'http') : (ch.transportProtocol ?? 'tcp')).toUpperCase()} ${ch.listenAddress}:${ch.listenPort}`}
+                                                            {ch.authorizedClientsOnly ? (
+                                                                <>
+                                                                    {channelProtocol(ch)} · 授权互访
+                                                                    <small
+                                                                        className={
+                                                                            ch.endToEndEncryptionEnabled ===
+                                                                            false
+                                                                                ? 'plain-mode'
+                                                                                : ''
+                                                                        }
+                                                                    >
+                                                                        {relayMode(
+                                                                            ch.endToEndEncryptionEnabled,
+                                                                        )}
+                                                                    </small>
+                                                                </>
+                                                            ) : (
+                                                                `${channelProtocol(ch)} ${ch.listenAddress}:${ch.listenPort}`
+                                                            )}
                                                             {ch.applicationProtocol === 'http' && (
                                                                 <small>
                                                                     {ch.httpState === 'ready'
@@ -1025,18 +1108,7 @@ export function App() {
                                                             {ch.targetHost}:{ch.targetPort}
                                                         </td>
                                                         <td>
-                                                            <span
-                                                                className={`state ${!ch.enabled ? 'muted' : ch.available ? 'good' : 'warn'}`}
-                                                            >
-                                                                <span />
-                                                                {!ch.enabled
-                                                                    ? '已禁用'
-                                                                    : ch.authorizedClientsOnly
-                                                                      ? '互访专用'
-                                                                      : ch.available
-                                                                        ? '可接入'
-                                                                        : '不可接入'}
-                                                            </span>
+                                                            <ChannelStatus client={client} channel={ch} />
                                                         </td>
                                                         <td className="mono">
                                                             <button
@@ -1049,42 +1121,27 @@ export function App() {
                                                             </button>
                                                         </td>
                                                         <td>
-                                                            {ch.authorizedClientsOnly ? (
-                                                                <span
-                                                                    title={
-                                                                        ch.endToEndEncryptionEnabled !== false
-                                                                            ? '端到端 TLS 密文字节；服务端无法统计业务有效载荷'
-                                                                            : '未加密的互访业务字节；服务端中继链路可读取内容'
-                                                                    }
-                                                                >
-                                                                    {fmt(ch.peerCiphertextToTarget)} /{' '}
-                                                                    {fmt(ch.peerCiphertextToCaller)}
-                                                                </span>
-                                                            ) : (
-                                                                <button
-                                                                    className="flow"
-                                                                    title={
-                                                                        ch.authorizedClientsOnly
-                                                                            ? '查看此通道端到端密文历史流量'
-                                                                            : '查看此通道历史流量'
-                                                                    }
-                                                                    onClick={() =>
-                                                                        void showHistory(client, ch)
-                                                                    }
-                                                                >
-                                                                    {fmt(
-                                                                        ch.authorizedClientsOnly
-                                                                            ? (ch.peerCiphertextToTarget ?? 0)
-                                                                            : ch.bytesToTarget,
-                                                                    )}{' '}
-                                                                    /{' '}
-                                                                    {fmt(
-                                                                        ch.authorizedClientsOnly
-                                                                            ? (ch.peerCiphertextToCaller ?? 0)
-                                                                            : ch.bytesToCaller,
-                                                                    )}
-                                                                </button>
-                                                            )}
+                                                            <button
+                                                                className="flow"
+                                                                title={
+                                                                    ch.authorizedClientsOnly
+                                                                        ? '查看此通道服务端中继历史流量'
+                                                                        : '查看此通道历史流量'
+                                                                }
+                                                                onClick={() => void showHistory(client, ch)}
+                                                            >
+                                                                {fmt(
+                                                                    ch.authorizedClientsOnly
+                                                                        ? ch.peerCiphertextToTarget
+                                                                        : ch.bytesToTarget,
+                                                                )}{' '}
+                                                                /{' '}
+                                                                {fmt(
+                                                                    ch.authorizedClientsOnly
+                                                                        ? ch.peerCiphertextToCaller
+                                                                        : ch.bytesToCaller,
+                                                                )}
+                                                            </button>
                                                         </td>
                                                         {session.authenticated && (
                                                             <td>
@@ -1170,8 +1227,8 @@ export function App() {
                                     </table>
                                 </div>
                                 {client.mappings.length > 0 && (
-                                    <section className="mapping-section" aria-label="端到端访问入口">
-                                        <div className="mapping-heading">端到端访问入口</div>
+                                    <section className="mapping-section" aria-label="授权互访入口">
+                                        <div className="mapping-heading">授权互访入口</div>
                                         <div className="table-scroll">
                                             <table className="mapping-table">
                                                 <thead>
@@ -1186,77 +1243,108 @@ export function App() {
                                                     </tr>
                                                 </thead>
                                                 <tbody>
-                                                    {client.mappings.map((mapping) => (
-                                                        <tr key={mapping.mappingId}>
-                                                            <td>
-                                                                <strong
-                                                                    className="mapping-id"
-                                                                    title={mapping.mappingId}
-                                                                >
-                                                                    {mapping.mappingId}
-                                                                </strong>
-                                                            </td>
-                                                            <td className="mono">
-                                                                {mapping.available && mapping.localPort ? (
-                                                                    <span className="address-line">
-                                                                        <span>
-                                                                            {mapping.accessUrl ??
-                                                                                `${(mapping.transportProtocol ?? 'tcp').toUpperCase()} ${mapping.localAddress || '127.0.0.1'}:${mapping.localPort}`}
-                                                                        </span>
-                                                                        <CopyEndpointButton
-                                                                            value={
-                                                                                mapping.accessUrl ??
-                                                                                `${mapping.localAddress || '127.0.0.1'}:${mapping.localPort}`
-                                                                            }
-                                                                        />
-                                                                    </span>
-                                                                ) : (
-                                                                    '—'
-                                                                )}
-                                                            </td>
-                                                            <td
-                                                                className="mono"
-                                                                title={`${mapping.targetClientId}/${mapping.targetChannelId}`}
-                                                            >
-                                                                {mapping.targetClientId}/
-                                                                {mapping.targetChannelId}
-                                                            </td>
-                                                            <td>
-                                                                <span
-                                                                    className={`badge ${!mapping.enabled ? 'disabled' : mapping.available ? 'online' : 'offline'}`}
-                                                                    title={
-                                                                        !mapping.enabled
-                                                                            ? '入口已禁用'
-                                                                            : mapping.available
-                                                                              ? '本机入口正在监听'
-                                                                              : '等待 Agent 上报本机地址'
-                                                                    }
-                                                                >
-                                                                    <span />
-                                                                    {!mapping.enabled
-                                                                        ? '已禁用'
-                                                                        : mapping.available
-                                                                          ? '在线'
-                                                                          : '离线'}
-                                                                </span>
-                                                            </td>
-                                                            {session.authenticated && (
+                                                    {client.mappings.map((mapping) => {
+                                                        const target = clients
+                                                            .find(
+                                                                (item) =>
+                                                                    item.clientId === mapping.targetClientId,
+                                                            )
+                                                            ?.channels.find(
+                                                                (item) =>
+                                                                    item.channelId ===
+                                                                    mapping.targetChannelId,
+                                                            );
+                                                        const encrypted =
+                                                            mapping.endToEndEncryptionEnabled ??
+                                                            target?.endToEndEncryptionEnabled;
+                                                        return (
+                                                            <tr key={mapping.mappingId}>
                                                                 <td>
-                                                                    <button
-                                                                        className="text-button danger"
-                                                                        onClick={() =>
-                                                                            setConfirmDeleteMapping({
-                                                                                clientId: client.clientId,
-                                                                                mapping,
-                                                                            })
+                                                                    <strong
+                                                                        className="mapping-id"
+                                                                        title={mapping.mappingId}
+                                                                    >
+                                                                        {mapping.mappingId}
+                                                                    </strong>
+                                                                    <small
+                                                                        className={
+                                                                            encrypted === false
+                                                                                ? 'plain-mode'
+                                                                                : ''
                                                                         }
                                                                     >
-                                                                        删除
-                                                                    </button>
+                                                                        {relayMode(encrypted)}
+                                                                    </small>
                                                                 </td>
-                                                            )}
-                                                        </tr>
-                                                    ))}
+                                                                <td className="mono">
+                                                                    {mapping.available &&
+                                                                    mapping.localPort ? (
+                                                                        <span className="address-line">
+                                                                            <span>
+                                                                                {mapping.accessUrl ??
+                                                                                    `${(mapping.transportProtocol ?? 'tcp').toUpperCase()} ${mapping.localAddress || '127.0.0.1'}:${mapping.localPort}`}
+                                                                            </span>
+                                                                            <CopyEndpointButton
+                                                                                value={
+                                                                                    mapping.accessUrl ??
+                                                                                    `${mapping.localAddress || '127.0.0.1'}:${mapping.localPort}`
+                                                                                }
+                                                                            />
+                                                                        </span>
+                                                                    ) : (
+                                                                        '—'
+                                                                    )}
+                                                                </td>
+                                                                <td
+                                                                    className="mono"
+                                                                    title={`${mapping.targetClientId}/${mapping.targetChannelId}`}
+                                                                >
+                                                                    {mapping.targetClientId}/
+                                                                    {mapping.targetChannelId}
+                                                                </td>
+                                                                <td>
+                                                                    <span
+                                                                        className={`badge ${!mapping.enabled ? 'disabled' : mapping.available ? 'online' : 'offline'}`}
+                                                                        title={
+                                                                            !mapping.enabled
+                                                                                ? '入口已禁用'
+                                                                                : mapping.available
+                                                                                  ? '本机入口正在监听'
+                                                                                  : !client.online
+                                                                                    ? '访问方客户端离线'
+                                                                                    : mapping.localPort
+                                                                                      ? '本机端口已上报，请检查目标是否在线、通道是否就绪及双方协议版本'
+                                                                                      : '等待访问方 Agent 上报本机端口'
+                                                                        }
+                                                                    >
+                                                                        <span />
+                                                                        {!mapping.enabled
+                                                                            ? '已禁用'
+                                                                            : mapping.available
+                                                                              ? '在线'
+                                                                              : mapping.localPort
+                                                                                ? '暂不可用'
+                                                                                : '离线'}
+                                                                    </span>
+                                                                </td>
+                                                                {session.authenticated && (
+                                                                    <td>
+                                                                        <button
+                                                                            className="text-button danger"
+                                                                            onClick={() =>
+                                                                                setConfirmDeleteMapping({
+                                                                                    clientId: client.clientId,
+                                                                                    mapping,
+                                                                                })
+                                                                            }
+                                                                        >
+                                                                            删除
+                                                                        </button>
+                                                                    </td>
+                                                                )}
+                                                            </tr>
+                                                        );
+                                                    })}
                                                 </tbody>
                                             </table>
                                         </div>
@@ -1665,58 +1753,66 @@ export function App() {
             >
                 {channelDialog && (
                     <form className="form" onSubmit={saveChannel}>
-                        <label>
-                            传输协议
-                            <select
-                                value={channelDialog.form.transportProtocol ?? 'tcp'}
-                                onChange={async (e) => {
-                                    const transportProtocol = e.target.value as 'tcp' | 'udp';
-                                    setChannelDialog({
-                                        ...channelDialog,
-                                        form: { ...channelDialog.form, transportProtocol },
-                                    });
-                                    if (!channelDialog.original) {
-                                        try {
-                                            const suggestion = await api<{ listenPort: number }>(
-                                                `/api/v1/admin/next-channel-port?transportProtocol=${transportProtocol}`,
-                                            );
-                                            setChannelDialog((current) =>
-                                                current &&
-                                                current.form.transportProtocol === transportProtocol
-                                                    ? {
-                                                          ...current,
-                                                          form: {
-                                                              ...current.form,
-                                                              listenPort: suggestion.listenPort,
-                                                          },
-                                                      }
-                                                    : current,
-                                            );
-                                        } catch (e) {
-                                            setError(e instanceof Error ? e.message : String(e));
+                        <div className="form-grid">
+                            <label className="field">
+                                传输协议
+                                <select
+                                    value={channelDialog.form.transportProtocol ?? 'tcp'}
+                                    disabled={channelDialog.original?.applicationProtocol === 'http'}
+                                    onChange={async (e) => {
+                                        const transportProtocol = e.target.value as 'tcp' | 'udp';
+                                        setChannelDialog({
+                                            ...channelDialog,
+                                            form: { ...channelDialog.form, transportProtocol },
+                                        });
+                                        if (!channelDialog.original) {
+                                            try {
+                                                const suggestion = await api<{ listenPort: number }>(
+                                                    `/api/v1/admin/next-channel-port?transportProtocol=${transportProtocol}`,
+                                                );
+                                                setChannelDialog((current) =>
+                                                    current &&
+                                                    current.form.transportProtocol === transportProtocol
+                                                        ? {
+                                                              ...current,
+                                                              form: {
+                                                                  ...current.form,
+                                                                  listenPort: suggestion.listenPort,
+                                                              },
+                                                          }
+                                                        : current,
+                                                );
+                                            } catch (e) {
+                                                setError(e instanceof Error ? e.message : String(e));
+                                            }
                                         }
+                                    }}
+                                >
+                                    <option value="tcp">TCP（字节流）</option>
+                                    <option value="udp">单播 UDP</option>
+                                </select>
+                            </label>
+                            {channelDialog.form.transportProtocol === 'udp' && (
+                                <NumberField
+                                    label="UDP 会话空闲超时（秒）"
+                                    value={channelDialog.form.udpIdleTimeoutSeconds ?? 60}
+                                    min={1}
+                                    max={3600}
+                                    onChange={(n) =>
+                                        setChannelDialog({
+                                            ...channelDialog,
+                                            form: { ...channelDialog.form, udpIdleTimeoutSeconds: n },
+                                        })
                                     }
-                                }}
-                            >
-                                <option value="tcp">TCP</option>
-                                <option value="udp">UDP</option>
-                            </select>
-                        </label>
+                                />
+                            )}
+                        </div>
                         {channelDialog.form.transportProtocol === 'udp' && (
-                            <NumberField
-                                label="UDP 会话空闲超时（秒）"
-                                value={channelDialog.form.udpIdleTimeoutSeconds ?? 60}
-                                min={1}
-                                max={3600}
-                                onChange={(n) =>
-                                    setChannelDialog({
-                                        ...channelDialog,
-                                        form: { ...channelDialog.form, udpIdleTimeoutSeconds: n },
-                                    })
-                                }
-                            />
+                            <p className="field-note">
+                                仅转发固定目标的单播 UDP，通过服务端 TCP 隧道传输。每包最多 65507 字节，参与的
+                                Agent 须支持协议 v4 或以上。目标准备完成表示本地套接字已就绪。
+                            </p>
                         )}
-
                         <div className="form-grid">
                             <label className="field">
                                 通道 ID
@@ -1848,7 +1944,11 @@ export function App() {
                                 max={1000000}
                             />
                             <NumberField
-                                label="目标连接超时（秒）"
+                                label={
+                                    channelDialog.form.transportProtocol === 'udp'
+                                        ? '目标准备超时（秒）'
+                                        : '目标连接超时（秒）'
+                                }
                                 value={channelDialog.form.targetConnectTimeoutSeconds}
                                 onChange={(n) =>
                                     setChannelDialog({
@@ -1876,13 +1976,17 @@ export function App() {
                                     })
                                 }
                             />{' '}
-                            仅允许授权客户端互访（停止云端代理监听；服务端自动生成 32 字节访问密钥）
+                            仅允许授权客户端互访（关闭云端监听，经服务端中继，两端校验访问密钥）
                         </label>
                         {channelDialog.form.authorizedClientsOnly && (
                             <label className="check">
                                 <input
                                     type="checkbox"
-                                    checked={channelDialog.form.endToEndEncryptionEnabled}
+                                    checked={
+                                        channelDialog.original?.applicationProtocol === 'http' ||
+                                        channelDialog.form.endToEndEncryptionEnabled
+                                    }
+                                    disabled={channelDialog.original?.applicationProtocol === 'http'}
                                     onChange={(e) =>
                                         setChannelDialog({
                                             ...channelDialog,
@@ -1893,9 +1997,23 @@ export function App() {
                                         })
                                     }
                                 />{' '}
-                                启用 Agent 间端到端加密（默认启用；关闭后业务流量以明文中继）
+                                启用 Agent 间端到端加密（业务流使用内层 TLS）
                             </label>
                         )}
+                        {channelDialog.form.authorizedClientsOnly &&
+                            (channelDialog.original?.applicationProtocol === 'http' ? (
+                                <p className="field-note">HTTP/HTTPS 互访必须启用业务加密。</p>
+                            ) : (
+                                !channelDialog.form.endToEndEncryptionEnabled && (
+                                    <div role="alert" className="transport-warning">
+                                        <strong>业务将以明文中继</strong>
+                                        <p>
+                                            控制连接仍使用
+                                            TLS，两端仍校验访问密钥。服务端和链路观察者可读取未经业务自身加密的内容，能干预链路的一方可篡改内容。仅在受信隔离网络或业务协议自身提供加密与认证时使用。
+                                        </p>
+                                    </div>
+                                )
+                            ))}
                         <label className="check">
                             <input
                                 type="checkbox"
@@ -1922,8 +2040,8 @@ export function App() {
             </Modal>
 
             <Modal
-                title="添加端到端访问入口"
-                description="入口创建后不可修改；服务端下发访问配置，Agent 仅监听本机 127.0.0.1。"
+                title="添加互访入口"
+                description="授权互访经服务端中继。入口 ID 由目标客户端和通道生成，创建后不可修改。访问方 Agent 在 127.0.0.1 自动选择并保存端口，端口冲突时自动轮换。"
                 open={!!mappingDialog}
                 onClose={() => setMappingDialog(null)}
                 error={error}
@@ -1932,17 +2050,7 @@ export function App() {
                     <form className="form" onSubmit={saveMapping}>
                         <div className="form-grid">
                             <label className="field">
-                                <span className="field-label">
-                                    入口 ID（自动生成）
-                                    <span
-                                        className="field-help"
-                                        title="入口 ID 为目标客户端 ID-目标通道 ID。本机端口由 Agent 自动选择并保存，冲突时自动轮换。"
-                                        aria-label="入口 ID 为目标客户端 ID-目标通道 ID。本机端口由 Agent 自动选择并保存，冲突时自动轮换。"
-                                        tabIndex={0}
-                                    >
-                                        <CircleAlert size={15} />
-                                    </span>
-                                </span>
+                                <span className="field-label">入口 ID（自动生成）</span>
                                 <input
                                     aria-label="入口 ID（自动生成）"
                                     readOnly
@@ -1975,8 +2083,19 @@ export function App() {
                                     {clients
                                         .filter((candidate) => candidate.clientId !== mappingDialog.clientId)
                                         .map((candidate) => (
-                                            <option value={candidate.clientId} key={candidate.clientId}>
+                                            <option
+                                                value={candidate.clientId}
+                                                key={candidate.clientId}
+                                                disabled={
+                                                    !candidate.e2eCertificateSha256 || !candidate.enabled
+                                                }
+                                            >
                                                 {candidate.displayName} ({candidate.clientId})
+                                                {!candidate.enabled
+                                                    ? ' · 已禁用'
+                                                    : !candidate.e2eCertificateSha256
+                                                      ? ' · 待登记证书，请先启动目标 Agent'
+                                                      : ''}
                                             </option>
                                         ))}
                                 </select>
@@ -1994,22 +2113,23 @@ export function App() {
                                     }
                                 >
                                     <option value="">请选择</option>
-                                    {clients
-                                        .find(
-                                            (candidate) =>
-                                                candidate.clientId === mappingDialog.form.targetClientId,
-                                        )
-                                        ?.channels.filter(
-                                            (channel) => channel.enabled && channel.authorizedClientsOnly,
-                                        )
+                                    {mappingTarget?.channels
+                                        .filter((channel) => channel.enabled && channel.authorizedClientsOnly)
                                         .map((channel) => (
                                             <option value={channel.channelId} key={channel.channelId}>
-                                                {channel.displayName} ({channel.channelId})
+                                                {channel.displayName} ({channel.channelId}) ·{' '}
+                                                {channelProtocol(channel)} ·{' '}
+                                                {relayMode(channel.endToEndEncryptionEnabled)}
                                             </option>
                                         ))}
                                 </select>
                             </label>
                         </div>
+                        {mappingChannel?.endToEndEncryptionEnabled === false && (
+                            <p role="alert" className="transport-warning">
+                                目标通道已关闭业务加密，数据将以明文经服务端中继。
+                            </p>
+                        )}
                         <div className="form-actions">
                             <button type="button" className="ghost" onClick={() => setMappingDialog(null)}>
                                 取消
@@ -2023,7 +2143,7 @@ export function App() {
             </Modal>
 
             <Modal
-                title="删除端到端访问入口？"
+                title="删除互访入口？"
                 description="删除后访问方 Agent 将停止对应本机监听。"
                 open={!!confirmDeleteMapping}
                 onClose={() => setConfirmDeleteMapping(null)}
@@ -2047,6 +2167,7 @@ export function App() {
             <Modal
                 title={`${connectionDialog?.client.displayName ?? ''} / ${connectionDialog?.channel.displayName ?? ''} 当前连接`}
                 description="建连中与转发中的实时快照，每 5 秒更新。断开连接会中止当前业务会话。"
+                wide
                 open={!!connectionDialog}
                 onClose={() => {
                     ++connectionsSeqRef.current;
@@ -2092,14 +2213,15 @@ export function App() {
                                             <td className="mono">{connection.source}</td>
                                             <td>
                                                 {connection.state === 'relaying' ? '转发中' : '建连中'}
-                                                {connection.kind === 'end-to-end' ? ' · 端到端' : ''}
+                                                {connection.kind === 'end-to-end' &&
+                                                    ` · 授权互访（${relayMode(connection.endToEndEncryptionEnabled)}）`}
                                             </td>
                                             <td>{time(connection.startedAtUtc)}</td>
                                             <td
                                                 className="mono"
                                                 title={
                                                     connection.kind === 'end-to-end'
-                                                        ? '端到端密文传输字节'
+                                                        ? `服务端转发的互访字节（${relayMode(connection.endToEndEncryptionEnabled)}）`
                                                         : '普通代理传输字节'
                                                 }
                                             >
@@ -2156,7 +2278,11 @@ export function App() {
 
             <Modal
                 title={`${historyDialog?.client.displayName ?? ''} / ${historyDialog?.channel.displayName ?? ''}`}
-                description="历史流量按分钟存储；图表随时间范围按分钟、15 分钟或小时汇总。互访通道统计服务端转发字节，加密通道对应密文字节。"
+                description={
+                    historyDialog?.channel.authorizedClientsOnly
+                        ? `当前为${relayMode(historyDialog.channel.endToEndEncryptionEnabled)}。历史按当时实际中继的字节汇总，包含加密时的密文字节或关闭业务加密时的明文字节。`
+                        : '历史按分钟记录，可按 24 小时、7 天或 30 天查看。'
+                }
                 open={!!historyDialog}
                 onClose={() => {
                     ++historySeqRef.current;

@@ -345,7 +345,7 @@ try
             channels = client.Channels.Select(channel =>
             {
                 var metric = metrics.For(client.ClientId, channel.ChannelId).Snapshot();
-                return new { channelId = channel.ChannelId, displayName = channel.DisplayName, tags = channel.Tags, listenAddress = channel.ListenAddress, listenPort = channel.ListenPort, securityGroupId = channel.SecurityGroupId, targetHost = channel.TargetHost, targetPort = channel.TargetPort, enabled = channel.Enabled, authorizedClientsOnly = channel.AuthorizedClientsOnly, endToEndEncryptionEnabled = channel.EndToEndEncryptionEnabled, maxConnections = channel.MaxConnections, targetConnectTimeoutSeconds = channel.TargetConnectTimeoutSeconds, applicationProtocol = channel.ApplicationProtocol, httpState = channelSession?.HttpStates.FirstOrDefault(state => state.ChannelId == channel.ChannelId)?.State, entryScheme = channel.Http is null ? null : channel.AuthorizedClientsOnly ? channel.Http.PeerEntryScheme : channel.Http.PublicEntryScheme, transportProtocol = channel.TransportProtocol, udpIdleTimeoutSeconds = channel.UdpIdleTimeoutSeconds, listenerState = proxy.GetListenerState(client.ClientId, channel), available = ChannelAvailability.IsPublicChannelAvailable(channel, channelSession), pendingConnections = channel.AuthorizedClientsOnly ? metric.PeerPendingConnections : metric.PendingConnections, activeConnections = channel.AuthorizedClientsOnly ? metric.PeerActiveConnections : metric.ActiveConnections, acceptedTotal = channel.AuthorizedClientsOnly ? metric.PeerAcceptedTotal : metric.AcceptedTotal, openedTotal = channel.AuthorizedClientsOnly ? metric.PeerOpenedTotal : metric.OpenedTotal, openFailedTotal = channel.AuthorizedClientsOnly ? metric.PeerOpenFailedTotal : metric.OpenFailedTotal, metric.NormalClosedTotal, metric.AbortedTotal, metric.BytesToTarget, metric.BytesToCaller, metric.PeerCiphertextToTarget, metric.PeerCiphertextToCaller, udpDroppedTotal = metric.UdpDroppedTotal, targetLastResult = metric.TargetLastResult?.Result, targetLastResultTimeUtc = metric.TargetLastResult?.TimeUtc };
+                return new { channelId = channel.ChannelId, displayName = channel.DisplayName, tags = channel.Tags, listenAddress = channel.ListenAddress, listenPort = channel.ListenPort, securityGroupId = channel.SecurityGroupId, targetHost = channel.TargetHost, targetPort = channel.TargetPort, enabled = channel.Enabled, authorizedClientsOnly = channel.AuthorizedClientsOnly, endToEndEncryptionEnabled = channel.EndToEndEncryptionEnabled, maxConnections = channel.MaxConnections, targetConnectTimeoutSeconds = channel.TargetConnectTimeoutSeconds, applicationProtocol = channel.ApplicationProtocol, httpState = channelSession?.HttpStates.FirstOrDefault(state => state.ChannelId == channel.ChannelId)?.State, entryScheme = channel.Http is null ? null : channel.AuthorizedClientsOnly ? channel.Http.PeerEntryScheme : channel.Http.PublicEntryScheme, transportProtocol = channel.TransportProtocol, udpIdleTimeoutSeconds = channel.UdpIdleTimeoutSeconds, listenerState = proxy.GetListenerState(client.ClientId, channel), peerState = ChannelAvailability.PeerState(client, channel, channelSession, runtime.Configuration.Server.Tunnel.TlsEnabled), available = ChannelAvailability.IsPublicChannelAvailable(channel, channelSession), pendingConnections = channel.AuthorizedClientsOnly ? metric.PeerPendingConnections : metric.PendingConnections, activeConnections = channel.AuthorizedClientsOnly ? metric.PeerActiveConnections : metric.ActiveConnections, acceptedTotal = channel.AuthorizedClientsOnly ? metric.PeerAcceptedTotal : metric.AcceptedTotal, openedTotal = channel.AuthorizedClientsOnly ? metric.PeerOpenedTotal : metric.OpenedTotal, openFailedTotal = channel.AuthorizedClientsOnly ? metric.PeerOpenFailedTotal : metric.OpenFailedTotal, metric.NormalClosedTotal, metric.AbortedTotal, metric.BytesToTarget, metric.BytesToCaller, metric.PeerCiphertextToTarget, metric.PeerCiphertextToCaller, udpDroppedTotal = metric.UdpDroppedTotal, targetLastResult = metric.TargetLastResult?.Result, targetLastResultTimeUtc = metric.TargetLastResult?.TimeUtc };
             }).ToArray()
         });
     });
@@ -435,7 +435,7 @@ try
         try
         {
             var (mapping, push) = await editor.CreateMappingAsync(id, create, cancellationToken);
-            return Results.Created($"/api/v1/admin/clients/{id}/mappings", new { mapping.MappingId, mapping.Enabled, localAddress = (string?)null, localPort = (int?)null, available = false, mapping.TargetClientId, mapping.TargetChannelId, pushedToAgent = push.PushedToAgent, pushFailureReason = push.FailureReason, message = PushMessage(push, "端到端访问入口已创建并下发。", "端到端访问入口已创建；客户端离线，将在下次连接时下发。", "端到端访问入口已创建，但下发失败；重连后会取得最新配置。") });
+            return Results.Created($"/api/v1/admin/clients/{id}/mappings", new { mapping.MappingId, mapping.Enabled, localAddress = (string?)null, localPort = (int?)null, available = false, mapping.TargetClientId, mapping.TargetChannelId, pushedToAgent = push.PushedToAgent, pushFailureReason = push.FailureReason, message = PushMessage(push, "互访入口已创建并下发。", "互访入口已创建；客户端离线，将在下次连接时下发。", "互访入口已创建，但下发失败；重连后会取得最新配置。") });
         }
         catch (ChannelUpdateException exception) { return Results.BadRequest(new { error = exception.Message }); }
     });
@@ -445,7 +445,7 @@ try
         try
         {
             var push = await editor.DeleteMappingAsync(id, mappingId, cancellationToken);
-            return Results.Ok(new { pushedToAgent = push.PushedToAgent, pushFailureReason = push.FailureReason, message = PushMessage(push, "端到端访问入口已删除并下发。", "端到端访问入口已删除；客户端离线，将在下次连接时同步。", "端到端访问入口已删除，但下发失败；重连后会取得最新配置。") });
+            return Results.Ok(new { pushedToAgent = push.PushedToAgent, pushFailureReason = push.FailureReason, message = PushMessage(push, "互访入口已删除并下发。", "互访入口已删除；客户端离线，将在下次连接时同步。", "互访入口已删除，但下发失败；重连后会取得最新配置。") });
         }
         catch (ChannelUpdateException exception) { return Results.BadRequest(new { error = exception.Message }); }
     });
@@ -507,16 +507,27 @@ static async Task<IResult> LoginThrottled(HttpResponse response, AuditService au
 
 static IResult GetMappingStatus(string id, ServerRuntime runtime)
 {
-    if (!runtime.Configuration.Clients.TryGetValue(id, out var client)) return Results.NotFound();
-    runtime.Sessions.TryGet(id, out var agentSession);
-    return Results.Ok(new { mappings = client.OutboundMappings.Select(mapping =>
+    var configuration = runtime.Configuration;
+    if (!configuration.Clients.TryGetValue(id, out var client)) return Results.NotFound();
+    runtime.Sessions.TryGet(id, out var session);
+    return Results.Ok(new { mappings = client.OutboundMappings.Select(mapping => MappingView(mapping, configuration, runtime.Sessions, session)).ToArray() });
+}
+
+static object MappingView(OutboundMappingConfiguration mapping, LoadedConfiguration configuration, SessionRegistry sessions, Session? caller)
+{
+    var address = caller?.PeerAddresses.FirstOrDefault(item => item.MappingId == mapping.MappingId);
+    var targetClient = configuration.Clients.GetValueOrDefault(mapping.TargetClientId);
+    var target = targetClient?.Channels.SingleOrDefault(c => c.ChannelId == mapping.TargetChannelId);
+    sessions.TryGet(mapping.TargetClientId, out var targetSession);
+    return new
     {
-        var address = agentSession?.PeerAddresses.FirstOrDefault(item => item.MappingId == mapping.MappingId);
-        var targetClient = runtime.Configuration.Clients.GetValueOrDefault(mapping.TargetClientId);
-        var target = targetClient is { Enabled: true } ? targetClient.Channels.SingleOrDefault(c => c.ChannelId == mapping.TargetChannelId) : null;
-        runtime.Sessions.TryGet(mapping.TargetClientId, out var targetSession);
-        return new { mapping.MappingId, mapping.Enabled, localAddress = address?.LocalAddress, localPort = address?.LocalPort, available = ChannelAvailability.IsOutboundMappingAvailable(mapping, address, target, agentSession, targetSession), applicationProtocol = target?.ApplicationProtocol ?? "raw", accessUrl = address is not null && target?.Http is not null ? $"{target.Http.PeerEntryScheme}://{target.Http.PeerAuthorityHost}:{address.LocalPort}" : null, mapping.TargetClientId, mapping.TargetChannelId, transportProtocol = runtime.Configuration.Clients.GetValueOrDefault(mapping.TargetClientId)?.Channels.SingleOrDefault(c => c.ChannelId == mapping.TargetChannelId)?.TransportProtocol ?? "tcp" };
-    }).ToArray() });
+        mapping.MappingId, mapping.Enabled, localAddress = address?.LocalAddress, localPort = address?.LocalPort,
+        available = targetClient is { Enabled: true } && ChannelAvailability.IsOutboundMappingAvailable(mapping, address, target, caller, targetSession),
+        applicationProtocol = target?.ApplicationProtocol ?? "raw", transportProtocol = target?.TransportProtocol ?? "tcp",
+        endToEndEncryptionEnabled = target?.EndToEndEncryptionEnabled, entryScheme = target?.Http?.PeerEntryScheme,
+        accessUrl = address is not null && target?.Http is { } http ? $"{http.PeerEntryScheme}://{http.PeerAuthorityHost}:{address.LocalPort}" : null,
+        mapping.TargetClientId, mapping.TargetChannelId
+    };
 }
 
 static IResult GetDashboardSnapshot(HttpRequest request, ServerRuntime runtime, MetricsRegistry metrics, ProxyListenerService proxy)
@@ -526,7 +537,8 @@ static IResult GetDashboardSnapshot(HttpRequest request, ServerRuntime runtime, 
         return Results.BadRequest(new { error = "Invalid page or pageSize." });
 
     var snapshotTimeUtc = DateTimeOffset.UtcNow;
-    var allClients = runtime.Configuration.Clients.Values
+    var configuration = runtime.Configuration;
+    var allClients = configuration.Clients.Values
         .OrderBy(client => client.ClientId, StringComparer.Ordinal)
         .ToArray();
     var offset = (long)(page - 1) * pageSize;
@@ -560,6 +572,7 @@ static IResult GetDashboardSnapshot(HttpRequest request, ServerRuntime runtime, 
                     maxConnections = channel.MaxConnections,
                     targetConnectTimeoutSeconds = channel.TargetConnectTimeoutSeconds,
                     listenerState = proxy.GetListenerState(client.ClientId, channel),
+                    peerState = ChannelAvailability.PeerState(client, channel, session, configuration.Server.Tunnel.TlsEnabled),
                     available = ChannelAvailability.IsPublicChannelAvailable(channel, session),
                     pendingConnections = channel.AuthorizedClientsOnly ? metric.PeerPendingConnections : metric.PendingConnections,
                     activeConnections = channel.AuthorizedClientsOnly ? metric.PeerActiveConnections : metric.ActiveConnections,
@@ -577,26 +590,7 @@ static IResult GetDashboardSnapshot(HttpRequest request, ServerRuntime runtime, 
                     targetLastResultTimeUtc = metric.TargetLastResult?.TimeUtc
                 };
             }).ToArray();
-            var mappings = client.OutboundMappings.Select(mapping =>
-            {
-                var address = session?.PeerAddresses.FirstOrDefault(item => item.MappingId == mapping.MappingId);
-                var targetClient = runtime.Configuration.Clients.GetValueOrDefault(mapping.TargetClientId);
-        var target = targetClient is { Enabled: true } ? targetClient.Channels.SingleOrDefault(c => c.ChannelId == mapping.TargetChannelId) : null;
-                runtime.Sessions.TryGet(mapping.TargetClientId, out var targetSession);
-                return new
-                {
-                    mapping.MappingId,
-                    mapping.Enabled,
-                    localAddress = address?.LocalAddress,
-                    localPort = address?.LocalPort,
-                    available = ChannelAvailability.IsOutboundMappingAvailable(mapping, address, target, session, targetSession),
-                    applicationProtocol = target?.ApplicationProtocol ?? "raw",
-                    accessUrl = address is not null && target?.Http is not null ? $"{target.Http.PeerEntryScheme}://{target.Http.PeerAuthorityHost}:{address.LocalPort}" : null,
-                    mapping.TargetClientId,
-                    mapping.TargetChannelId,
-                    transportProtocol = target?.TransportProtocol ?? "tcp"
-                };
-            }).ToArray();
+            var mappings = client.OutboundMappings.Select(mapping => MappingView(mapping, configuration, runtime.Sessions, session)).ToArray();
             return new
             {
                 clientId = client.ClientId,

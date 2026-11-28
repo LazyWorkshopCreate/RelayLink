@@ -2,6 +2,36 @@ import { Modal } from './Modal';
 import { fmt, time } from '../api';
 import { auditLabels, type AuditPage } from '../types';
 
+const outcomes: Record<string, string> = {
+    success: '成功',
+    denied: '已拒绝',
+    rejected: '已拒绝',
+    completed: '正常结束',
+    aborted: '异常中止',
+    failed: '失败',
+    approved: '已批准',
+};
+const reasons: Record<string, string> = {
+    peer_setup_rejected: '互访握手回执校验失败',
+    peer_setup_aborted: '互访就绪确认中止或超时',
+    ChannelUnavailable: '通道不可用，请检查目标状态及协议版本',
+    CapacityExceeded: '连接配额已满',
+    admin_disconnected: '管理员手动断开',
+    audit_unavailable: '审计存储不可用',
+    configuration_changed: '通道或映射配置已变更',
+    client_revoked: '客户端授权已撤销',
+    session_closed: '控制会话已关闭',
+    completed: '正常结束',
+    cancelled: '连接已取消',
+    reset: '连接已重置',
+    transport_error: '传输中断',
+    unexpected: '意外中止',
+    caller_send_failed: '访问方控制连接写入失败',
+    target_send_failed: '目标控制连接写入失败',
+    ProtocolError: '协议校验失败',
+    ConnectionAborted: '连接已中止',
+    server_restart: '服务端重启',
+};
 export function AuditModal({
     open,
     onClose,
@@ -107,8 +137,10 @@ export function AuditModal({
                                 <td
                                     title={`${item.outcome}${item.reasonCode ? ` · ${item.reasonCode}` : ''}`}
                                 >
-                                    {item.outcome}
-                                    {item.reasonCode ? ` · ${item.reasonCode}` : ''}
+                                    {outcomes[item.outcome] ?? item.outcome}
+                                    {item.reasonCode && item.reasonCode !== item.outcome
+                                        ? ` · ${reasons[item.reasonCode] ?? item.reasonCode}`
+                                        : ''}
                                 </td>
                                 <td
                                     className="mono"

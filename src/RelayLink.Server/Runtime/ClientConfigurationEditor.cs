@@ -137,7 +137,7 @@ public sealed class ClientConfigurationEditor(string serverConfigurationPath, Co
             }
             else if (sessions.TryGet(client.ClientId, out var session) && session is { HasCompletedHandshake: true })
             {
-                var (snapshot, version) = ConfigurationSnapshotFactory.Create(client, updated, session.ProtocolVersion);
+                var (snapshot, version) = ConfigurationSnapshotFactory.Create(client, updated, session);
                 if (!string.Equals(session.ConfigVersionPendingOrCurrent, version, StringComparison.Ordinal))
                 {
                     var failure = await ConfigurationPush.TrySendAsync(session, snapshot, version, cancellationToken);

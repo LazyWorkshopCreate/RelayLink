@@ -431,6 +431,7 @@ button.agent-tool-link {
 }
 .agent-table-scroll {
     min-width: 0;
+    overflow-x: auto;
 }
 table {
     width: 100%;
@@ -439,6 +440,7 @@ table {
 }
 .agent-panels table {
     table-layout: fixed;
+    min-width: 530px;
 }
 .agent-panels > .agent-panel:first-child col:nth-child(1) {
     width: 24%;
@@ -469,9 +471,30 @@ table {
     overflow-wrap: break-word;
 }
 .agent-panels td code {
+    display: inline-block;
+    max-width: 100%;
     white-space: normal;
-    overflow-wrap: break-word;
+    overflow-wrap: anywhere;
 }
+.address-line {
+    min-width: 0;
+}
+.agent-tool-link {
+    overflow-wrap: anywhere;
+}
+.agent-plain-mode,
+td small.agent-plain-mode {
+    color: #8b4a10;
+    font-weight: 600;
+}
+.transport-warning {
+    padding: 12px;
+    background: #fff4df;
+    color: #75420b;
+    border-left: 3px solid #bc761c;
+    border-radius: 4px;
+}
+
 th {
     text-align: left;
     color: #8795a8;
@@ -679,6 +702,51 @@ td code {
     }
 }
 @media (max-width: 600px) {
+    .agent-panels table {
+        display: block;
+        min-width: 0;
+    }
+    .agent-panels thead {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip-path: inset(50%);
+    }
+    .agent-panels colgroup {
+        display: none;
+    }
+    .agent-panels tbody,
+    .agent-panels tr {
+        display: block;
+    }
+    .agent-panels tr {
+        border-bottom: 1px solid #e1e6ef;
+        padding: 6px 0;
+    }
+    .agent-panels td {
+        display: grid;
+        grid-template-columns: 5em minmax(0, 1fr);
+        gap: 2px 8px;
+        border: 0;
+        padding: 4px 0;
+        overflow-wrap: anywhere;
+        align-items: start;
+    }
+    .agent-panels td::before {
+        content: attr(data-label);
+        color: #62748a;
+        grid-column: 1;
+        grid-row: 1;
+    }
+    .agent-panels td > * {
+        grid-column: 2;
+        justify-self: start;
+    }
+    .agent-panels .address-line {
+        max-width: 100%;
+    }
+
     .agent-server-header {
         flex-wrap: wrap;
     }

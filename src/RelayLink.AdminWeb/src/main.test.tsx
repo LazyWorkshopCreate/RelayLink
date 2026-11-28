@@ -14,6 +14,7 @@ function fakeApi(
         automationSessionLifetimeMinutes?: number;
         failAgentConfig?: boolean;
         problemDetail?: string;
+        connectionEncryption?: boolean | null;
     },
 ) {
     let authenticated = false;
@@ -83,10 +84,19 @@ function fakeApi(
             expiresAtUtc: '2026-11-26T10:00:00Z',
         },
     ];
+    if (options?.connectionEncryption !== undefined) {
+        Object.assign(channelSets['node-a'][0], {
+            authorizedClientsOnly: true,
+            endToEndEncryptionEnabled: !options.connectionEncryption,
+            available: false,
+            peerState: 'ready',
+        });
+    }
     const connections = [
         {
             connectionId: '11111111-1111-1111-1111-111111111111',
-            kind: 'proxy',
+            kind: options?.connectionEncryption === undefined ? 'proxy' : 'end-to-end',
+            endToEndEncryptionEnabled: options?.connectionEncryption ?? undefined,
             state: 'relaying',
             source: '127.0.0.1:50000',
             startedAtUtc: '2026-09-16T10:00:00Z',
@@ -473,6 +483,20 @@ describe('管理控制台', () => {
         ).toBe(true);
     });
 
+    it.each([
+        [false, '明文中继'],
+        [true, '加密中继'],
+        [null, '加密状态未知'],
+    ] as const)('当前连接显示建立时的业务加密设置（%s）', async (encrypted, mode) => {
+        fakeApi(false, undefined, { connectionEncryption: encrypted });
+        const user = userEvent.setup();
+        render(<App />);
+        await user.click(await screen.findByTitle('查看此通道当前连接'));
+        const dialog = screen.getByRole('dialog');
+        expect(await within(dialog).findByText(`转发中 · 授权互访（${mode}）`)).toBeTruthy();
+        expect(within(dialog).getByTitle(`服务端转发的互访字节（${mode}）`)).toBeTruthy();
+    });
+
     it('匿名可查看当前连接，登录后可带 CSRF 断开指定连接', async () => {
         const calls = fakeApi();
         const user = userEvent.setup();
@@ -505,7 +529,7 @@ describe('管理控制台', () => {
         expect(screen.queryByRole('button', { name: '添加客户端' })).toBeNull();
         expect(screen.queryByRole('button', { name: '安全组' })).toBeNull();
         const mappingTable = within(screen.getByText('访问节点').closest('article')!).getByRole('region', {
-            name: '端到端访问入口',
+            name: '授权互访入口',
         });
         expect(within(mappingTable).getByRole('columnheader', { name: '入口 ID' })).toBeTruthy();
         expect(within(mappingTable).getByText('node-a-echo')).toBeTruthy();
@@ -536,7 +560,7 @@ describe('管理控制台', () => {
         render(<App />);
         const caller = await screen.findByText('访问节点');
         const mappingTable = within(caller.closest('article')!).getByRole('region', {
-            name: '端到端访问入口',
+            name: '授权互访入口',
         });
         expect(within(mappingTable).getByText(address)).toBeTruthy();
         const writeText = vi.fn().mockResolvedValue(undefined);
@@ -671,7 +695,7 @@ describe('管理控制台', () => {
         ).toBe('test-csrf');
     });
 
-    it('授权通道和端到端访问入口由管理员配置并下发', async () => {
+    it('授权通道和授权互访入口由管理员配置并下发', async () => {
         const calls = fakeApi();
         const user = userEvent.setup();
         render(<App />);
@@ -698,7 +722,7 @@ describe('管理控制台', () => {
         );
         await user.click(screen.getByRole('button', { name: '取消' }));
         expect(within(targetCard).getByRole('button', { name: '添加通道' }).className).toBe(
-            within(targetCard).getByRole('button', { name: '添加端到端访问入口' }).className,
+            within(targetCard).getByRole('button', { name: '添加互访入口' }).className,
         );
         await user.click(within(targetCard).getByRole('button', { name: '添加通道' }));
         await user.type(screen.getByRole('textbox', { name: '通道 ID' }), 'private');
@@ -718,6 +742,7 @@ describe('管理控制台', () => {
         await user.click(screen.getByRole('checkbox', { name: /仅允许授权客户端互访/ }));
         expect(screen.queryByRole('textbox', { name: /端到端证书 SHA-256 指纹/ })).toBeNull();
         await user.click(screen.getByRole('checkbox', { name: /启用 Agent 间端到端加密/ }));
+        expect(within(screen.getByRole('alert')).getByText('业务将以明文中继')).toBeTruthy();
         await user.click(screen.getByRole('button', { name: '保存并下发' }));
         await screen.findByText('私有通道');
         expect(calls.find((c) => c.path.endsWith('/channels') && c.method === 'POST')?.csrf).toBe(
@@ -733,15 +758,11 @@ describe('管理控制台', () => {
         expect(within(screen.getByText('私有通道').closest('tr')!).getByText(/明文/)).toBeTruthy();
 
         const callerCard = screen.getByText('新节点').closest('article')!;
-        await user.click(within(callerCard).getByRole('button', { name: '添加端到端访问入口' }));
-        expect(
-            screen.getByTitle(
-                '入口 ID 为目标客户端 ID-目标通道 ID。本机端口由 Agent 自动选择并保存，冲突时自动轮换。',
-            ).className,
-        ).toBe('field-help');
-        expect(screen.queryByText(/本机端口由 Agent 自动选择并保存/)).toBeNull();
+        await user.click(within(callerCard).getByRole('button', { name: '添加互访入口' }));
+        expect(screen.getByText(/自动选择并保存端口，端口冲突时自动轮换/)).toBeTruthy();
         await user.selectOptions(screen.getByRole('combobox', { name: '目标客户端' }), 'node-a');
         await user.selectOptions(screen.getByRole('combobox', { name: '目标授权通道' }), 'private');
+        expect(screen.getByRole('alert').textContent).toContain('明文经服务端中继');
         expect(screen.getByRole('textbox', { name: '入口 ID（自动生成）' })).toHaveProperty(
             'value',
             'node-a-private',

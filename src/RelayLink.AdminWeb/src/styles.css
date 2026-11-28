@@ -338,8 +338,8 @@ button:disabled {
     width: 22%;
 }
 .mapping-table td {
-    overflow: hidden;
-    text-overflow: ellipsis;
+    white-space: normal;
+    overflow-wrap: anywhere;
 }
 .connection-table {
     min-width: 760px;
@@ -366,8 +366,8 @@ button:disabled {
     vertical-align: middle;
 }
 .address-line > span {
-    overflow: hidden;
-    text-overflow: ellipsis;
+    min-width: 0;
+    overflow-wrap: anywhere;
 }
 .copy-button {
     border: 0;
@@ -480,6 +480,38 @@ button:disabled {
 }
 .primary.subtle:hover {
     background: #e1eaff;
+}
+.channel-table {
+    min-width: 960px;
+}
+.channel-table td,
+.connection-table td {
+    white-space: normal;
+    overflow-wrap: anywhere;
+}
+.channel-table td.mono small,
+.mapping-table td small {
+    display: block;
+    margin-top: 3px;
+    color: #596b81;
+}
+.channel-table td small.plain-mode,
+.mapping-table td small.plain-mode {
+    color: #935315;
+}
+.transport-warning {
+    background: #fff4df;
+    color: #75420b;
+    border-left: 3px solid #bc761c;
+    padding: 10px 14px;
+    border-radius: 4px;
+}
+.transport-warning p {
+    margin: 4px 0 0;
+}
+.field-note {
+    color: #526378;
+    font-size: 13px;
 }
 .table-scroll {
     overflow-x: auto;
@@ -936,7 +968,34 @@ footer {
 }
 @media (max-width: 650px) {
     .topbar {
-        padding: 0 18px;
+        height: auto;
+        position: static;
+        flex-wrap: wrap;
+        gap: 8px;
+        padding: 10px 16px;
+    }
+    .top-actions {
+        flex-wrap: wrap;
+        gap: 6px;
+    }
+    .top-actions button {
+        white-space: nowrap;
+        padding: 6px 9px;
+        gap: 4px;
+    }
+    .section-head {
+        flex-wrap: wrap;
+        gap: 8px;
+    }
+    .section-head button {
+        white-space: nowrap;
+    }
+    .metric > div {
+        min-width: 0;
+    }
+    .metric strong {
+        white-space: normal;
+        overflow-wrap: anywhere;
     }
     .live-label,
     .auth-status,

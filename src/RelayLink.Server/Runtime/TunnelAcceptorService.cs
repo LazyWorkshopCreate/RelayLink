@@ -155,6 +155,8 @@ public sealed class TunnelAcceptorService(
                     });
                     session.AgentVersion = register.AgentVersion;
                     session.ProtocolVersion = writer.ProtocolVersion;
+                    session.MappingEncryptionStatus = session.ProtocolVersion >= 5 && register.MappingEncryptionStatus;
+                    session.RelayControlReady = session.ProtocolVersion == 5 && stream is SslStream { IsAuthenticated: true, IsEncrypted: true } && register.RelayControlReady;
                     session.AttachControlWriter(writer);
                     if (!runtime.Configuration.Clients.TryGetValue(session.ClientId, out var currentConfig) || !currentConfig.Enabled)
                     {
@@ -163,11 +165,12 @@ public sealed class TunnelAcceptorService(
                         return;
                     }
                     clientConfiguration = currentConfig;
-                    var (snapshot, configVersion) = ConfigurationSnapshotFactory.Create(clientConfiguration, runtime.Configuration, session.ProtocolVersion);
+                    var (snapshot, configVersion) = ConfigurationSnapshotFactory.Create(clientConfiguration, runtime.Configuration, session);
                     await writer.WriteAsync(new Frame(FrameType.RegisterAccepted, JsonProtocolSerializer.Serialize(new RegisterAcceptedMessage(session.SessionId, configVersion, snapshot, runtime.Configuration.Server.Tunnel.HeartbeatIntervalSeconds, runtime.Configuration.Server.Tunnel.HeartbeatTimeoutSeconds)
                     {
                         HalfCloseDrainTimeoutSeconds = runtime.Configuration.Server.Limits.HalfCloseDrainTimeoutSeconds,
-                        TcpIdleTimeoutSeconds = runtime.Configuration.Server.Limits.TcpIdleTimeoutSeconds
+                        TcpIdleTimeoutSeconds = runtime.Configuration.Server.Limits.TcpIdleTimeoutSeconds,
+                        RelayControlReady = session.RelayControlReady
                     }, session.ProtocolVersion)), serverStoppingToken);
                     var acknowledgement = await reader.ReadAsync(ProtocolConstants.MaxControlPayloadLength, handshakeTimeout.Token);
                     if (acknowledgement?.Type != FrameType.ConfigAck)
@@ -205,7 +208,7 @@ public sealed class TunnelAcceptorService(
                         session.Close();
                         return;
                     }
-                    var (postSnapshot, postVersion) = ConfigurationSnapshotFactory.Create(postReadyClient, runtime.Configuration, session.ProtocolVersion);
+                    var (postSnapshot, postVersion) = ConfigurationSnapshotFactory.Create(postReadyClient, runtime.Configuration, session);
                     if (!string.Equals(postVersion, configVersion, StringComparison.Ordinal))
                     {
                         await session.SendConfigurationUpdateAsync(postSnapshot, postVersion, serverStoppingToken);
@@ -390,6 +393,13 @@ public sealed class TunnelAcceptorService(
                 var peerRequest = JsonProtocolSerializer.Deserialize<PeerOpenRequestMessage>(frame.Payload.Span)
                     ?? throw new ProtocolException("Invalid PeerOpenRequest frame.");
                 await peerRelays.RequestAsync(session, peerRequest, cancellationToken);
+                continue;
+            }
+
+            if (frame.Type is FrameType.PeerRelayAuthenticated or FrameType.PeerRelayTargetReady or FrameType.PeerRelayAborted)
+            {
+                if (!session.RelayControlReady) throw new ProtocolException("Relay controls were not negotiated.");
+                peerRelays.ReportSetup(session, frame.Type, JsonProtocolSerializer.Deserialize<PeerRelaySignal>(frame.Payload.Span));
                 continue;
             }
 

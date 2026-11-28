@@ -18,7 +18,7 @@ import {
     Upload,
     X,
 } from "lucide-react";
-import { mappingTools } from "./mapping-tools";
+import { mappingPresence, mappingTools } from "./mapping-tools";
 import "./styles.css";
 
 type Channel = {
@@ -36,6 +36,7 @@ type Channel = {
     transportProtocol?: "tcp" | "udp";
 };
 type Mapping = {
+    endToEndEncryptionEnabled?: boolean | null;
     mappingId: string;
     enabled: boolean;
     targetClientId: string;
@@ -81,17 +82,20 @@ type Profile = {
 };
 type Session = { csrfToken: string; version: string; expiresAtUtc?: string };
 
-function mappingPresence(mapping: Mapping): "online" | "offline" | "disabled" {
-    if (!mapping.enabled) return "disabled";
-    if (!mapping.localAddress) return "offline";
-    if (mapping.httpState && mapping.httpState !== "ready") return "offline";
-    return "online";
-}
-
-function mappingStatusLabel(presence: "online" | "offline" | "disabled") {
+function mappingStatusLabel(
+    mapping: Mapping,
+    presence: "online" | "offline" | "disabled",
+    serverOnline: boolean,
+) {
+    if (presence === "disabled") return "● 已禁用";
     if (presence === "online") return "● 在线";
-    if (presence === "offline") return "● 离线";
-    return "● 已禁用";
+    if (serverOnline && mapping.httpState === "restart_required")
+        return "● 需重启生效";
+    if (serverOnline && mapping.httpState === "resource_unavailable")
+        return "● 资源不可用";
+    if (serverOnline && mapping.applicationProtocol === "http")
+        return "● 入口未就绪";
+    return "● 离线";
 }
 
 function CopyEndpointButton({
@@ -149,10 +153,12 @@ function MappingAddress({
     supportsRdp: boolean;
 }) {
     const { localAddress } = mapping;
-    if (!localAddress) return <span className="agent-unavailable">—</span>;
-
-    const tools = serverOnline ? mappingTools(mapping, supportsRdp) : null;
+    if (!localAddress || !serverOnline || !mapping.enabled)
+        return <span className="agent-unavailable">—</span>;
+    const tools = mappingTools(mapping, supportsRdp);
     const webUrl = tools?.kind === "web" ? tools.url : null;
+    if (mapping.applicationProtocol === "http" && !webUrl)
+        return <span className="agent-unavailable">—</span>;
     const rdpFile = tools?.kind === "raw" ? tools.rdpFile : null;
     return (
         <div className="address-line">
@@ -171,6 +177,9 @@ function MappingAddress({
                 )}
             </code>
             <CopyEndpointButton value={webUrl ?? localAddress} />
+            {mapping.transportProtocol === "udp" && (
+                <small>单播 UDP，请用 UDP 客户端连接</small>
+            )}
             {tools?.kind === "raw" && (
                 <details className="agent-tool-actions">
                     <summary aria-label={`${mapping.mappingId} 的连接方式`}>
@@ -216,6 +225,30 @@ function MappingAddress({
     );
 }
 
+const profileErrors: Record<string, string> = {
+    "Protected state already exists for this profileId; confirm it belongs to the same server identity.":
+        "本机已有该连接项的受保护状态。请核对服务端身份后勾选沿用旧状态。",
+    "Unable to save Agent configuration.":
+        "无法保存 Agent 配置，请检查配置目录写权限和可用空间。",
+    "This profileId already exists.": "连接项 ID 已存在，请选择其他 ID。",
+    "This profileId does not exist.": "连接项已不存在，请刷新页面。",
+    "Invalid server profile request.":
+        "服务端配置无效，请重新导入单服务端 JSON。",
+    "Invalid server profile or process limits.":
+        "服务端配置或进程配额无效，请核对导入文件。",
+    "Invalid delete request.": "删除请求无效，请刷新后重试。",
+    "Invalid profile state request.": "连接项状态请求无效，请刷新后重试。",
+    "Imported configuration must keep the existing profileId and clientId.":
+        "编辑时必须保留原连接项 ID 和客户端 ID。",
+    "This profile is already in the requested state; refresh the page.":
+        "连接项已处于所选状态，请刷新页面。",
+    "Agent configuration changed; reload the page or restart after an external edit.":
+        "Agent 配置已变更，请刷新页面。若从外部修改了文件，请重启 Agent。",
+    "Local management session is required.": "请重新获取本机管理会话后重试。",
+    "Connecting without TLS requires confirmInsecureTransport set to CONNECT_WITHOUT_TLS.":
+        "请先输入 CONNECT_WITHOUT_TLS 确认明文控制连接。",
+};
+
 class HttpError extends Error {
     readonly status: number;
 
@@ -235,7 +268,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
         const body = await response.json().catch(() => ({}));
         throw new HttpError(
             response.status,
-            body.message || body.detail || `请求失败 (${response.status})`,
+            profileErrors[body.message || body.detail] ??
+                (body.message ||
+                    body.detail ||
+                    `请求失败（HTTP ${response.status}）`),
         );
     }
     return response.status === 204
@@ -569,7 +605,13 @@ function App() {
     const mappings = servers.reduce(
         (total, server) =>
             total +
-            server.mappings.filter((mapping) => mapping.localAddress).length,
+            server.mappings.filter(
+                (mapping) =>
+                    mappingPresence(
+                        mapping,
+                        server.enabled && server.online,
+                    ) === "online",
+            ).length,
         0,
     );
     const active = servers.reduce(
@@ -671,7 +713,7 @@ function App() {
                         <div>
                             <span>可用互访入口</span>
                             <strong>{mappings}</strong>
-                            <small>已绑定本机地址</small>
+                            <small>已就绪的本机入口</small>
                         </div>
                     </div>
                     <div className="metric">
@@ -731,7 +773,13 @@ function App() {
                                         <h3>{server.profileId}</h3>
                                         <p>
                                             {server.serverHost} ·{" "}
-                                            {server.useTls ? "TLS" : "明文控制"}{" "}
+                                            {server.useTls ? (
+                                                "控制 TLS"
+                                            ) : (
+                                                <span className="agent-plain-mode">
+                                                    明文控制
+                                                </span>
+                                            )}{" "}
                                             · 客户端 ID {server.clientId}
                                         </p>
                                     </div>
@@ -838,7 +886,7 @@ function App() {
                                                                     channel.channelId
                                                                 }
                                                             >
-                                                                <td>
+                                                                <td data-label="通道">
                                                                     <b>
                                                                         {
                                                                             channel.displayName
@@ -850,31 +898,34 @@ function App() {
                                                                         }
                                                                     </small>
                                                                 </td>
-                                                                <td>
+                                                                <td data-label="访问模式">
                                                                     {channel.authorizedClientsOnly
                                                                         ? channel.endToEndEncryptionEnabled
-                                                                            ? "授权互访 · 加密"
-                                                                            : "授权互访 · 明文"
+                                                                            ? "授权互访 · 加密中继"
+                                                                            : "授权互访 · 明文中继"
                                                                         : "普通代理"}
-                                                                </td>
-                                                                <td>
-                                                                    <code>
-                                                                        {(channel.applicationProtocol ===
+                                                                    <small>
+                                                                        {channel.applicationProtocol ===
                                                                         "http"
-                                                                            ? (channel.entryScheme ??
-                                                                              "http")
-                                                                            : (channel.transportProtocol ??
-                                                                              "tcp")
-                                                                        ).toUpperCase() +
-                                                                            " " +
-                                                                            channel.targetHost}
+                                                                            ? `${(channel.entryScheme ?? "http").toUpperCase()} 入口`
+                                                                            : channel.transportProtocol ===
+                                                                                "udp"
+                                                                              ? "单播 UDP"
+                                                                              : "TCP"}
+                                                                    </small>
+                                                                </td>
+                                                                <td data-label="目标地址">
+                                                                    <code>
+                                                                        {
+                                                                            channel.targetHost
+                                                                        }
                                                                         :
                                                                         {
                                                                             channel.targetPort
                                                                         }
                                                                     </code>
                                                                 </td>
-                                                                <td>
+                                                                <td data-label="状态">
                                                                     {channel.enabled
                                                                         ? "启用"
                                                                         : "禁用"}
@@ -899,9 +950,11 @@ function App() {
                                         </div>
                                     ) : (
                                         <p className="agent-panel-empty">
-                                            {server.enabled
-                                                ? "当前无在线通道"
-                                                : "服务端已停用"}
+                                            {!server.enabled
+                                                ? "服务端已停用"
+                                                : !server.online
+                                                  ? "服务端未连接，上线后同步通道"
+                                                  : "此服务端尚无通道"}
                                         </p>
                                     )}
                                 </div>
@@ -930,24 +983,50 @@ function App() {
                                                 <tbody>
                                                     {server.mappings.map(
                                                         (mapping) => {
+                                                            const serverOnline =
+                                                                server.enabled &&
+                                                                server.online;
                                                             const presence =
                                                                 mappingPresence(
                                                                     mapping,
+                                                                    serverOnline,
                                                                 );
+                                                            const encrypted =
+                                                                mapping.endToEndEncryptionEnabled ??
+                                                                (mapping.applicationProtocol ===
+                                                                "http"
+                                                                    ? true
+                                                                    : null);
                                                             return (
                                                                 <tr
                                                                     key={
                                                                         mapping.mappingId
                                                                     }
                                                                 >
-                                                                    <td>
+                                                                    <td data-label="入口">
                                                                         <b>
                                                                             {
                                                                                 mapping.mappingId
                                                                             }
                                                                         </b>
+                                                                        <small
+                                                                            className={
+                                                                                encrypted ===
+                                                                                false
+                                                                                    ? "agent-plain-mode"
+                                                                                    : ""
+                                                                            }
+                                                                        >
+                                                                            {encrypted ===
+                                                                            true
+                                                                                ? "加密中继"
+                                                                                : encrypted ===
+                                                                                    false
+                                                                                  ? "明文中继"
+                                                                                  : "加密状态未知"}
+                                                                        </small>
                                                                     </td>
-                                                                    <td>
+                                                                    <td data-label="访问目标">
                                                                         {
                                                                             mapping.targetClientId
                                                                         }{" "}
@@ -956,28 +1035,39 @@ function App() {
                                                                             mapping.targetChannelId
                                                                         }
                                                                     </td>
-                                                                    <td>
+                                                                    <td data-label="本机地址">
                                                                         <MappingAddress
                                                                             mapping={
                                                                                 mapping
                                                                             }
                                                                             serverOnline={
-                                                                                server.enabled &&
-                                                                                server.online
+                                                                                serverOnline
                                                                             }
                                                                             supportsRdp={
                                                                                 supportsRdp
                                                                             }
                                                                         />
                                                                     </td>
-                                                                    <td>
+                                                                    <td data-label="状态">
                                                                         <span
                                                                             className={`agent-badge compact ${presence}`}
                                                                         >
                                                                             {mappingStatusLabel(
+                                                                                mapping,
                                                                                 presence,
+                                                                                serverOnline,
                                                                             )}
                                                                         </span>
+                                                                        {serverOnline &&
+                                                                            mapping.enabled &&
+                                                                            mapping.httpState ===
+                                                                                "restart_required" && (
+                                                                                <small>
+                                                                                    重启
+                                                                                    Agent
+                                                                                    或停用后重新启用此连接项
+                                                                                </small>
+                                                                            )}
                                                                     </td>
                                                                 </tr>
                                                             );
@@ -988,9 +1078,11 @@ function App() {
                                         </div>
                                     ) : (
                                         <p className="agent-panel-empty">
-                                            {server.enabled
-                                                ? "当前无在线入口"
-                                                : "服务端已停用"}
+                                            {!server.enabled
+                                                ? "服务端已停用"
+                                                : !server.online
+                                                  ? "服务端未连接，上线后同步本机入口"
+                                                  : "此服务端尚无互访入口"}
                                         </p>
                                     )}
                                 </div>
@@ -1101,9 +1193,11 @@ function App() {
                             </div>
                         )}
                         {profile && !profile.useTls && (
-                            <label className="agent-token agent-confirm-phrase">
-                                明文控制会把注册密钥发给 {profile.serverHost}
-                                。输入 CONNECT_WITHOUT_TLS 以确认。
+                            <label className="agent-token agent-confirm-phrase transport-warning">
+                                <strong>明文控制会暴露注册密钥</strong>
+                                连接 {profile.serverHost}{" "}
+                                时，注册密钥将以明文发送，授权互访也无法使用。仅在受信隔离网络使用，输入
+                                CONNECT_WITHOUT_TLS 确认。
                                 <input
                                     value={insecureConfirmation}
                                     autoComplete="off"
@@ -1127,7 +1221,7 @@ function App() {
                                         )
                                     }
                                 />{" "}
-                                确认同名旧状态仍属于此服务端身份
+                                确认沿用同名连接项的旧状态。仅当旧证书身份和端口记录确实属于此服务端时勾选。
                             </label>
                         )}
                         {editorId !== null && (

@@ -2,11 +2,13 @@
 
 文档 ID：DES-002\
 状态：Draft\
-版本：v1.12.0\
-更新日期：2026-11-18\
+版本：v1.14.0\
+更新日期：2026-11-28\
 调研日期：2026-09-17
 
 ## 1. 范围与调研结论
+
+当前互访数据经 Server 中继。两端 Agent 的加密与明文直连，以及不可达时按原通道模式回退的待评审扩展见 [P2P 直连与中继回退](peer-direct-and-relay.md)。
 
 HTTP/HTTPS 互访新增方向见 [REQ-001N](../requirements/2026-10-12-http-reverse-proxy.md)、[DES-008](http-reverse-proxy.md) 和 [ADR-0026](../adr/0026-http-proxy-over-tcp-tunnels.md)：目标 Agent 在内层 TLS/访问证明后处理 HTTP，支持 Host/Origin 覆写，HTTP 互访禁止关闭内层加密，浏览器 HTTPS 可嵌套其中。核心运行接入已实现，实际验证见 [HTTP 验证](../testing/http-reverse-proxy-verification.md)；本文下述 raw TCP/UDP 的既有可选加密及协议行为保持，新 HTTP 的能力、证明与就绪字段不得静默套用于旧端。
 
@@ -55,12 +57,18 @@ Windows Schannel 在运行时需把文件私钥加载到当前用户密钥提供
 | `PeerOpenRejected` | Server→访问 Agent 控制连接 | 拒绝原因 |
 | `PeerBindData` | 两端 Agent→Server 数据连接 | 当前会话、连接、角色及一次性随机令牌，恰好消费一次 |
 | `PeerBindAccepted` | Server→两端 Agent | 两条数据连接配对成功，进入帧中继状态 |
+| `PeerRelayAuthenticated` / `PeerRelayPrepare` | 双方→Server / Server→目标，TLS 控制连接 | 新版 raw 互访的双方回执一致且授权仍有效后，目标才能准备业务套接字 |
+| `PeerRelayTargetReady` / `PeerRelayAborted` | 目标→Server→访问方 / 任一参与端与 Server，TLS 控制连接 | 确认同一次尝试的目标就绪或取消。访问方收到就绪才发送 TCP 字节或取出 UDP 首包 |
 | `PeerMappingStatus` | 访问 Agent→Server 控制连接 | 当前会话与配置版本、实际成功绑定的映射 ID 和 loopback 端口；不含密钥 |
 | `Data/Fin/Reset` | 两端 Agent↔Server 数据连接 | 原样转发加密记录或明文业务字节及结束信号 |
 
 访问方 Agent 已通过现有独立客户端密钥注册；Server 从会话中取得调用方 ID，只按 Server 自己的已确认映射解析目标，不能相信请求自带目标 ID、目标端口或访问密钥。同一调用会话在最近两分钟内重复提交同一个 `requestId` 时，服务端以协议错误拒绝，不额外占用配额或中继；窗口过期后该标识可以再次使用。中继任务中的意外异常记入错误日志并清理该中继。Server 不把访问密钥塞进 `PeerOpen`；被访问 Agent 使用自己的已确认通道快照取密钥，并拒绝 Server 通知模式与快照不一致的连接。
 
-加密模式先完成内层 TLS 握手并验证目标证书指纹，再在 TLS 内交换访问证明。明文模式跳过 TLS，直接在帧化流上交换访问证明。两种模式下，被访问方都发出每连接 32 字节随机挑战；访问方返回带域分隔的 HMAC-SHA256，输入包含调用方 ID、目标通道 ID、连接 ID、`tls`/`plain` 模式和挑战。被访问方固定时间比较成功前不得连接业务目标。加密模式不允许握手失败后自动降级；明文模式只能来自服务端已确认的目标通道配置。
+加密模式先完成内层 TLS 握手并验证目标证书指纹，再在 TLS 内交换访问证明。明文模式直接在帧化流上交换证明。两种模式均由目标发出每连接 32 字节随机挑战，使用通道访问密钥及 HMAC-SHA256 校验访问方。未协商控制面就绪的组合沿用原证明和数据流就绪字节，raw 为 1，HTTP 为 2。
+
+v5 的 `Register` 可在已认证 TLS 上声明 `relayControlReady=true`，Server 在 `RegisterAccepted` 确认。仅双方均协商成功的 raw TCP 和单播 UDP 使用新握手。Server 在 `PeerOpen` 和 `PeerOpenGranted` 中下发相同的 `relayBinding`，包含逻辑连接 ID、随机尝试 ID、双方身份与会话、映射、通道、传输协议及加密模式。数据隧道配对并写入起始审计后，访问方返回自己的 32 字节随机数及 32 字节证明。证明依次覆盖独立用途前缀、绑定的 UTF-8 协议 JSON、目标随机数和访问方随机数。两端以证明的 SHA-256 大写十六进制作为握手标识，各自在原控制连接报告。
+
+Server 校验实际发送会话和相同的握手标识，在授权有效时向目标发送含新随机 `preparationId` 的准备指令。目标成功连接 TCP 或准备好专属 UDP 套接字后，须经自己的 TLS 会话回显此许可。Server 核对后通知访问方，并将这条连接从建立中计为活动。建立期间持续占用全局和双方客户端的待建立额度。数据字节不推进新握手状态。配置撤销、错误证明、同一角色更换标识或等待超时均终止该尝试。失败不会重新选择旧握手。HTTP 保留原有强制 TLS 及独立上下文证明。
 
 Server 只验证帧类型、长度、配对关系与资源限额，将 `Data/Fin/Reset` 原样送给另一个 Agent。加密模式的 `Data` 是内层 TLS 记录；明文模式在访问证明后直接承载业务字节。每个方向只允许一个 reader 和一个 writer；32 KiB `Data` 上限、写超时和取消机制沿用现有传输限制。应用 TCP 半关闭不能提前丢弃另一方向回包。
 
@@ -69,6 +77,10 @@ Server 只验证帧类型、长度、配对关系与资源限额，将 `Data/Fin
 ## 4. 顺序与失效
 
 Agent 先校验整份 `OutboundMappings`（地址、密钥 Base64 与长度、协议组合、映射 ID 唯一），全部通过后才停止旧入口并创建新入口。无效快照记为永久配置错误并保持已有入口，不在校验中途改监听。通过后先绑定本机端口并保存端口状态，再在认证控制连接上上报 `PeerMappingStatus`。服务端校验会话、已确认的配置版本、映射归属、端口范围与同一报告内不重复，然后仅在该会话在线时展示上报地址。配置更新时先确认新版本，再上报新地址；断线时服务端清除会话状态。本机网页默认在 `http://127.0.0.1:18081/`，可用 `dashboardPort` 调整，设为 0 时网页和本机 API 一并关闭；二者由同一个 Kestrel 实例绑定 IPv4 loopback，不额外开放端口。
+
+v5 Agent 可在注册时声明 `mappingEncryptionStatus`。仅对声明该能力的 v5 会话，注册及后续配置快照在每个出站映射中包含目标通道的 `endToEndEncryptionEnabled`，并将其纳入该会话的快照摘要。加密模式变更会同步给相关访问方。旧版会话沿用原快照和摘要。连接旧 Server 时，Agent 对原始 TCP/UDP 入口显示“加密状态未知”，HTTP 互访始终使用内层 TLS。
+
+服务端先按同一份配置预留配额。登记后对所有协议版本重新核对映射和目标通道运行参数，在独立、受配额限制的任务中通知双方。任一控制会话结束会取消等待。建立期间使用握手和目标拨号期限，放行后才开始计算 TCP 业务空闲时间。建立期间撤权、断线或改配只结清一次，并记录具体中止原因。
 
 供第三方本机软件读取的现有稳定接口为 `GET /api/v1/status`、`GET /api/v1/channels` 和 `GET /api/v1/mappings`；旧 `GET /api/status` 保留兼容。聚合接口字段为 `clientId`、`online`、`updatedAtUtc`、`channels` 与 `outboundMappings`；两个资源接口保留相同的客户端状态元数据，并分别返回 `channels` 或 `mappings`。数据直接取自不可变的 `AgentStatusSnapshot`：在线时来自已确认的控制快照及实际端口绑定，离线时返回空列表，避免把旧地址表示为仍可用。当前接口只注册 GET 路由，写方法由框架返回 405；全部响应禁止缓存，不启用 CORS。视图模型只包含页面已经允许展示的字段，不包含客户端密钥、通道访问密钥、目标证书指纹、私钥或令牌。当前本机网页只读显示通道、访问目标、入口在线状态和已监听地址，并提供复制地址与端口；拟议的多服务端页面将另设受保护的服务端增删操作，见[多服务端技术设计](multi-server-agent.md)，不提供已保存注册密钥读取。服务端匿名状态页也按客户端以表格展示访问入口、在线状态和当前上报地址，地址旁可复制地址与端口；公开映射查询不返回访问密钥或目标证书指纹，写入仍受管理员会话及 CSRF 保护。
 

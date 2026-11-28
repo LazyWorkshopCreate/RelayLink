@@ -119,7 +119,7 @@
                             </div>
                             <p class="card-kicker">安全模型</p>
                             <h3>授权的 Agent 互访</h3>
-                            <p>访问方使用本机回环入口；业务流默认端到端 TLS，Server 只中继密文。</p>
+                            <p>访问方使用本机回环入口，流量经服务端中继。Agent 间默认使用 TLS 加密。管理员可为原始 TCP 或单播 UDP 通道关闭业务加密，此时服务端可读取未经业务自行加密的内容。</p>
                         </article>
                         <article class="capability boundary-card">
                             <p class="card-kicker">明确边界</p>

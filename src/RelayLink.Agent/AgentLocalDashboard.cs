@@ -27,6 +27,7 @@ public sealed class AgentStatus(AgentConfiguration configuration)
             byId.TryGetValue(mapping.MappingId, out var address) ? $"127.0.0.1:{address.LocalPort}" : null)
             {
                 TransportProtocol = mapping.TransportProtocol, ApplicationProtocol = mapping.ApplicationProtocol,
+                EndToEndEncryptionEnabled = mapping.EndToEndEncryptionEnabled ?? (mapping.ApplicationProtocol == "http" ? true : null),
                 HttpState = mapping.ApplicationProtocol == "http" ?
                     httpMappingStates?.GetValueOrDefault(mapping.MappingId) is { } state && state != "ready" ? state : address is null ? "unavailable" : "ready" : null,
                 AccessUrl = FormatAccessUrl(mapping, address)
@@ -62,6 +63,7 @@ public sealed record AgentMappingView(string MappingId, bool Enabled, string Tar
     public string ApplicationProtocol { get; init; } = "raw";
     public string? HttpState { get; init; }
     public string? AccessUrl { get; init; }
+    public bool? EndToEndEncryptionEnabled { get; init; }
 }
 
 public sealed class AgentLocalDashboard : BackgroundService

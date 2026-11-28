@@ -2,8 +2,36 @@
 
 文档 ID：TST-001\
 状态：Active\
-版本：v1.34.5\
-更新日期：2026-10-24
+版本：v1.36.3\
+更新日期：2026-11-28
+
+## 2026-11-28 授权互访中继与界面审查修复
+
+在 Windows x64、.NET SDK 10.0.115、Release 上，阻塞一个目标的控制写入后，同一访问方仍能从另一目标获得建立许可。取消访问方会释放慢请求的配额。旧握手在准入期间遇到目标从 TCP 改为 UDP 时，会拒绝打开目标，只产生一条有原因的拒绝审计。尚在建立的连接因撤权或断线结束时记录中止。单元测试使用可控时钟验证业务空闲计时从放行开始。[中继准入和审计测试](../../tests/RelayLink.UnitTests/PeerRelayReliabilityTests.cs) · [空闲计时测试](../../tests/RelayLink.UnitTests/RuntimeCorrectnessTests.cs)
+
+在真实 Server 与 Agent 回环进程中，v4 Agent 分别作为访问方和目标，单播 UDP 的加密与明文四种组合均双向收发。旧 v5 Server 使用 rc.14 发行包，两个新 Agent 经旧握手完成加密和明文 UDP 收发，状态接口对旧 Server 未提供的模式返回未知。新版路径上的错误 UDP 访问证明未触达目标服务，目标准备失败时的首包在修复配置后也没有重放。[v4 混合版本](../../tests/RelayLink.IntegrationTests/HttpProxyLegacyAgentTests.cs) · [旧 v5 Server、配置更新及 UDP 拒绝用例](../../tests/RelayLink.IntegrationTests/PeerConnectionTests.cs)
+
+复跑全部旧端用例时，按[旧端运行参数](http-reverse-proxy-verification.md)设置 rc.8、rc.9 Agent，再将 `RELAYLINK_LEGACY_V5_SERVER_ASSEMBLY` 指向核对过发行包 SHA-256 的 rc.14 `RelayLink.Server.dll`，并在同一命令追加 `-p:EnableLegacyV5ServerTests=true`。解决方案 Release 构建为 0 警告、0 错误。单元测试 314/314，开启互访 TLS 和三组旧端用例的集成测试连续两轮 142/142，均无跳过。
+
+较早一轮中的 HTTP 中间证书链用例失败，随后单项及两轮全量均通过，后续排查见下文。映射磁盘快照与监听切换回滚两个单元用例也曾失败，串行运行全套以及随后单独复测两次均通过，这两项初次失败的原因尚未确认。
+
+候选版本的 Linux CI（源仓库运行 46101852917） 发现中继异常清理用例读取日志时，后台任务仍可能修改同一个列表。测试改用并发队列，并等待 SQLite 写入异常终止原因后再核对错误日志和连接清理结果。该用例在 Windows 的八个独立测试进程中均通过，随后全量单元测试 314/314 通过。
+
+Windows 候选校验（源仓库运行 46102235062） 中，v3 配置更新用例第一次运行收到 HTTP 400，第二次通过。原用例将同一个仅按 TCP 探测的端口用于 UDP。在本机占用该号 UDP 端口时，可重现监听绑定失败的 HTTP 400。改用按实际协议预留的端口后，在相同占用条件下通过了 UDP 过滤、旧摘要和确认帧断言。测试现在会在更新失败时显示协议和服务端返回的原因。
+
+另一次 Windows CI（源仓库运行 46103022907） 捕获到 HTTPS 用例在客户端构建 X.509 证书链时失败。夹具对不同密钥反复使用同一签发者名称，本机当前用户的中间证书缓存中有 66 张匹配该名称的旧测试证书。测试现为每条链生成独立签发者名称和密钥标识，客户端只信任本次测试根，并禁用签发者证书下载。Windows 上 HTTP 宿主 28 项用例通过，另在 12 个独立进程中验证了缺中间证书时握手失败且上游未收到请求、提供完整 PEM 链时请求成功。
+
+AdminWeb 15 项、AgentWeb 5 项和网站 6 项测试通过。Chromium 使用构建产物和模拟 API 响应，在 1440 × 900 与 390 × 844 两种窗口下核对了明文连接标识、HTTP 强制加密、审计原因、可用入口计数和长地址显示。真实进程测试另行验证了状态接口对配置变化的响应。P2P 直连和自动回退仍在[首期设计](../design/peer-direct-and-relay.md)中，双 NAT 实网验证待完成。
+
+## 2026-11-27 互访中继控制面与 QUIC 路径
+
+Windows x64、.NET SDK 10.0.115、Release。在真实 Server 与 Agent 进程中，加密和明文 raw TCP 的双向传输及半关闭、按来源隔离的 UDP 回包均经现有入口。加密与明文分别以启用和省略新能力的调用端提交错误证明，四种组合的目标拨号计数均为零。状态机测试覆盖不同握手标识、重复角色回执、过期尝试、撤权及数据流中的旧就绪字节。[进程测试](../../tests/RelayLink.IntegrationTests/PeerConnectionTests.cs) · [控制面回归](../../tests/RelayLink.UnitTests/PeerRelayControlTests.cs)
+
+QUIC 实验使用本机 MsQuic、固定证书指纹和两个回环 UDP 端点。收发探测包后保留两个套接字，经同一对地址和端口完成 QUIC 握手、正反向字节校验、空及最大 UDP 记录、半关闭。该实验未经过 NAT。生产端尚未开放 ICE 候选交换、直连选路、租约或自动回退。[QUIC 实验](../../tests/RelayLink.IntegrationTests/PeerQuicPathTests.cs) · [首期设计](../design/peer-direct-and-relay.md)
+
+Astra 对本次实现做了独立代码审查，并复核修订。建立超时可立即结束该尝试，共享控制连接会写完已经开始的帧。目标必须回显本次准备许可，Server 在最终放行时复核截止和授权。等待中的连接继续计入待建立额度，配置摘要按已发布配置和协议版本缓存。回归用例暂停最后一条就绪帧，验证尝试先结束、同一连接随后仍能读出完整心跳。配额用例把全局待建立上限设为 1，验证第二个请求在首个目标确认之前被拒绝。[慢写与握手测试](../../tests/RelayLink.UnitTests/PeerRelayControlTests.cs) · [配额与配置版本测试](../../tests/RelayLink.UnitTests/PeerRelayReliabilityTests.cs)
+
+最终解决方案 Release 构建为 0 警告、0 错误。单元测试 310/310，开启互访 TLS 与两组旧端用例后的集成测试 133/133，均无跳过。v3、v4 分别使用 rc.8、rc.9 的 Windows 发行包，已核对 ZIP 的 SHA-256 及解压 DLL 与包内文件的一致性。此前一次全量运行的 HTTP 中间证书用例失败，在最终全量运行和随后三次单项运行中均通过。[旧端运行参数](http-reverse-proxy-verification.md)
 
 ## 2026-10-24 Windows 端口状态替换
 

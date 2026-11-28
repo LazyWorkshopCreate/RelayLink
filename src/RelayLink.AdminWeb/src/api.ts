@@ -23,6 +23,25 @@ export const hasAllTags = (tags: string[] | undefined, required: string[]) => {
     return required.every((tag) => normalized.has(tag.toLowerCase()));
 };
 
+const operationErrors: Record<string, string> = {
+    'Agent-to-Agent authorization requires tunnel TLS to protect access-secret distribution.':
+        '授权互访需要控制连接 TLS 保护访问密钥下发。请先在服务端启用控制 TLS。',
+    'HTTP requires control TLS.': 'HTTP 代理要求服务端启用控制连接 TLS。',
+    'Target client has not registered an E2E certificate yet.':
+        '目标客户端尚未登记证书指纹，请先启动目标 Agent 完成首次上线。',
+    'Target authorized channel was not found.': '未找到启用的目标授权通道，请刷新并检查目标配置。',
+    'Target client ID and channel ID are required.': '请选择目标客户端和授权通道。',
+    'Generated access entry ID already exists.': '该目标已有互访入口，请检查现有入口。',
+    'Channel ID already exists.': '通道 ID 已存在，请更换 ID。',
+    'Channel was not found.': '通道已不存在，请刷新页面。',
+    'Client was not found.': '客户端已不存在，请刷新页面。',
+    'Mapping was not found.': '互访入口已不存在，请刷新页面。',
+    'History storage is unavailable.': '历史流量存储不可用，请检查服务端存储。',
+    'A valid Agent server host (without a port) is required.':
+        '请输入 Agent 可达的服务端主机名或 IP，端口另行填写。',
+    'Configure tunnel.trustedCaPemPath on the server before creating clients.':
+        '请先在服务端配置 tunnel.trustedCaPemPath，再创建客户端。',
+};
 async function readErrorMessage(response: Response): Promise<string> {
     const body = (await response.json().catch(() => ({}))) as {
         error?: string;
@@ -30,9 +49,8 @@ async function readErrorMessage(response: Response): Promise<string> {
         message?: string;
         title?: string;
     };
-    return (
-        body.error || body.detail || body.message || body.title || `${response.status} ${response.statusText}`
-    );
+    const message = body.error || body.detail || body.message || body.title;
+    return message ? (operationErrors[message] ?? message) : `请求失败（HTTP ${response.status}）`;
 }
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {

@@ -11,6 +11,26 @@ public sealed class HttpProxyLegacyAgentTests
         ?? throw new InvalidOperationException("Set RELAYLINK_LEGACY_V4_AGENT_ASSEMBLY to the checksum-verified unmodified rc.9 Agent DLL.");
 
     [Theory]
+    [InlineData(true, true)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(false, false)]
+    public async Task Unicast_udp_uses_legacy_readiness_when_either_peer_is_v4(bool oldCaller, bool encrypted)
+    {
+        using var fixture = new PeerConnectionTests.Fixture();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        await fixture.StartAsync(udp: true, encryption: encrypted, callerAssembly: oldCaller ? Legacy : null, targetAssembly: oldCaller ? null : Legacy);
+        await fixture.WaitOnlineAsync(deadline.Token);
+        using var socket = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
+        socket.Connect(IPAddress.Loopback, fixture.LocalPort);
+        foreach (var payload in new byte[][] { [], [12, 34, 56] })
+        {
+            await socket.SendAsync(payload, deadline.Token);
+            Assert.Equal(payload, (await socket.ReceiveAsync(deadline.Token)).Buffer);
+        }
+    }
+
+    [Theory]
     [InlineData(true, false)]
     [InlineData(false, true)]
     [InlineData(true, true)]

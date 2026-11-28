@@ -3,13 +3,14 @@
 | 文档 | ID | 状态 | 用途 |
 |---|---|---|---|
 | [公开仓库同步](development/public-repository-sync.md) | DEV-007 | Active | 版本来源、脱敏和公开适配 |
+| [移除 Agent 本机页的「连接方式」菜单](requirements/2026-11-28-remove-agent-connection-menu.md) | REQ-001Q | Draft | 普通 TCP 互访入口的菜单移除范围、原始截图和验收条件 |
 | [Agent 本机页的系统工具入口](adr/0042-agent-native-tool-links.md) | ADR-0042 | Accepted | 使用浏览器链接、系统 SSH 和 RDP 连接文件 |
 | [AI 自动化与服务端管理 SDK 需求](requirements/2026-11-05-ai-automation-and-sdk.md) | REQ-001P | Draft | 供 AI agent 的 skill/CLI/API 经加密互访通道管理服务端并强制控制台授权，供第三方应用的六语言 SDK，A108–A119 |
 | [AI 自动化与第三方 SDK 设计](design/ai-automation-and-sdk.md) | DES-010 | Draft | 自动化监听与配对、设备绑定令牌、scope 与风险分级、变更申请、CLI/skill 合约、SDK 分层与语言基线 |
 | [AI 自动化经加密互访通道](adr/0035-ai-automation-over-peer-channel.md) | ADR-0035 | Proposed | 不新增公网管理入口；一次性配对 + 管理页面批准 + 短时设备绑定令牌 |
 | [AI 自动化与 SDK 验证](testing/ai-automation-verification.md) | TST-014 | Active | 自动化管理面、CLI、skill 与六语言 SDK 验证记录；明确列出未验证项 |
 | [第三方 SDK 面向入口](adr/0036-third-party-sdk-over-entries.md) | ADR-0036 | Proposed | 不开放 `NTP1` 协议；SDK 只连入口，管理面复用自动化 API（首期仅 .NET） |
-| [需求文档索引](requirements/README.md) | REQ-001A–REQ-001P | Draft / Accepted / Done | 按日期与主题拆分的需求范围、功能与验收；实现进度见验证状态 |
+| [需求文档索引](requirements/README.md) | REQ-001A–REQ-001Q | Draft / Accepted / Done | 按日期与主题拆分的需求范围、功能与验收；实现进度见验证状态 |
 | [HTTP/HTTPS 反向代理需求](requirements/2026-10-12-http-reverse-proxy.md) | REQ-001N | Accepted | 公网与加密互访 HTTP/HTTPS、目标 Agent Host/Origin 策略，A85–A91；证据与目标环境缺口见验证记录 |
 | [HTTP 反向代理设计与 YARP 评估](design/http-reverse-proxy.md) | DES-008 | Draft | 主线已实现的目标 Agent YARP 与虚拟入口；文首说明哪些章节仍是草案 |
 | [目标 Agent HTTP 与隧道复用](adr/0026-http-proxy-over-tcp-tunnels.md) | ADR-0026 | Accepted | 目标端统一处理 HTTP，公网 TLS 透传、互访保持加密；用户明确采用，实际证据见 HTTP 验证 |
@@ -39,6 +40,8 @@
 | [Agent 服务端配置仅通过导入修改](adr/0022-import-only-agent-profile-changes.md) | ADR-0022 | Accepted | 导入式新增与修改、身份保留和单项重连 |
 | [Agent 服务端连接项持久化停用](adr/0023-persistent-agent-profile-disable.md) | ADR-0023 | Accepted | 服务端连接项停用、重新启用与重启后状态保留 |
 | [安全互访设计](design/agent-to-agent.md) | DES-002 | Draft | Agent↔Agent 授权、内层 TLS 与协议增量 |
+| [P2P 直连与中继回退](design/peer-direct-and-relay.md) | DES-011 | Draft | 已接入互访中继控制面。QUIC 仅完成回环实验，P2P 直连和自动回退待实现 |
+| [授权互访优先直连](adr/0043-peer-direct-with-relay-fallback.md) | ADR-0043 | Proposed | 由 Server 协调直连并保留现有中继的拟议取舍 |
 | [互访架构决策](adr/0005-agent-to-agent-tls.md) | ADR-0005 | Superseded（身份登记部分） | 服务端协调、密文中继与原身份登记取舍 |
 | [客户端级端到端身份](adr/0011-client-level-e2e-identity.md) | ADR-0011 | Accepted | Agent 自动上报、首次固定、拒绝旧通道指纹字段 |
 | [Agent 自主管理入口端口](adr/0006-agent-owned-access-ports.md) | ADR-0006 | Accepted | 本机端口选择、持久化、状态上报及只读页面 |

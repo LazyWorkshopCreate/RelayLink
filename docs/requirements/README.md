@@ -19,6 +19,7 @@
 | [网站多页重构](2026-10-05-website-multipage.md) | REQ-001M | Accepted | 首页精简、使用/文档/发布列表与详情、A80–A84 |
 | [HTTP/HTTPS 反向代理](2026-10-12-http-reverse-proxy.md) | REQ-001N | Accepted | 保留 TCP 透传，公网与加密互访均支持目标 Agent HTTP/HTTPS 和 Host/Origin 策略，A85–A91；已实现基线，完整验收证据与目标环境缺口单列 |
 | [AI 自动化与服务端管理 SDK](2026-11-05-ai-automation-and-sdk.md) | REQ-001P | Draft | 供 AI agent 的 skill/CLI/API 经端到端加密通道管理服务端设置、控制台人工授权、风险分级与变更申请；供第三方应用的 SDK：六语言数据面齐备，管理面首期仅 C#/.NET，A108–A119 |
+| [移除 Agent 本机页的「连接方式」菜单](2026-11-28-remove-agent-connection-menu.md) | REQ-001Q | Draft | 移除普通 TCP 入口的快捷操作，保留地址复制及已就绪的 Web 入口，A120–A122 |
 
 需求编号和验收编号沿用原文，不因拆分重排。当前存在两个历史 `A28`：一个属于 Windows 安装包升级，一个属于控制/数据入口验证；本次只做结构拆分，不改写既有编号语义。
 

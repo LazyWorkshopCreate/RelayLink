@@ -10,7 +10,7 @@ public sealed class RelayIdleWatch : IDisposable
     private readonly Task watcher = Task.CompletedTask;
     private int disposed;
 
-    public RelayIdleWatch(TimeSpan idleTimeout, CancellationToken parent = default, TimeProvider? timeProvider = null)
+    public RelayIdleWatch(TimeSpan idleTimeout, CancellationToken parent = default, TimeProvider? timeProvider = null, Task? startAfter = null)
     {
         this.timeProvider = timeProvider ?? TimeProvider.System;
         lastActivity = this.timeProvider.GetTimestamp();
@@ -22,7 +22,7 @@ public sealed class RelayIdleWatch : IDisposable
 
         linked = CancellationTokenSource.CreateLinkedTokenSource(parent, owned.Token);
         Token = linked.Token;
-        watcher = WatchAsync(idleTimeout);
+        watcher = WatchAsync(idleTimeout, startAfter);
     }
 
     public CancellationToken Token { get; }
@@ -46,10 +46,15 @@ public sealed class RelayIdleWatch : IDisposable
         }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
     }
 
-    private async Task WatchAsync(TimeSpan idleTimeout)
+    private async Task WatchAsync(TimeSpan idleTimeout, Task? startAfter)
     {
         try
         {
+            if (startAfter is not null)
+            {
+                await startAfter.WaitAsync(Token);
+                Touch();
+            }
             while (!Token.IsCancellationRequested)
             {
                 var remaining = idleTimeout - timeProvider.GetElapsedTime(Volatile.Read(ref lastActivity));

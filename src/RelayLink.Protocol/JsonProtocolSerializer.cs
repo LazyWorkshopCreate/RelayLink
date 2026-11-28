@@ -32,6 +32,10 @@ public static class JsonProtocolSerializer
             obj.Remove("applicationProtocol");
             obj.Remove("http");
             obj.Remove("httpIngress");
+            obj.Remove("relayControlReady");
+            obj.Remove("mappingEncryptionStatus");
+            if (obj.ContainsKey("mappingId") && obj.ContainsKey("accessSecret")) obj.Remove("endToEndEncryptionEnabled");
+            obj.Remove("relayBinding");
             if (version == 3) { obj.Remove("transportProtocol"); obj.Remove("udpIdleTimeoutSeconds"); }
             foreach (var property in obj) RemoveNewFields(property.Value, version);
         }

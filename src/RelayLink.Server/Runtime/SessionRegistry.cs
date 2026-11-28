@@ -49,6 +49,8 @@ public sealed class Session(Guid sessionId, string clientId, DateTimeOffset conn
     public TimeSpan? LastHeartbeatRtt => Heartbeat.Rtt;
     public string? AgentVersion { get; set; }
     public byte ProtocolVersion { get; set; } = ProtocolConstants.Version;
+    public bool RelayControlReady { get; internal set; }
+    public bool MappingEncryptionStatus { get; internal set; }
     private FrameWriter? ControlWriter { get; set; }
     private long expectedPongSequence;
     private long pingTimestamp;
@@ -161,12 +163,16 @@ public sealed class Session(Guid sessionId, string clientId, DateTimeOffset conn
         configUpdateLock.Dispose();
     }
 
-    public async ValueTask SendAsync(Frame frame, CancellationToken cancellationToken)
+    public ValueTask SendAsync(Frame frame, CancellationToken cancellationToken) => SendAsync(frame, cancellationToken, false);
+    internal ValueTask SendPeerControlAsync(Frame frame, CancellationToken cancellationToken) => SendAsync(frame, cancellationToken, true);
+
+    private async ValueTask SendAsync(Frame frame, CancellationToken cancellationToken, bool peerControl)
     {
         var writer = ControlWriter ?? throw new InvalidOperationException("Control writer is not available.");
         try
         {
-            await writer.WriteAsync(frame, cancellationToken);
+            if (peerControl) await writer.WriteControlAsync(frame, cancellationToken, LifetimeToken);
+            else await writer.WriteAsync(frame, cancellationToken);
         }
         catch (FrameWriteException)
         {

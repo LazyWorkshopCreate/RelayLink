@@ -17,6 +17,20 @@ type MappingTools =
           rdpFile: string | null;
       };
 
+export function mappingPresence(
+    mapping: MappingEndpoint,
+    serverOnline: boolean,
+): "online" | "offline" | "disabled" {
+    if (!mapping.enabled) return "disabled";
+    if (!serverOnline || !mapping.localAddress) return "offline";
+    if (
+        mapping.applicationProtocol === "http" &&
+        mappingTools(mapping, false)?.kind !== "web"
+    )
+        return "offline";
+    return "online";
+}
+
 export function mappingTools(
     mapping: MappingEndpoint,
     supportsRdp: boolean,

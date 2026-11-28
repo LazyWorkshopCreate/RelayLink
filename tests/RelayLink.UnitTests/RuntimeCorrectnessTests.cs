@@ -59,6 +59,22 @@ public sealed class RuntimeCorrectnessTests
     }
 
     [Fact]
+    public async Task Idle_budget_starts_when_the_target_is_ready()
+    {
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var time = new ManualTimeProvider();
+        using var idle = new RelayIdleWatch(TimeSpan.FromSeconds(1), deadline.Token, time, ready.Task);
+        time.Advance(TimeSpan.FromMinutes(2));
+        Assert.False(idle.Token.IsCancellationRequested);
+        ready.SetResult();
+        await time.WaitForTimerCountAsync(1, deadline.Token);
+        time.Advance(TimeSpan.FromSeconds(1));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => Task.Delay(Timeout.Infinite, idle.Token).WaitAsync(deadline.Token));
+        Assert.True(idle.Token.IsCancellationRequested && !deadline.IsCancellationRequested);
+    }
+
+    [Fact]
     public async Task Activity_defers_the_idle_watch()
     {
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));

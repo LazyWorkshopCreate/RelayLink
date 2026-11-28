@@ -76,7 +76,9 @@ public sealed class ControlSessionWorker(AgentConfiguration configuration, Agent
 
         var reader = new FrameReader(tls);
         var writer = new FrameWriter(tls);
-        await writer.WriteAsync(new Frame(FrameType.Register, JsonProtocolSerializer.Serialize(new RegisterMessage(configuration.ClientId, configuration.Secret, GetType().Assembly.GetName().Version?.ToString() ?? "0.0.0", identity.Fingerprint))), handshakeTimeout.Token);
+        var offerRelayControl = tls is SslStream { IsAuthenticated: true, IsEncrypted: true };
+        await writer.WriteAsync(new Frame(FrameType.Register, JsonProtocolSerializer.Serialize(new RegisterMessage(configuration.ClientId, configuration.Secret, GetType().Assembly.GetName().Version?.ToString() ?? "0.0.0", identity.Fingerprint)
+        { RelayControlReady = offerRelayControl, MappingEncryptionStatus = true })), handshakeTimeout.Token);
         var accepted = await reader.ReadAsync(ProtocolConstants.MaxControlPayloadLength, handshakeTimeout.Token);
         if (accepted?.Type == FrameType.Error) throw AgentPermanentException.FromServerError(accepted, "registration");
         if (accepted?.Type != FrameType.RegisterAccepted) throw new ProtocolException("Expected RegisterAccepted.");
@@ -97,7 +99,8 @@ public sealed class ControlSessionWorker(AgentConfiguration configuration, Agent
         logger.LogInformation("Agent control session is online with session {SessionId}.", registration.SessionId);
         using var sessionCancellation = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
         var activeConfiguration = new SessionConfiguration(registration.ConfigVersion, registration.Config);
-        await using var peerSession = new PeerSessionCoordinator(configuration, identity, registration.SessionId, writer, logger, quota, sessionCancellation.Token, httpProxy, halfCloseDrainTimeout, tcpIdleTimeout);
+        await using var peerSession = new PeerSessionCoordinator(configuration, identity, registration.SessionId, writer, logger, quota, sessionCancellation.Token, httpProxy, halfCloseDrainTimeout, tcpIdleTimeout,
+            offerRelayControl && registration.RelayControlReady);
         await httpProxy.PrepareAsync(registration.Config, sessionCancellation.Token);
         await writer.WriteAsync(new Frame(FrameType.HttpStatus, JsonProtocolSerializer.Serialize(new HttpStatusMessage(registration.SessionId, registration.ConfigVersion, httpProxy.States))), sessionCancellation.Token);
         peerSession.ApplyConfiguration(httpProxy.EffectivePeerConfiguration(registration.Config));
@@ -164,6 +167,11 @@ public sealed class ControlSessionWorker(AgentConfiguration configuration, Agent
                 if (frame.Type == FrameType.PeerOpenGranted)
                 {
                     peerSession.Grant(JsonProtocolSerializer.Deserialize<PeerOpenGrantedMessage>(frame.Payload.Span));
+                    continue;
+                }
+                if (frame.Type is FrameType.PeerRelayPrepare or FrameType.PeerRelayTargetReady or FrameType.PeerRelayAborted)
+                {
+                    peerSession.ReceiveRelaySignal(frame.Type, JsonProtocolSerializer.Deserialize<PeerRelaySignal>(frame.Payload.Span));
                     continue;
                 }
                 if (frame.Type == FrameType.PeerOpenRejected)

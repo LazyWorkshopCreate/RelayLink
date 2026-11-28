@@ -26,6 +26,10 @@ public enum FrameType : byte
     PeerMappingStatus = 22,
     HttpStatus = 23,
     HttpIngressReady = 24,
+    PeerRelayAuthenticated = 25,
+    PeerRelayPrepare = 26,
+    PeerRelayTargetReady = 27,
+    PeerRelayAborted = 28,
     Data = 32,
     Fin = 33,
     Reset = 34

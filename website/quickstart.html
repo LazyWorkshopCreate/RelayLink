@@ -36,7 +36,7 @@
                                 </button>
                                 <div class="step-panel" id="step-2-panel" hidden>
                                     <p>打开管理页面并登录，为每台 Agent 创建独立客户端，再下载专属 JSON 配置。</p>
-                                    <p class="hint">客户端配置含访问密钥，不得共用，也不要提交到仓库。</p>
+                                    <p class="hint">客户端配置含注册密钥。请为每台 Agent 单独创建配置，妥善保管。</p>
                                 </div>
                             </article>
                             <article class="step" data-step="3">
@@ -58,8 +58,8 @@
                                     <svg aria-hidden="true" viewBox="0 0 16 16"><path d="m4 6 4 4 4-4" /></svg>
                                 </button>
                                 <div class="step-panel" id="step-4-panel" hidden>
-                                    <p>确认客户端在线后创建通道，选择 TCP 或 UDP，填写 Agent 所在内网可达的固定目标主机和端口。</p>
-                                    <p class="hint">普通通道可配置来源 IP 安全组；Agent 互访则创建访问映射。</p>
+                                    <p>确认客户端在线后创建通道，选择 TCP 或单播 UDP，填写 Agent 所在内网可达的固定目标主机和端口。</p>
+                                    <p class="hint">普通通道可配置来源 IP 安全组。授权互访请在访问方选择“添加互访入口”创建访问映射。</p>
                                 </div>
                             </article>
                         </div>

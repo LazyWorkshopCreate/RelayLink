@@ -132,7 +132,7 @@ public sealed class ChannelConfigurationEditor(
             var primaryOnline = hasSession && session is { IsReady: true };
             if (!onlyTagsChanged && hasSession && session is { HasCompletedHandshake: true })
             {
-                var (snapshot, version) = ConfigurationSnapshotFactory.Create(updatedClient, updatedConfiguration, session!.ProtocolVersion);
+                var (snapshot, version) = ConfigurationSnapshotFactory.Create(updatedClient, updatedConfiguration, session!);
                 attempted = true;
                 var failure = await ConfigurationPush.TrySendAsync(session, snapshot, version, cancellationToken);
                 if (failure is not null) failures.Add(failure);
@@ -141,8 +141,8 @@ public sealed class ChannelConfigurationEditor(
                 c.OutboundMappings.Any(m => m.TargetClientId == clientId)))
             {
                 if (!sessions.TryGet(dependent.ClientId, out var dependentSession) || dependentSession is not { IsReady: true }) continue;
-                var before = ConfigurationSnapshotFactory.Create(dependent, current, dependentSession.ProtocolVersion);
-                var after = ConfigurationSnapshotFactory.Create(dependent, updatedConfiguration, dependentSession.ProtocolVersion);
+                var before = ConfigurationSnapshotFactory.Create(dependent, current, dependentSession);
+                var after = ConfigurationSnapshotFactory.Create(dependent, updatedConfiguration, dependentSession);
                 if (before.Version == after.Version) continue;
                 attempted = true;
                 var failure = await ConfigurationPush.TrySendAsync(dependentSession, after.Snapshot, after.Version, cancellationToken);

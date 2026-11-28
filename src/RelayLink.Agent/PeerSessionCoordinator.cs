@@ -22,9 +22,11 @@ internal sealed class PeerSessionCoordinator(
     CancellationToken sessionToken,
     HttpProxyRuntime? httpProxy = null,
     TimeSpan? halfCloseDrainTimeout = null,
-    TimeSpan? tcpIdleTimeout = null) : IAsyncDisposable
+    TimeSpan? tcpIdleTimeout = null,
+    bool relayControlReady = false) : IAsyncDisposable
 {
     private readonly ConcurrentDictionary<Guid, TaskCompletionSource<PeerOpenGrantedMessage>> requests = new();
+    private readonly ConcurrentDictionary<Guid, PeerRelayConfirmation> relayConfirmations = new();
     private readonly Dictionary<string, LocalBinding> listeners = new(StringComparer.Ordinal);
     private readonly AgentPortAllocator ports = new(agent.PortStatePath, agent.OutboundPortRangeStart, agent.OutboundPortRangeEnd);
     private readonly ConcurrentDictionary<long, Task> active = new();
@@ -110,6 +112,7 @@ internal sealed class PeerSessionCoordinator(
         }
 
         Volatile.Write(ref snapshot, configuration);
+        foreach (var confirmation in relayConfirmations.Values) confirmation.CheckConfiguration(configuration);
         var wanted = configuration.OutboundMappings.Where(mapping => mapping.Enabled).ToDictionary(mapping => mapping.MappingId, StringComparer.Ordinal);
         foreach (var existing in listeners.Values.ToArray())
         {
@@ -138,6 +141,30 @@ internal sealed class PeerSessionCoordinator(
                 logger.LogWarning(exception, "Peer loopback listener {MappingId} could not bind; other mappings continue.", mapping.MappingId);
             }
         }
+    }
+
+    public void ReceiveRelaySignal(FrameType type, PeerRelaySignal signal)
+    {
+        if (!relayControlReady || signal.Binding is null) throw new ProtocolException("Unexpected relay control signal.");
+        if (relayConfirmations.TryGetValue(signal.Binding.ConnectionId, out var confirmation)) confirmation.Receive(type, signal);
+    }
+
+    private PeerRelayConfirmation? BeginRelaySetup(PeerRelayBinding? binding, bool target, Guid connectionId,
+        string callerClient, string targetClient, string? mappingId, string channelId, string transport, bool encrypted,
+        string application, CancellationTokenSource deadline, Func<ClientConfigSnapshot, bool> authorized)
+    {
+        if (binding is null) return null;
+        if (!relayControlReady || application != "raw" || binding.ConnectionId != connectionId || binding.AttemptId == Guid.Empty ||
+            binding.CallerSessionId == Guid.Empty || binding.TargetSessionId == Guid.Empty || binding.CallerSessionId == binding.TargetSessionId ||
+            (target ? binding.TargetSessionId : binding.CallerSessionId) != sessionId || binding.CallerClientId != callerClient || binding.TargetClientId != targetClient ||
+            string.IsNullOrWhiteSpace(binding.MappingId) || (mappingId is not null && binding.MappingId != mappingId) ||
+            binding.ChannelId != channelId || binding.TransportProtocol != transport || binding.EndToEndEncryptionEnabled != encrypted)
+            throw new ProtocolException("Relay binding does not match the authorized peer.");
+        var confirmation = new PeerRelayConfirmation(binding, target, controlWriter, deadline, sessionToken, authorized,
+            () => relayConfirmations.TryRemove(connectionId, out _));
+        if (!relayConfirmations.TryAdd(connectionId, confirmation)) throw new ProtocolException("Duplicate relay attempt.");
+        confirmation.CheckConfiguration(Volatile.Read(ref snapshot));
+        return confirmation;
     }
 
     public void Grant(PeerOpenGrantedMessage response)
@@ -245,10 +272,15 @@ internal sealed class PeerSessionCoordinator(
             requests[requestId] = reply;
             try
             {
-                await controlWriter.WriteAsync(new Frame(FrameType.PeerOpenRequest, JsonProtocolSerializer.Serialize(new PeerOpenRequestMessage(requestId, mapping.MappingId))), deadline.Token);
+                await controlWriter.WriteControlAsync(new Frame(FrameType.PeerOpenRequest, JsonProtocolSerializer.Serialize(new PeerOpenRequestMessage(requestId, mapping.MappingId))), deadline.Token, sessionToken);
                 var grant = await reply.Task.WaitAsync(deadline.Token);
                 deadline.CancelAfter(PeerSetupDeadline(grant.SetupTimeoutMilliseconds, 0));
+                if (mapping.EndToEndEncryptionEnabled is { } encrypted && encrypted != grant.EndToEndEncryptionEnabled)
+                    throw new ProtocolException("Peer encryption mode changed; wait for updated configuration.");
                 if (grant.TransportProtocol != mapping.TransportProtocol) throw new ProtocolException("Peer transport changed; wait for updated configuration.");
+                await using var confirmation = BeginRelaySetup(grant.RelayBinding, false, grant.ConnectionId, agent.ClientId, mapping.TargetClientId,
+                    mapping.MappingId, mapping.TargetChannelId, mapping.TransportProtocol, grant.EndToEndEncryptionEnabled, mapping.ApplicationProtocol, deadline,
+                    config => config.OutboundMappings.Contains(mapping));
                 await using var connection = await ConnectDataAsync(grant.ConnectionId, grant.SessionId, grant.Token, "caller", deadline.Token);
                 using var tls = grant.EndToEndEncryptionEnabled ? new SslStream(connection.Framed, leaveInnerStreamOpen: true) : null;
                 Stream peerStream = connection.Framed;
@@ -271,18 +303,23 @@ internal sealed class PeerSessionCoordinator(
                     grant.HttpIngress.EntryAuthority != $"{mapping.Http.AuthorityHost}:{((IPEndPoint)caller!.LocalEndPoint!).Port}"))
                     throw new ProtocolException("HTTP mapping context mismatch.");
                 if (mapping.ApplicationProtocol != "http" && grant.HttpIngress is not null) throw new ProtocolException("Raw mapping received HTTP context.");
-                var challenge = new byte[32];
-                await peerStream.ReadExactlyAsync(challenge, deadline.Token);
-                var proof = ComputeProof(mapping.AccessSecret, agent.ClientId, mapping.TargetChannelId, grant.ConnectionId, grant.EndToEndEncryptionEnabled, challenge, grant.HttpIngress);
-                await peerStream.WriteAsync(proof, deadline.Token);
-                var status = new byte[1];
-                await peerStream.ReadExactlyAsync(status, deadline.Token);
-                if (status[0] != (mapping.ApplicationProtocol == "http" ? 2 : 1)) throw new IOException("Peer target was not ready.");
+                if (confirmation is not null)
+                    await confirmation.AuthenticateAsync(peerStream, mapping.AccessSecret);
+                else
+                {
+                    var challenge = new byte[32];
+                    await peerStream.ReadExactlyAsync(challenge, deadline.Token);
+                    var proof = ComputeProof(mapping.AccessSecret, agent.ClientId, mapping.TargetChannelId, grant.ConnectionId, grant.EndToEndEncryptionEnabled, challenge, grant.HttpIngress);
+                    await peerStream.WriteAsync(proof, deadline.Token);
+                    var status = new byte[1];
+                    await peerStream.ReadExactlyAsync(status, deadline.Token);
+                    if (status[0] != (mapping.ApplicationProtocol == "http" ? 2 : 1)) throw new IOException("Peer target was not ready.");
+                }
                 lease.MarkActive();
                 deadline.CancelAfter(Timeout.InfiniteTimeSpan);
                 if (datagram is not null) await datagram.RelayAsync(peerStream, mapping.UdpIdleTimeoutSeconds, deadline.Token);
-                else if (tls is not null) await RelayEncryptedSocketAsync(caller!, tls, connection.Framed, sessionToken, halfCloseDrainTimeout ?? TimeSpan.FromSeconds(300), tcpIdleTimeout ?? TimeSpan.Zero, connection.Abort);
-                else await RelayPlainSocketAsync(caller!, connection.Framed, sessionToken, halfCloseDrainTimeout ?? TimeSpan.FromSeconds(300), tcpIdleTimeout ?? TimeSpan.Zero, connection.Abort);
+                else if (tls is not null) await RelayEncryptedSocketAsync(caller!, tls, connection.Framed, deadline.Token, halfCloseDrainTimeout ?? TimeSpan.FromSeconds(300), tcpIdleTimeout ?? TimeSpan.Zero, connection.Abort);
+                else await RelayPlainSocketAsync(caller!, connection.Framed, deadline.Token, halfCloseDrainTimeout ?? TimeSpan.FromSeconds(300), tcpIdleTimeout ?? TimeSpan.Zero, connection.Abort);
             }
             catch (Exception exception) when (exception is IOException or SocketException or OperationCanceledException or AuthenticationException or ProtocolException)
             {
@@ -305,6 +342,9 @@ internal sealed class PeerSessionCoordinator(
         deadline.CancelAfter(PeerSetupDeadline(open.SetupTimeoutMilliseconds, channel.TargetConnectTimeoutSeconds));
         try
         {
+            await using var confirmation = BeginRelaySetup(open.RelayBinding, true, open.ConnectionId, open.CallerClientId, agent.ClientId,
+                null, channel.ChannelId, channel.TransportProtocol, channel.EndToEndEncryptionEnabled, channel.ApplicationProtocol, deadline,
+                config => config.Channels.Contains(channel));
             await using var connection = await ConnectDataAsync(open.ConnectionId, open.SessionId, open.Token, "target", deadline.Token);
             using var tls = open.EndToEndEncryptionEnabled ? new SslStream(connection.Framed, leaveInnerStreamOpen: true) : null;
             Stream peerStream = connection.Framed;
@@ -320,12 +360,17 @@ internal sealed class PeerSessionCoordinator(
                 if (!tls.IsEncrypted) throw new AuthenticationException("Peer TLS is not encrypted.");
                 peerStream = tls;
             }
-            var challenge = RandomNumberGenerator.GetBytes(32);
-            await peerStream.WriteAsync(challenge, deadline.Token);
-            var provided = new byte[32];
-            await peerStream.ReadExactlyAsync(provided, deadline.Token);
-            var expected = ComputeProof(channel.AccessSecret, open.CallerClientId, channel.ChannelId, open.ConnectionId, open.EndToEndEncryptionEnabled, challenge, open.HttpIngress);
-            if (!CryptographicOperations.FixedTimeEquals(provided, expected)) throw new AuthenticationException("Peer access proof was invalid.");
+            if (confirmation is not null)
+                await confirmation.AuthenticateAsync(peerStream, channel.AccessSecret);
+            else
+            {
+                var challenge = RandomNumberGenerator.GetBytes(32);
+                await peerStream.WriteAsync(challenge, deadline.Token);
+                var provided = new byte[32];
+                await peerStream.ReadExactlyAsync(provided, deadline.Token);
+                var expected = ComputeProof(channel.AccessSecret, open.CallerClientId, channel.ChannelId, open.ConnectionId, open.EndToEndEncryptionEnabled, challenge, open.HttpIngress);
+                if (!CryptographicOperations.FixedTimeEquals(provided, expected)) throw new AuthenticationException("Peer access proof was invalid.");
+            }
 
             if (channel.ApplicationProtocol == "http")
             {
@@ -341,10 +386,11 @@ internal sealed class PeerSessionCoordinator(
                 using var targetTimeout = CancellationTokenSource.CreateLinkedTokenSource(deadline.Token);
                 targetTimeout.CancelAfter(TimeSpan.FromSeconds(channel.TargetConnectTimeoutSeconds));
                 using var udp = await DatagramRelay.ConnectTargetAsync(channel.TargetHost, channel.TargetPort, targetTimeout.Token);
-                await peerStream.WriteAsync(new byte[] { 1 }, deadline.Token);
+                if (confirmation is not null) await confirmation.TargetReadyAsync();
+                else await peerStream.WriteAsync(new byte[] { 1 }, deadline.Token);
                 lease.MarkActive();
                 deadline.CancelAfter(Timeout.InfiniteTimeSpan);
-                await DatagramRelay.RunTargetAsync(peerStream, udp, channel.UdpIdleTimeoutSeconds, sessionToken);
+                await DatagramRelay.RunTargetAsync(peerStream, udp, channel.UdpIdleTimeoutSeconds, deadline.Token);
                 return;
             }
             using var target = new TcpClient();
@@ -352,11 +398,12 @@ internal sealed class PeerSessionCoordinator(
             targetDeadline.CancelAfter(TimeSpan.FromSeconds(channel.TargetConnectTimeoutSeconds));
             await target.ConnectAsync(channel.TargetHost, channel.TargetPort, targetDeadline.Token);
             target.NoDelay = true;
-            await peerStream.WriteAsync(new byte[] { 1 }, deadline.Token);
+            if (confirmation is not null) await confirmation.TargetReadyAsync();
+            else await peerStream.WriteAsync(new byte[] { 1 }, deadline.Token);
             lease.MarkActive();
             deadline.CancelAfter(Timeout.InfiniteTimeSpan);
-            if (tls is not null) await RelayEncryptedSocketAsync(target.Client, tls, connection.Framed, sessionToken, halfCloseDrainTimeout ?? TimeSpan.FromSeconds(300), tcpIdleTimeout ?? TimeSpan.Zero, connection.Abort);
-            else await RelayPlainSocketAsync(target.Client, connection.Framed, sessionToken, halfCloseDrainTimeout ?? TimeSpan.FromSeconds(300), tcpIdleTimeout ?? TimeSpan.Zero, connection.Abort);
+            if (tls is not null) await RelayEncryptedSocketAsync(target.Client, tls, connection.Framed, deadline.Token, halfCloseDrainTimeout ?? TimeSpan.FromSeconds(300), tcpIdleTimeout ?? TimeSpan.Zero, connection.Abort);
+            else await RelayPlainSocketAsync(target.Client, connection.Framed, deadline.Token, halfCloseDrainTimeout ?? TimeSpan.FromSeconds(300), tcpIdleTimeout ?? TimeSpan.Zero, connection.Abort);
         }
         catch (Exception exception) when (exception is IOException or SocketException or OperationCanceledException or AuthenticationException or ProtocolException)
         {

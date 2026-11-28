@@ -49,6 +49,7 @@ export type Channel = {
     endToEndEncryptionEnabled?: boolean;
     securityGroupId?: string | null;
     available: boolean;
+    peerState?: string | null;
     listenAddress: string;
     listenPort: number;
     targetHost: string;
@@ -71,6 +72,7 @@ export type Channel = {
 };
 
 export type Mapping = {
+    endToEndEncryptionEnabled?: boolean | null;
     applicationProtocol?: 'raw' | 'http';
     httpState?: string | null;
     entryScheme?: 'http' | 'https' | null;
@@ -89,6 +91,7 @@ export type SecurityGroup = { id: string; name: string; entries: string[] };
 export type SecurityGroupForm = { id: string; name: string; entries: string };
 export type HistorySample = { timestampUtc: string; bytesToTarget: number; bytesToCaller: number };
 export type LiveConnection = {
+    endToEndEncryptionEnabled?: boolean | null;
     connectionId: string;
     kind: string;
     state: string;
@@ -170,9 +173,9 @@ export const auditLabels: Record<string, string> = {
     proxy_connection_opened: '普通连接建立',
     proxy_connection_closed: '普通连接断开',
     proxy_connection_rejected: '普通连接拒绝',
-    peer_connection_opened: '端到端连接建立',
-    peer_connection_closed: '端到端连接断开',
-    peer_connection_rejected: '端到端连接拒绝',
+    peer_connection_opened: '互访连接建立',
+    peer_connection_closed: '互访连接断开',
+    peer_connection_rejected: '互访连接拒绝',
     automation_pairing_requested: '自动化配对申请',
     automation_pairing_approved: '自动化配对批准',
     automation_pairing_denied: '自动化配对拒绝',

@@ -22,7 +22,13 @@ public sealed class HttpProxyHostTests
     [Fact]
     public async Task Ingress_sends_the_pem_intermediate_chain_without_installing_system_trust()
     {
-        await using var fixture = await Fixture.CreateAsync(https: true, intermediateCertificate: true);
+        await using (var missing = await Fixture.CreateAsync(https: true, entryChain: EntryChain.MissingIntermediate))
+        {
+            var error = await Assert.ThrowsAsync<HttpRequestException>(() => missing.Client.GetAsync("https://panel.test/echo"));
+            Assert.Equal(HttpRequestError.SecureConnectionError, error.HttpRequestError);
+            Assert.Equal(0, missing.Requests);
+        }
+        await using var fixture = await Fixture.CreateAsync(https: true, entryChain: EntryChain.WithIntermediate);
         using var response = await fixture.Client.GetAsync("https://panel.test/echo");
         response.EnsureSuccessStatusCode();
         Assert.Equal(1, fixture.Requests);
@@ -310,6 +316,8 @@ public sealed class HttpProxyHostTests
         Assert.Equal(string.Empty, customEcho["requestId"]);
     }
 
+    private enum EntryChain { RootSigned, WithIntermediate, MissingIntermediate }
+
     private sealed class Fixture : IAsyncDisposable
     {
         public HttpProxyHost Host = null!;
@@ -326,7 +334,7 @@ public sealed class HttpProxyHostTests
         private readonly List<Task> connections = [];
 
         public static async Task<Fixture> CreateAsync(bool https = false, long maxBody = 30 * 1024 * 1024, bool httpsUpstream = false, bool trustUpstream = true, string upstreamAuthority = "upstream.test",
-            string hostMode = "fixed", string? fixedHost = null, bool trustEntry = true, bool intermediateCertificate = false,
+            string hostMode = "fixed", string? fixedHost = null, bool trustEntry = true, EntryChain entryChain = EntryChain.RootSigned,
             int maxConnections = 10, int activityTimeoutSeconds = 120, int webSocketActivityTimeoutSeconds = 300, int maxWebSocketConnections = 0,
             IReadOnlyList<string>? stripRequestHeaders = null)
         {
@@ -335,23 +343,31 @@ public sealed class HttpProxyHostTests
             {
                 if (https) fixture.Origin = "https://panel.test";
                 Directory.CreateDirectory(fixture.resources);
+                // Schannel can cache peer intermediates across test processes.
+                var chainId = Guid.NewGuid().ToString("N");
+                var now = DateTimeOffset.UtcNow;
                 using var rootKey = RSA.Create(2048);
-                var rootRequest = new CertificateRequest("CN=RelayLink Test CA", rootKey, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+                var rootRequest = new CertificateRequest($"CN=RelayLink Test CA {chainId}", rootKey, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
                 rootRequest.CertificateExtensions.Add(new X509BasicConstraintsExtension(true, false, 0, true));
                 rootRequest.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.KeyCertSign, true));
-                fixture.root = rootRequest.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow.AddDays(1));
+                rootRequest.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(rootRequest.PublicKey, false));
+                fixture.root = rootRequest.CreateSelfSigned(now.AddMinutes(-1), now.AddDays(1));
                 using var key = RSA.Create(2048);
                 var request = new CertificateRequest("CN=panel.test", key, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
                 var san = new SubjectAlternativeNameBuilder(); san.AddDnsName("panel.test"); san.AddDnsName("upstream.test"); request.CertificateExtensions.Add(san.Build());
                 request.CertificateExtensions.Add(new X509BasicConstraintsExtension(false, false, 0, true));
                 using var intermediateKey = RSA.Create(2048);
-                var intermediateRequest = new CertificateRequest("CN=RelayLink Test Intermediate", intermediateKey, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+                var intermediateRequest = new CertificateRequest($"CN=RelayLink Test Intermediate {chainId}", intermediateKey, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
                 intermediateRequest.CertificateExtensions.Add(new X509BasicConstraintsExtension(true, false, 0, true));
                 intermediateRequest.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.KeyCertSign, true));
-                using var intermediate = intermediateRequest.Create(fixture.root, DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow.AddHours(2), RandomNumberGenerator.GetBytes(16));
+                intermediateRequest.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(intermediateRequest.PublicKey, false));
+                intermediateRequest.CertificateExtensions.Add(X509AuthorityKeyIdentifierExtension.CreateFromCertificate(fixture.root, includeKeyIdentifier: true, includeIssuerAndSerial: false));
+                using var intermediate = intermediateRequest.Create(fixture.root, now.AddMinutes(-1), now.AddHours(2), RandomNumberGenerator.GetBytes(16));
                 using var signer = intermediate.CopyWithPrivateKey(intermediateKey);
-                using var certificate = request.Create(intermediateCertificate ? signer : fixture.root, DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow.AddHours(1), RandomNumberGenerator.GetBytes(16));
-                await File.WriteAllTextAsync(Path.Combine(fixture.resources, "test.crt.pem"), certificate.ExportCertificatePem() + (intermediateCertificate ? "\n" + intermediate.ExportCertificatePem() : string.Empty));
+                var issuer = entryChain == EntryChain.RootSigned ? fixture.root : signer;
+                request.CertificateExtensions.Add(X509AuthorityKeyIdentifierExtension.CreateFromCertificate(issuer, includeKeyIdentifier: true, includeIssuerAndSerial: false));
+                using var certificate = request.Create(issuer, now.AddMinutes(-1), now.AddHours(1), RandomNumberGenerator.GetBytes(16));
+                await File.WriteAllTextAsync(Path.Combine(fixture.resources, "test.crt.pem"), certificate.ExportCertificatePem() + (entryChain == EntryChain.WithIntermediate ? "\n" + intermediate.ExportCertificatePem() : string.Empty));
                 await File.WriteAllTextAsync(Path.Combine(fixture.resources, "test.key.pem"), key.ExportPkcs8PrivateKeyPem());
                 await File.WriteAllTextAsync(Path.Combine(fixture.resources, "test.ca.pem"), fixture.root.ExportCertificatePem());
                 if (httpsUpstream)
@@ -440,7 +456,7 @@ public sealed class HttpProxyHostTests
             };
             if (fixture.root is not null && trustEntry)
             {
-                handler.SslOptions.CertificateChainPolicy = new X509ChainPolicy { TrustMode = X509ChainTrustMode.CustomRootTrust, RevocationMode = X509RevocationMode.NoCheck };
+                handler.SslOptions.CertificateChainPolicy = new X509ChainPolicy { TrustMode = X509ChainTrustMode.CustomRootTrust, RevocationMode = X509RevocationMode.NoCheck, DisableCertificateDownloads = true };
                 handler.SslOptions.CertificateChainPolicy.CustomTrustStore.Add(fixture.root);
             }
             fixture.Client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(10) };

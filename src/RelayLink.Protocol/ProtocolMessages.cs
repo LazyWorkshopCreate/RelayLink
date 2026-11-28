@@ -1,11 +1,21 @@
+using System.Text.Json.Serialization;
+
 namespace RelayLink.Protocol;
 
-public sealed record RegisterMessage(string ClientId, string Secret, string AgentVersion, string? E2eCertificateSha256 = null);
+public sealed record RegisterMessage(string ClientId, string Secret, string AgentVersion, string? E2eCertificateSha256 = null)
+{
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool RelayControlReady { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool MappingEncryptionStatus { get; init; }
+}
 public sealed record RegisterAcceptedMessage(Guid SessionId, string ConfigVersion, ClientConfigSnapshot Config, int HeartbeatIntervalSeconds, int HeartbeatTimeoutSeconds)
 {
     // Delivered at registration. Older peers ignore these fields. 0 disables TCP idle timeout.
     public int HalfCloseDrainTimeoutSeconds { get; init; } = 300;
     public int TcpIdleTimeoutSeconds { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool RelayControlReady { get; init; }
 }
 public sealed record ConfigAckMessage(Guid SessionId, string ConfigVersion);
 public sealed record ConfigUpdateMessage(Guid SessionId, string ConfigVersion, ClientConfigSnapshot Config);
@@ -29,10 +39,21 @@ public sealed record PeerOpenGrantedMessage(Guid RequestId, Guid ConnectionId, G
     // Sum of the server open timeout and the target channel connect timeout.
     // 0 means an older peer omitted the field.
     public int SetupTimeoutMilliseconds { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public PeerRelayBinding? RelayBinding { get; init; }
 }
 public sealed record PeerOpenMessage(Guid ConnectionId, Guid SessionId, string CallerClientId, string ChannelId, string Token, bool EndToEndEncryptionEnabled = true, string TransportProtocol = "tcp", HttpIngressContext? HttpIngress = null)
 {
     public int SetupTimeoutMilliseconds { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public PeerRelayBinding? RelayBinding { get; init; }
+}
+public sealed record PeerRelayBinding(Guid ConnectionId, Guid AttemptId, Guid CallerSessionId, Guid TargetSessionId,
+    string CallerClientId, string TargetClientId, string MappingId, string ChannelId, string TransportProtocol, bool EndToEndEncryptionEnabled);
+public sealed record PeerRelaySignal(PeerRelayBinding Binding, string HandshakeId)
+{
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public Guid? PreparationId { get; init; }
 }
 public sealed record PeerBindDataMessage(Guid ConnectionId, Guid SessionId, string Token, string Role);
 public sealed record PeerBindAcceptedMessage(Guid ConnectionId);
@@ -52,6 +73,8 @@ public sealed record OutboundMappingSnapshot(string MappingId, bool Enabled, str
 {
     public string ApplicationProtocol { get; init; } = "raw";
     public HttpPeerOptions? Http { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? EndToEndEncryptionEnabled { get; init; }
     public string TransportProtocol { get; init; } = "tcp";
     public int UdpIdleTimeoutSeconds { get; init; } = 60;
 }

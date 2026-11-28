@@ -669,5 +669,43 @@
         ]
       }
     ]
+  },
+  "v0.1.0-rc.16": {
+    "title": "RelayLink v0.1.0-rc.16",
+    "intro": "This release updates how authorized Agent connections establish a relay. An upgraded Server and both Agents confirm the same handshake over their control connections and wait for the target service to be ready before forwarding application data. The admin console and local Agent page distinguish encrypted relays, plaintext relays and connections whose encryption status is unknown.",
+    "sections": [
+      {
+        "title": "Changes",
+        "items": [
+          "Authorized TCP and unicast UDP connections support a new readiness exchange. The target verifies the access proof before preparing its service. The caller waits for confirmation before sending application data. A mismatched handshake, setup timeout or authorization change ends the attempt.",
+          "A slow control write to one target no longer holds up the caller's heartbeats or other connections. Admission rechecks the mapping, transport protocol and encryption mode. The application idle timer starts when the relay is activated. Audit records distinguish setup failures, revocations and normal completion.",
+          "The admin console displays the encryption mode negotiated for each connection. Turning off application encryption prompts a warning that the Server can read the payload. HTTP/HTTPS peer access requires encryption. The local Agent page counts usable entries, flags entries that need a restart and shows whether the Agent is connected to the Server. Addresses, ports and actions remain visible on narrow screens."
+        ]
+      },
+      {
+        "title": "Upgrade and compatibility",
+        "items": [
+          "Upgrade the Server first, then the calling and target Agents. The new relay handshake is used when all three support it. Connections involving an older endpoint use its readiness exchange and still enforce the access proof and the configured encryption policy.",
+          "Existing channel and mapping configurations are supported. Protocol v3 supports TCP. Unicast UDP requires v4 or later on both Agents, and HTTP/HTTPS peer access requires v5. When an older Server omits the encryption mode for a raw TCP or UDP entry, the interface displays it as unknown."
+        ]
+      },
+      {
+        "title": "Verification scope",
+        "items": [
+          "On Windows x64, 314 unit tests and 142 integration tests passed. The compatibility matrix uses released v3 and v4 Agents and an older v5 Server. Tests cover encrypted and plaintext UDP, invalid access proofs and how the first datagram is handled after target preparation fails.",
+          "Source repository GitHub Actions passed on merge commit `12d850e` for Linux, Windows, macOS arm64 and the website. All three platforms passed 314 unit tests. The standard integration suite passed 122 tests on Windows and 121 each on Linux and macOS. Each of the latter two runners skipped the loopback experiment because native QUIC support was unavailable.",
+          "A loopback experiment verified the QUIC handshake, data transfer and half-close. Application traffic in this release uses the Server relay. Direct P2P connections, automatic relay fallback and tests across two real NATs are planned work."
+        ]
+      },
+      {
+        "title": "Release assets",
+        "items": [
+          "Self-contained Server archives for Linux x64 and Windows x64.",
+          "Self-contained Agent archives for Linux x64, Intel macOS and Apple Silicon macOS.",
+          "Windows x64 Agent program archives and installers for both self-contained and framework-dependent builds.",
+          "`SHA256SUMS` lists the SHA-256 digests for all nine downloads."
+        ]
+      }
+    ]
   }
 }

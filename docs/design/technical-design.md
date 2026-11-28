@@ -2,8 +2,8 @@
 
 文档 ID：DES-001\
 状态：Draft（待评审）\
-版本：v2.26.1 设计评审稿\
-更新日期：2026-11-19\
+版本：v2.27.0 设计评审稿\
+更新日期：2026-11-27\
 调研日期：2026-09-15\
 配套文档：[需求文档索引](../requirements/README.md)
 
@@ -19,6 +19,8 @@
 - ASP.NET Core 提供内网只读页面和 JSON API；运行状态和计数保存在内存。
 
 这是本项目设计决策，不是声称存在一个原样满足所有要求的现成 .NET 产品。
+
+授权互访的可选直连方案尚在评审。Server 协调 NAT 穿透、加密与明文直连认证、按通道模式回退的设计见 [DES-011](peer-direct-and-relay.md)。
 
 UDP 使用来源会话与长度封装，复用独立 TCP 隧道；普通 TCP 原始复制保持不变。协议版本 4 的增量、超时、统计口径与兼容性见 [UDP 设计](udp-forwarding.md)。
 
@@ -267,6 +269,10 @@ Agent 主程序现在仅接受包含 `servers[]` 的新格式；配置示例见[
 | 14 | Error | 任一端→对端；code、可选的控制拒绝原因 reason，不含异常堆栈或秘密 |
 | 23 | HttpStatus | v5 Agent→Server，控制连接；sessionId、configVersion、channels（channelId、policyHash、state）；状态不能代替 ConfigAck |
 | 24 | HttpIngressReady | v5 Agent→Server，控制连接；connectionId；HTTP 宿主就绪，不代表 Web 上游连通，之后仍需 Start |
+| 25 | PeerRelayAuthenticated | 双端分别在 TLS 控制连接上确认同一个中继握手，须已协商 `relayControlReady` |
+| 26 | PeerRelayPrepare | Server 核对双方回执和当前授权后，向目标发送携带一次性 `preparationId` 的拨号许可 |
+| 27 | PeerRelayTargetReady | 目标准备成功后向 Server 回显许可，Server 经访问方控制连接确认同一次尝试 |
+| 28 | PeerRelayAborted | 参与端终止本次中继建立，或 Server 通知端点取消等待 |
 | 32 | Data | 仅互访数据中继；按通道模式承载内层 TLS 记录或明文业务块 |
 | 33 | Fin | 仅互访数据中继；该发送方向结束 |
 | 34 | Reset | 仅互访数据中继；异常终止 |

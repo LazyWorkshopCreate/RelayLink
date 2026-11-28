@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mappingTools } from "./mapping-tools.ts";
+import { mappingPresence, mappingTools } from "./mapping-tools.ts";
 
 const raw = {
     enabled: true,
@@ -8,6 +8,34 @@ const raw = {
     transportProtocol: "tcp",
     localAddress: "127.0.0.1:13389",
 };
+
+test("counts bound raw entries and only usable HTTP entries on an online server", () => {
+    const http = {
+        ...raw,
+        applicationProtocol: "http",
+        httpState: "ready",
+        accessUrl: "https://panel.example.test:13389/",
+    };
+    assert.equal(mappingPresence(raw, false), "offline");
+    assert.equal(
+        mappingPresence({ ...raw, transportProtocol: "udp" }, true),
+        "online",
+    );
+    assert.equal(mappingPresence({ ...raw, enabled: false }, true), "disabled");
+    assert.equal(
+        mappingPresence({ ...raw, localAddress: null }, true),
+        "offline",
+    );
+    assert.equal(mappingPresence(http, true), "online");
+    for (const mapping of [
+        { ...http, httpState: "restart_required" },
+        { ...http, httpState: "resource_unavailable" },
+        { ...http, accessUrl: null },
+        { ...http, accessUrl: "https://panel.example.test:4321/" },
+    ]) {
+        assert.equal(mappingPresence(mapping, true), "offline");
+    }
+});
 
 test("maps a raw TCP entry to native tools with an address-only RDP file", () => {
     assert.deepEqual(mappingTools(raw, true), {
